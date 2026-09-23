@@ -1,0 +1,725 @@
+#!/usr/bin/env python3
+"""
+AgentDrop — one set of working rules across Claude Code, Codex, OpenCode,
+Command Code and Gemini CLI, without overwriting harness-specific instructions.
+
+Usage:
+  agentdrop                    Bootstrap/sync the current directory after confirmation
+  agentdrop --install          Install command + sync global rules
+  agentdrop sync               Re-sync global rules after editing COMMON.md
+  agentdrop edit               Open the master COMMON.md
+
+Project skeleton (docs/, charter, review-intake skill, docs guard) lives at:
+  ~/.agentdrop/kit/   — CHARTER.md goes into AGENTS.md, other files are copied if missing
+  agentdrop /path/to/project   Bootstrap/sync a project
+  agentdrop .                  Bootstrap/sync current project without the extra cwd prompt
+  agentdrop --dry-run [PATH]   Preview changes; defaults to the current directory
+
+The master rules live at:
+  ~/.agentdrop/COMMON.md
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import platform
+import re
+import shutil
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+HOME = Path.home()
+STATE = HOME / ".agentdrop"
+COMMON = STATE / "COMMON.md"
+BACKUPS = STATE / "backups"
+KIT = STATE / "kit"            # project skeleton: docs/, skill, guard; files copied only if missing
+CHARTER = KIT / "CHARTER.md"   # generic charter, goes into AGENTS.md managed block
+LEGACY_FILES = ("HANDOFF.md", "PROGRESS.md", "PITFALLS.md", "PROJECT_CONTEXT.md")
+KIT_SKIP = {"CHARTER.md", ".claude/settings.json"}
+STOP_HOOK_CMD = '"$CLAUDE_PROJECT_DIR"/scripts/check_docs.sh --stop-hook'
+
+GLOBAL_START = "<!-- AGENTDROP:COMMON:START -->"
+GLOBAL_END = "<!-- AGENTDROP:COMMON:END -->"
+PROJECT_START = "<!-- AGENTDROP:PROJECT:START -->"
+PROJECT_END = "<!-- AGENTDROP:PROJECT:END -->"
+ROUTING_START = "<!-- AGENTDROP:SENIOR-ROUTING:START -->"
+ROUTING_END = "<!-- AGENTDROP:SENIOR-ROUTING:END -->"
+TOOLS_START = "<!-- AGENTDROP:TOOL-EFFICIENCY:START -->"
+TOOLS_END = "<!-- AGENTDROP:TOOL-EFFICIENCY:END -->"
+
+TOOL_EFFICIENCY_BLOCK = """## Tool efficiency
+- Use: **narrow search → symbol → minimal range → edit → short diff**.
+- Start with `rg`/`fd`; use `ast-grep` for code structure and Serena for definitions, references, callers, and cross-file work. Use shell for simple reads/searches.
+- Keep tool output small: target **≤200 lines / ~20 KB per step** unless more is genuinely needed. Bound output with `--max-count`, context lines, `-q`, `--stat`; write large logs to files and query them with `rg`.
+- Parse instead of reading raw data: `jq` (JSON), `yq` (YAML/TOML/XML), `qsv`/`mlr` (CSV/TSV), `jc`/`gron` when useful.
+- For new Python work use `uv` + Ruff. In existing projects preserve the existing package manager, environment, formatter, type checker, test commands, and lockfiles.
+- Validate incrementally: changed files → focused tests → broader checks only when warranted. Inspect `git diff --stat` before a minimal path-scoped diff.
+- Use efficient task-specific tools when useful: `xh`, `difft`, `gh`, `hyperfine`, `watchexec`, `mise`, `just`, `typos`, `tokei`, `dust`, `procs`.
+- Do not use an LLM for information a search, parser, compiler, type checker, test, or benchmark can answer directly."""
+
+SENIOR_ROUTING_BLOCK = """## Model roles
+- Senior models own irreversible or high-leverage decisions, architecture, specification boundaries, and final acceptance. Do not use them as continuous coordinators.
+- Delegate implementation in large coherent chunks, not tiny tasks. Workers should resolve routine implementation details autonomously.
+- Senior review should normally happen once per milestone or final diff. Give the reviewer a concise change summary plus targeted files, diffs, test results, and artifacts; do not make it re-read the whole project.
+- Escalate back to a senior model only for architectural ambiguity, conflicting constraints, security or data-loss risk, or failed acceptance.
+- Do not ask a senior model to review routine intermediate work that can be verified mechanically by tests, builds, or E2E checks.
+"""
+
+DEFAULT_COMMON = """# Working rules
+
+## Work with me
+- Treat me primarily as an end user / product manager, not as the developer executing your instructions.
+- Lead with the result, decision, or blocker. Keep explanations concise and use plain language.
+- Explain unfamiliar technical terms briefly on first use.
+- Infer intent from the request, conversation, repository, and existing project context. Assume dictated prompts may contain rough wording.
+- Apply later corrections over earlier instructions.
+- Ask only when missing information materially changes the outcome and cannot be inferred.
+- Make reasonable, reversible decisions yourself.
+
+## Execute
+- Carry work through implementation, integration, and verification. Do not stop at a plan, snippet, passing build, or intermediate artifact when the usable outcome requires more.
+- Do routine developer work yourself. Do not make me create fixtures, edit configs, run routine commands, coordinate agents, or debug your work when you can do it.
+- Inspect the existing system before changing it. Reuse existing tools, components, conventions, and dependencies when sensible.
+- Prefer the smallest complete solution. Avoid speculative refactors, premature abstractions, unnecessary infrastructure, and hypothetical future requirements.
+- Prefer a mature existing/open-source solution over quickly building a custom one when it fits.
+- Consult official documentation when APIs, compatibility, or behavior are uncertain.
+- Find the cause before applying fixes. Preserve working behavior unless the task requires changing it.
+
+<!-- AGENTDROP:TOOL-EFFICIENCY:START -->
+## Tool efficiency
+- Use: **narrow search → symbol → minimal range → edit → short diff**.
+- Start with `rg`/`fd`; use `ast-grep` for code structure and Serena for definitions, references, callers, and cross-file work. Use shell for simple reads/searches.
+- Keep tool output small: target **≤200 lines / ~20 KB per step** unless more is genuinely needed. Bound output with `--max-count`, context lines, `-q`, `--stat`; write large logs to files and query them with `rg`.
+- Parse instead of reading raw data: `jq` (JSON), `yq` (YAML/TOML/XML), `qsv`/`mlr` (CSV/TSV), `jc`/`gron` when useful.
+- For new Python work use `uv` + Ruff. In existing projects preserve the existing package manager, environment, formatter, type checker, test commands, and lockfiles.
+- Validate incrementally: changed files → focused tests → broader checks only when warranted. Inspect `git diff --stat` before a minimal path-scoped diff.
+- Use efficient task-specific tools when useful: `xh`, `difft`, `gh`, `hyperfine`, `watchexec`, `mise`, `just`, `typos`, `tokei`, `dust`, `procs`.
+- Do not use an LLM for information a search, parser, compiler, type checker, test, or benchmark can answer directly.
+<!-- AGENTDROP:TOOL-EFFICIENCY:END -->
+
+## Product, data, and UI
+- Treat UI quality as part of implementation. Inspect the real rendered product and important states/interactions.
+- For data/research, answer the practical question, not only the methodology. Look for mechanisms, regime changes, interactions, anomalies, and useful failure modes.
+- Separate evidence from interpretation. Do not invent certainty, but do not hide behind excessive academic caution.
+- Translate findings into concrete actions and useful deliverables.
+
+## Test and verify
+- Test behavior the user actually relies on, not implementation details.
+- Strongly prefer end-to-end checks for user-facing features and important workflows.
+- Make important E2E checks repeatable and inspectable; leave screenshots, traces/reports, generated outputs, or before/after measurements when practical.
+- Do not write unit tests merely for coverage. Use focused unit/integration tests when they are the strongest simple check for complex logic, calculations, parsers, transformations, edge cases, or regressions.
+- Before tricky isolated logic, identify important failure modes, invalid states, edge cases, and invariants.
+- For reproducible bugs: reproduce -> create a repeatable check -> fix the cause -> rerun the same check.
+- Verify the real user outcome yourself. Never say "should work" when you can test it.
+
+## Project memory and Git
+- Treat project documentation and iterative Git commits as part of the work.
+- Read existing PROJECT_CONTEXT, HANDOFF, PROGRESS, TODO, PITFALLS, and project instruction files before substantial work.
+- Keep `PROJECT_CONTEXT.md` as compact durable memory: only non-obvious decisions, constraints, current state, and pitfalls a cold agent would otherwise need to rediscover; refresh it at natural checkpoints, especially before compact/end/task switch. Do not use it as a log.
+- Keep project memory short, factual, and current. Record decisions another cold agent would otherwise need to rediscover.
+- Commit coherent working iterations: not every tiny edit, and not one giant commit at the end.
+- Never commit secrets, credentials, temporary files, large generated artifacts, or unrelated changes.
+- After major features, architectural changes, difficult debugging, or when asked, refresh HANDOFF.md for a cold agent with zero conversation history.
+- Before ending substantial work: update project memory/TODO/pitfalls, commit the completed iteration, and refresh the handoff when appropriate.
+
+## Delegation
+- Work autonomously within scope. Do not make me coordinate agents.
+- Delegate substantial implementation as large, coherent chunks with a clear goal, constraints, acceptance criteria, and expected artifact.
+- Give workers enough context to finish independently; let them resolve routine implementation details autonomously within the agreed architecture and scope.
+- Prefer one capable worker completing a coherent chunk over many workers handling tiny tasks.
+- Keep final acceptance with the senior model, but avoid repeated review loops unless acceptance fails or a real escalation condition appears.
+
+<!-- AGENTDROP:SENIOR-ROUTING:START -->
+## Model roles
+- Senior models own irreversible or high-leverage decisions, architecture, specification boundaries, and final acceptance. Do not use them as continuous coordinators.
+- Delegate implementation in large coherent chunks, not tiny tasks. Workers should resolve routine implementation details autonomously.
+- Senior review should normally happen once per milestone or final diff. Give the reviewer a concise change summary plus targeted files, diffs, test results, and artifacts; do not make it re-read the whole project.
+- Escalate back to a senior model only for architectural ambiguity, conflicting constraints, security or data-loss risk, or failed acceptance.
+- Do not ask a senior model to review routine intermediate work that can be verified mechanically by tests, builds, or E2E checks.
+
+<!-- AGENTDROP:SENIOR-ROUTING:END -->
+
+## Environment
+- Make local services easy to start, stop, restart, and diagnose.
+- Check existing services and ports before starting new ones. Never kill unrelated processes.
+
+## Defaults
+Prefer simple over clever; working over theoretically perfect; existing solutions over unnecessary custom code; reversible decisions over premature commitment; measured bottlenecks over guessed ones; real verification over confidence; finished user outcomes over technically interesting intermediate states.
+"""
+
+PROJECT_BLOCK = """## Agent workflow
+
+- Read `PROJECT_CONTEXT.md`, `HANDOFF.md`, `PROGRESS.md`, `TODO.md`, and `PITFALLS.md` before substantial work.
+- Keep `PROJECT_CONTEXT.md` as compact durable memory of non-obvious decisions, constraints, current state, and pitfalls; refresh it at natural checkpoints, especially before compact/end/task switch. Never use it as a log.
+- Keep project memory concise and current while working; do not wait until the end.
+- After a major feature, architectural change, difficult debugging session, or explicit request, refresh `HANDOFF.md` for a cold agent with zero conversation history.
+- Make Git commits after coherent working iterations.
+- Before ending substantial work: update project memory, TODOs and pitfalls; verify the result; commit the finished iteration; refresh the handoff when appropriate.
+- Preserve and obey any existing project- or harness-specific instructions in this repository.
+"""
+
+TEMPLATES = {
+    "PROJECT_CONTEXT.md": """# PROJECT CONTEXT
+
+## Current state
+- TODO
+
+## Decisions / constraints
+- TODO
+
+## Pitfalls / non-obvious facts
+- TODO
+
+## Next
+- TODO
+""",
+    "HANDOFF.md": """# HANDOFF
+
+> Keep this concise and sufficient for a cold agent with zero conversation history.
+
+## Goal
+- TODO
+
+## Current state
+- TODO
+
+## Architecture / entry points
+- TODO
+
+## Important decisions
+- TODO
+
+## Verified
+- TODO
+
+## Known issues / pitfalls
+- See `PITFALLS.md`.
+
+## Next concrete step
+- See `TODO.md`.
+""",
+    "PROGRESS.md": """# PROGRESS
+
+## Current state
+- Project memory initialized.
+
+## Completed
+- TODO
+
+## Decisions
+- TODO
+""",
+    "TODO.md": """# TODO
+
+## Now
+- TODO
+
+## Next
+- TODO
+
+## Later
+- TODO
+""",
+    "PITFALLS.md": """# PITFALLS
+
+Record bugs, failed approaches, environment quirks, traps, and things a future agent should not repeat.
+
+- None recorded yet.
+""",
+}
+
+
+def now_stamp() -> str:
+    return dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def ensure_state() -> None:
+    STATE.mkdir(parents=True, exist_ok=True)
+    BACKUPS.mkdir(parents=True, exist_ok=True)
+    bundled = Path(__file__).resolve().parent / "kit"
+    if not KIT.exists() and bundled.is_dir():
+        shutil.copytree(bundled, KIT)
+    if not COMMON.exists():
+        COMMON.write_text(DEFAULT_COMMON.rstrip() + "\n", encoding="utf-8")
+        return
+
+    # Migrate managed blocks without replacing the user's own edits.
+    existing = COMMON.read_text(encoding="utf-8", errors="replace")
+    migrated = existing
+
+    routing_block = f"{ROUTING_START}\n{SENIOR_ROUTING_BLOCK.rstrip()}\n{ROUTING_END}"
+    routing_pattern = re.compile(re.escape(ROUTING_START) + r".*?" + re.escape(ROUTING_END), re.S)
+    if not routing_pattern.search(migrated):
+        env_heading = "\n## Environment"
+        if env_heading in migrated:
+            migrated = migrated.replace(env_heading, "\n\n" + routing_block + env_heading, 1)
+        else:
+            migrated = migrated.rstrip() + "\n\n" + routing_block + "\n"
+
+    tools_block = f"{TOOLS_START}\n{TOOL_EFFICIENCY_BLOCK.rstrip()}\n{TOOLS_END}"
+    tools_pattern = re.compile(re.escape(TOOLS_START) + r".*?" + re.escape(TOOLS_END), re.S)
+    if not tools_pattern.search(migrated):
+        product_heading = "\n## Product, data, and UI"
+        if product_heading in migrated:
+            migrated = migrated.replace(product_heading, "\n\n" + tools_block + product_heading, 1)
+        else:
+            migrated = migrated.rstrip() + "\n\n" + tools_block + "\n"
+
+    if migrated != existing:
+        backup_dir = BACKUPS / now_stamp()
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(COMMON, backup_dir / "COMMON.md")
+        COMMON.write_text(migrated, encoding="utf-8")
+
+
+def backup(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        rel = path.resolve().relative_to(HOME.resolve())
+        dest = BACKUPS / now_stamp() / rel
+    except Exception:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(path))
+        dest = BACKUPS / now_stamp() / safe
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, dest)
+
+
+def read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="utf-8", errors="replace")
+
+
+def write(path: Path, text: str, dry: bool = False) -> bool:
+    old = read(path) if path.exists() else None
+    if old == text:
+        return False
+    if dry:
+        return True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        backup(path)
+    path.write_text(text, encoding="utf-8")
+    return True
+
+
+def managed_merge(
+    path: Path,
+    payload: str,
+    start: str,
+    end: str,
+    dry: bool = False,
+    position: str = "end",
+) -> tuple[bool, str]:
+    """Replace our managed block if present; otherwise add it without touching existing text."""
+    existing = read(path) if path.exists() else ""
+    block = f"{start}\n{payload.rstrip()}\n{end}"
+
+    pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.S)
+    if pattern.search(existing):
+        merged = pattern.sub(block, existing, count=1)
+        action = "updated managed block"
+    elif existing.strip():
+        if position == "start":
+            merged = block + "\n\n" + existing.lstrip()
+        else:
+            merged = existing.rstrip() + "\n\n" + block + "\n"
+        action = "preserved existing + added managed block"
+    else:
+        merged = block + "\n"
+        action = "created"
+
+    return write(path, merged, dry), action
+
+
+def ensure_import(path: Path, import_line: str, dry: bool = False) -> tuple[bool, str]:
+    """
+    Preserve harness-specific instructions and only add an import if AGENTS.md is not
+    already imported/referenced with an @ import.
+    """
+    existing = read(path) if path.exists() else ""
+    # Detect equivalent @ imports, allowing spaces and relative variants.
+    target_name = "AGENTS.md"
+    import_re = re.compile(r"(?m)^\s*@(?:\./|\.\./)*AGENTS\.md\s*$", re.I)
+    if import_re.search(existing):
+        return False, "already imports AGENTS.md"
+
+    if existing.strip():
+        new = import_line.rstrip() + "\n\n" + existing.lstrip()
+        action = "preserved existing + added AGENTS import"
+    else:
+        new = import_line.rstrip() + "\n"
+        action = "created import shim"
+
+    return write(path, new, dry), action
+
+
+def detect_stack(root: Path) -> str:
+    bits = []
+    if (root / "package.json").exists():
+        try:
+            data = json.loads(read(root / "package.json"))
+            pm = "Node"
+            if (root / "pnpm-lock.yaml").exists():
+                pm += "/pnpm"
+            elif (root / "yarn.lock").exists():
+                pm += "/Yarn"
+            elif (root / "bun.lockb").exists() or (root / "bun.lock").exists():
+                pm += "/Bun"
+            elif (root / "package-lock.json").exists():
+                pm += "/npm"
+            bits.append(pm)
+        except Exception:
+            bits.append("Node")
+    if (root / "pyproject.toml").exists() or (root / "requirements.txt").exists():
+        bits.append("Python")
+    if (root / "Cargo.toml").exists():
+        bits.append("Rust")
+    if (root / "go.mod").exists():
+        bits.append("Go")
+    if (root / "Gemfile").exists():
+        bits.append("Ruby")
+    if (root / "composer.json").exists():
+        bits.append("PHP")
+    return ", ".join(bits) if bits else "not inferred"
+
+
+def git_info(root: Path) -> tuple[bool, str]:
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            text=True, capture_output=True, timeout=3
+        )
+        if r.returncode != 0:
+            return False, ""
+        b = subprocess.run(
+            ["git", "-C", str(root), "branch", "--show-current"],
+            text=True, capture_output=True, timeout=3
+        )
+        return True, b.stdout.strip() or "(detached)"
+    except Exception:
+        return False, ""
+
+
+def sync_globals(dry: bool = False) -> None:
+    ensure_state()
+    common = read(COMMON).rstrip()
+
+    print("\nGlobal harness rules")
+    print("--------------------")
+
+    # Claude: dedicated user rule avoids touching the user's existing CLAUDE.md.
+    claude_rule = HOME / ".claude" / "rules" / "agentdrop-common.md"
+    changed = write(claude_rule, common + "\n", dry)
+    print(f"{'✓' if changed else '·'} Claude Code   {claude_rule}  "
+          f"({'would update' if dry and changed else 'synced' if changed else 'unchanged'})")
+
+    # Codex: AGENTS.override.md shadows AGENTS.md, so merge into the active one.
+    codex_override = HOME / ".codex" / "AGENTS.override.md"
+    codex_base = HOME / ".codex" / "AGENTS.md"
+    codex_target = codex_override if codex_override.exists() else codex_base
+    changed, action = managed_merge(
+        codex_target, common, GLOBAL_START, GLOBAL_END, dry=dry
+    )
+    note = " (override detected)" if codex_target == codex_override else ""
+    print(f"{'✓' if changed else '·'} Codex         {codex_target}{note} — {action}")
+
+    targets = [
+        ("OpenCode", HOME / ".config" / "opencode" / "AGENTS.md"),
+        ("Command Code", HOME / ".commandcode" / "AGENTS.md"),
+        ("Gemini CLI", HOME / ".gemini" / "GEMINI.md"),
+    ]
+    for name, path in targets:
+        changed, action = managed_merge(path, common, GLOBAL_START, GLOBAL_END, dry=dry)
+        print(f"{'✓' if changed else '·'} {name:<13} {path} — {action}")
+
+    print(f"\nMaster rules: {COMMON}")
+    if not dry:
+        print("Edit that one file, then run:  agentdrop sync")
+
+
+def project_template_with_meta(name: str, body: str, root: Path) -> str:
+    if name != "HANDOFF.md":
+        return body
+    stack = detect_stack(root)
+    is_git, branch = git_info(root)
+    meta = (
+        f"# HANDOFF\n\n"
+        f"> Cold-agent handoff. Keep concise and current.\n\n"
+        f"## Project\n"
+        f"- Name: `{root.name}`\n"
+        f"- Stack: {stack}\n"
+    )
+    if is_git:
+        meta += f"- Git branch at bootstrap: `{branch}`\n"
+    meta += "\n"
+    return meta + body.split("\n", 3)[-1] if body.startswith("# HANDOFF") else body
+
+
+def uses_kit(root: Path) -> bool:
+    """Kit layout unless the project already runs on the old root-level memory files."""
+    if not CHARTER.exists():
+        return False
+    if (root / "docs" / "STATE.md").exists():
+        return True
+    return not any((root / f).exists() for f in LEGACY_FILES)
+
+
+def copy_kit(root: Path, dry: bool = False) -> None:
+    for src in sorted(KIT.rglob("*")):
+        rel = src.relative_to(KIT).as_posix()
+        if src.is_dir() or rel in KIT_SKIP or src.name == ".DS_Store":
+            continue
+        dest = root / rel
+        if dest.exists():
+            continue
+        if not dry:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+        print(f"✓ {rel:<40} — {'would create' if dry else 'created'}")
+
+
+def ensure_stop_hook(root: Path, dry: bool = False) -> None:
+    path = root / ".claude" / "settings.json"
+    try:
+        data = json.loads(read(path)) if path.exists() else {}
+    except json.JSONDecodeError:
+        print(f"! {path.relative_to(root)} — not valid JSON, Stop hook not added")
+        return
+    stops = data.setdefault("hooks", {}).setdefault("Stop", [])
+    if any("check_docs.sh" in h.get("command", "") for g in stops for h in g.get("hooks", [])):
+        print("· .claude/settings.json                   — Stop hook present")
+        return
+    stops.append({"hooks": [{"type": "command", "command": STOP_HOOK_CMD}]})
+    write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n", dry)
+    print(f"✓ .claude/settings.json                   — {'would add' if dry else 'added'} Stop hook")
+
+
+def ensure_hooks_path(root: Path, dry: bool = False) -> None:
+    r = subprocess.run(["git", "-C", str(root), "config", "core.hooksPath"],
+                       text=True, capture_output=True)
+    current = r.stdout.strip()
+    if current == ".githooks":
+        print("· git core.hooksPath                      — already .githooks")
+    elif current:
+        print(f"! git core.hooksPath is '{current}' — left as is; .githooks/pre-commit not active")
+    else:
+        if not dry:
+            subprocess.run(["git", "-C", str(root), "config", "core.hooksPath", ".githooks"], check=True)
+        print(f"✓ git core.hooksPath = .githooks          — {'would set' if dry else 'set'}")
+
+
+def bootstrap_project(root: Path, dry: bool = False) -> None:
+    ensure_state()
+    root = root.expanduser().resolve()
+    if not root.exists():
+        if dry:
+            print(f"Would create directory: {root}")
+        else:
+            root.mkdir(parents=True)
+    if not root.is_dir():
+        raise SystemExit(f"Not a directory: {root}")
+
+    print(f"\nProject: {root}")
+    print("-" * min(80, len(str(root)) + 9))
+
+    # Make the project's AGENTS.md self-contained: full common rules + project workflow.
+    # Existing project-specific content outside our managed block is preserved.
+    agents = root / "AGENTS.md"
+    common = read(COMMON).rstrip()
+    kit = uses_kit(root)
+    workflow = read(CHARTER) if kit else PROJECT_BLOCK
+    project_payload = common + "\n\n" + workflow.rstrip()
+    if kit and not agents.exists() and not dry:
+        agents.write_text(
+            f"# {root.name} — устав для агента\n\n"
+            "_Что это за проект — одна-две фразы. Правила, которые в этом проекте ломают доверие,\n"
+            "и всё своё — здесь, над управляемым блоком. Блок ниже обновляет `agentdrop`._\n",
+            encoding="utf-8",
+        )
+    changed, action = managed_merge(
+        agents, project_payload, PROJECT_START, PROJECT_END, dry=dry
+    )
+    print(f"{'✓' if changed else '·'} AGENTS.md      — {action}")
+
+    # Claude heuristic:
+    # - If the repo already has CLAUDE.md, preserve it and import AGENTS.md.
+    # - Otherwise create a tiny hidden shim so older Claude Code / disabled AGENTS support
+    #   still sees AGENTS.md, without polluting the root with another full instruction file.
+    root_claude = root / "CLAUDE.md"
+    hidden_claude = root / ".claude" / "CLAUDE.md"
+    if root_claude.exists():
+        cpath, import_line = root_claude, "@AGENTS.md"
+    elif hidden_claude.exists():
+        cpath, import_line = hidden_claude, "@../AGENTS.md"
+    else:
+        cpath, import_line = hidden_claude, "@../AGENTS.md"
+    changed, action = ensure_import(cpath, import_line, dry=dry)
+    print(f"{'✓' if changed else '·'} Claude bridge  {cpath.relative_to(root)} — {action}")
+
+    # Gemini does not use AGENTS.md by default; import it into its project context.
+    gemini = root / "GEMINI.md"
+    changed, action = ensure_import(gemini, "@AGENTS.md", dry=dry)
+    print(f"{'✓' if changed else '·'} Gemini bridge  GEMINI.md — {action}")
+
+    is_git_repo, _ = git_info(root)
+    if kit:
+        copy_kit(root, dry=dry)
+        ensure_stop_hook(root, dry=dry)
+        if is_git_repo:
+            ensure_hooks_path(root, dry=dry)
+    elif CHARTER.exists():
+        print("! Old layout (root HANDOFF/PROGRESS/...): docs/ kit not applied.")
+        print("  To migrate, ask the agent: «переведи доки проекта на структуру docs/ из ~/.agentdrop/kit», then run agentdrop again.")
+
+    # Old layout only: create root memory docs if missing. Never overwrite project state.
+    for filename, body in ({} if kit else TEMPLATES).items():
+        path = root / filename
+        if path.exists():
+            print(f"· {filename:<14} — preserved existing")
+            continue
+        content = project_template_with_meta(filename, body, root)
+        if not dry:
+            path.write_text(content.rstrip() + "\n", encoding="utf-8")
+        print(f"✓ {filename:<14} — {'would create' if dry else 'created'}")
+
+    # Report other instruction systems without trying to mash incompatible formats together.
+    known = [
+        root / ".github" / "copilot-instructions.md",
+        root / ".cursorrules",
+        root / ".windsurfrules",
+        root / ".clinerules",
+        root / ".cursor" / "rules",
+        root / ".windsurf" / "rules",
+    ]
+    found = [p for p in known if p.exists()]
+    if found:
+        print("\nDetected extra harness-specific instructions; left untouched:")
+        for p in found:
+            print(f"  · {p.relative_to(root)}")
+
+    is_git, branch = git_info(root)
+    if is_git:
+        print(f"\nGit repository detected (branch: {branch}).")
+        print("Project memory files are intentionally left trackable; the agent can commit them with the next coherent iteration.")
+    else:
+        print("\nNo Git repository detected. AgentDrop does not initialize Git automatically.")
+
+    if dry:
+        print("\nDry run only — nothing was changed.")
+    else:
+        print("\nDone. Open this folder in any harness; its own existing instructions were preserved.")
+
+
+def install_self(dry: bool = False) -> None:
+    ensure_state()
+    src = Path(__file__).resolve()
+    bindir = HOME / ".local" / "bin"
+    dest = bindir / "agentdrop"
+
+    if dry:
+        print(f"Would install {src} -> {dest}")
+        sync_globals(dry=True)
+        return
+
+    bindir.mkdir(parents=True, exist_ok=True)
+    if dest.exists() and dest.resolve() != src:
+        backup(dest)
+    if dest.resolve() != src:
+        shutil.copy2(src, dest)
+    dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    # macOS default shell is zsh. Add ~/.local/bin to PATH only when needed.
+    path_parts = os.environ.get("PATH", "").split(os.pathsep)
+    if str(bindir) not in path_parts:
+        zshrc = HOME / ".zshrc"
+        start = "# >>> agentdrop PATH >>>"
+        end = "# <<< agentdrop PATH <<<"
+        payload = 'export PATH="$HOME/.local/bin:$PATH"'
+        managed_merge(zshrc, payload, start, end, dry=False)
+
+    print(f"Installed: {dest}")
+    sync_globals(dry=False)
+    print("\nOpen a new Terminal window, then use:")
+    print("  cd ~/Projects/MyProject && agentdrop")
+    print("or:")
+    print("  agentdrop ~/Projects/MyProject")
+
+
+def open_common() -> None:
+    ensure_state()
+    if platform.system() == "Darwin":
+        subprocess.run(["open", "-e", str(COMMON)])
+    elif platform.system() == "Windows":
+        os.startfile(str(COMMON))  # type: ignore[attr-defined]
+    else:
+        editor = os.environ.get("EDITOR")
+        if editor:
+            subprocess.run([editor, str(COMMON)])
+        else:
+            print(COMMON)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Deploy shared AI-agent rules without overwriting harness-specific instructions."
+    )
+    parser.add_argument("target", nargs="?", help="Project directory, or one of: sync, edit")
+    parser.add_argument("--install", action="store_true", help="Install agentdrop command and sync global rules")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would change")
+    args = parser.parse_args()
+
+    if args.install:
+        install_self(dry=args.dry_run)
+        return
+
+    if args.target in ("sync", "global"):
+        sync_globals(dry=args.dry_run)
+        return
+
+    if args.target in ("edit", "common"):
+        open_common()
+        return
+
+    if not args.target:
+        cwd = Path.cwd().resolve()
+
+        # `agentdrop --dry-run` is deliberately non-interactive and previews CWD.
+        if args.dry_run:
+            bootstrap_project(cwd, dry=True)
+            return
+
+        print(f"\nAgentDrop will bootstrap/sync the current directory:\n  {cwd}\n")
+        print("It will:")
+        print("  - preserve existing harness/project instructions")
+        print("  - put the full shared rules + project workflow into AGENTS.md")
+        print("  - add/update harness bridges without overwriting their own instructions")
+        print("  - create missing docs/ skeleton, review-intake skill and docs guard (~/.agentdrop/kit)")
+        print("  - back up any existing file before AgentDrop changes it")
+        print("\nIt will NOT initialize Git, commit automatically, or overwrite project memory.")
+
+        try:
+            answer = input("\nProceed? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            return
+
+        if answer not in {"y", "yes"}:
+            print("Cancelled.")
+            return
+
+        bootstrap_project(cwd, dry=False)
+        return
+
+    bootstrap_project(Path(args.target), dry=args.dry_run)
+
+
+if __name__ == "__main__":
+    main()
