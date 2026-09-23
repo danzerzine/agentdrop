@@ -1,12 +1,11 @@
-# STATE — что есть на самом деле
+# STATE — what is actually true now
 
-_Снимок на ДД.ММ.ГГГГ. Переписывать целиком, когда картина меняется; история — в git,
-`LOG.md` и `archive/`._
+_Snapshot as of DD.MM.YYYY. Rewrite whole when the picture changes; history is in git, `LOG.md` and `archive/`._
 
-## Коротко
+## Summary
 
-## Работает
+## Works
 
-## Наполовину
+## Half-done
 
-## Сломано
+## Broken

@@ -1,4 +1,3 @@
-# research — справочные исследования
+# research — reference studies
 
-Материал, на который опираются решения: замеры, сверки, внешние данные. У каждого числа —
-источник и дата.
+Material that decisions rest on: measurements, reconciliations, external data. Every number has a source and a date.

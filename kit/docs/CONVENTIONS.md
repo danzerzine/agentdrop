@@ -1,12 +1,12 @@
-# CONVENTIONS — как здесь принято делать
+# CONVENTIONS — how we do things here
 
-_Правила, которые действуют всегда. Почему они такие — в `DECISIONS.md`._
+_Rules that always apply. The reasons live in `DECISIONS.md`._
 
-## Правила, нарушение которых ломает доверие
+## Rules that break trust when violated
 
-## Код и проверки
+## Code and checks
 
 ## Git
 
-- Сообщения коммитов по-русски, без приписок об ИИ. Коммитить только свои файлы.
-- Проверка документов при коммите: `git config core.hooksPath .githooks` (один раз на клон).
+- Commit only your own files, no AI attribution.
+- Docs guard on commit: `git config core.hooksPath .githooks` (once per clone).

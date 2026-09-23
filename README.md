@@ -65,9 +65,9 @@ The managed block in `AGENTS.md` holds your common rules plus a charter. The cha
 
 ## Reviews without the mess
 
-You ask three models to critique the project and end up with three overlapping markdown files in random places. Drop them anywhere, then tell Claude Code:
+You ask three models to critique the project and end up with three overlapping markdown files in random places. Drop them anywhere, then tell your agent:
 
-> разбери ревью (review the reviews)
+> process the reviews
 
 The `review-intake` skill then works in two steps:
 
@@ -80,7 +80,6 @@ The `review-intake` skill then works in two steps:
 
 - **Rules:** `agentdrop edit`, then `agentdrop sync`.
 - **Charter and templates:** edit files in `~/.agentdrop/kit/`, then run `agentdrop .` in a project. Only missing files are copied; the charter block is refreshed every time.
-- **Language:** the kit ships in Russian, the author's working language. Translating `kit/` into your language only changes content, so the script works the same.
 
 ## Older layouts
 

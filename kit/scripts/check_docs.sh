@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Сторож документации: md-файлы только в местах из карты AGENTS.md.
-#   scripts/check_docs.sh              всё дерево; выход 2 — есть лишние файлы
-#   scripts/check_docs.sh --staged     только добавляемое в коммит (pre-commit)
-#   scripts/check_docs.sh --stop-hook  Stop-хук Claude Code: предупредить, не блокировать
-# Свои разрешённые пути проекта — в .docs-allow, по регулярке (ERE) на строку.
+# Docs guard: markdown files only where the AGENTS.md map allows.
+#   scripts/check_docs.sh              whole tree; exit 2 if stray files
+#   scripts/check_docs.sh --staged     only files added in this commit (pre-commit)
+#   scripts/check_docs.sh --stop-hook  Claude Code Stop hook: warn, don't block
+# Project-specific allowed paths: .docs-allow, one ERE per line.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 mode=${1:-}
@@ -27,10 +27,10 @@ fi
 stray=$(printf '%s\n' "$files" | grep -Ev "$allowed" | grep -v '^$' || true)
 [ -z "$stray" ] && exit 0
 
-msg="Документы вне карты AGENTS.md:
+msg="Docs outside the AGENTS.md map:
 $(echo "$stray" | sed 's/^/  /')
-Ревью и аудиты — скажи «разбери ревью», скилл review-intake соберёт их сам.
-Остальное — слить в подходящий docs/*.md, перенести в docs/archive/ или добавить путь в .docs-allow."
+Reviews and audits: ask to process reviews, the review-intake skill collects them.
+Anything else: merge into a docs/*.md, move to docs/archive/, or add the path to .docs-allow."
 
 if [ "$mode" = --stop-hook ]; then
   python3 -c 'import json,sys; print(json.dumps({"systemMessage": sys.argv[1]}))' "$msg"

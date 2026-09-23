@@ -1,10 +1,5 @@
-# DECISIONS — журнал решений, которые нельзя случайно откатить
+# DECISIONS — decisions that must not be undone by accident
 
-_Хронологически, новые внизу. Сюда только то, потеря чего заставит переделывать работу
-или ухудшит продукт._
+_Chronological, newest at the bottom. Only what would force rework or degrade the product if lost._
 
-_Формат записи: `## ДД.ММ.ГГГГ — заголовок`, затем «Решение», «Почему», «Отвергнуто»,
-«Не откатывать случайно» и кто решил. Старые записи не переписываются: если решение
-отменено, новая запись называет, что она отменяет, а у старой в заголовке пометка
-«(отменено ДД.ММ, см. ниже)». Неприкосновенные решения (менять только с автором) помечать
-в заголовке «[модель]»._
+_Entry format: `## DD.MM.YYYY — title`, then Decision, Why, Rejected, Don't undo by accident, and who decided. Never rewrite old entries: a new entry names what it supersedes, and the old title gets "(superseded DD.MM, see below)". Tag decisions that change only with their author as `[model]`._

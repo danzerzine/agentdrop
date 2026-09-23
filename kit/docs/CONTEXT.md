@@ -1,23 +1,16 @@
-# CONTEXT — что это за проект
+# CONTEXT — what this project is
 
-_Долгоживущий контекст: зачем продукт, для кого, откуда данные, что значат ключевые понятия.
-Меняется редко. Текущее состояние — в `STATE.md`, история решений — в `DECISIONS.md`._
+_Long-lived context: why the product exists, who uses it, where data comes from, what key terms mean. Changes rarely. Current state is in `STATE.md`, decision history in `DECISIONS.md`._
 
-## Продукт
+## Product
 
-_Что это и какую проблему решает. Две-три фразы._
+## People
 
-## Люди
-
-| Кто | Роль | Что от него зависит |
+| Who | Role | What depends on them |
 |---|---|---|
 
-## Данные и источники
+## Data and sources
 
-## Словарь
+## Glossary
 
-_Термины проекта и как они называются на экране._
-
-## Устройство
-
-_Карта кода: где что лежит, точки входа._
+## Code map

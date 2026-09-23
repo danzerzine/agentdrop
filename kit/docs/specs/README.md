@@ -1,4 +1,3 @@
-# specs — активные ТЗ
+# specs — active specs
 
-Файл на задачу: `B<n>-<имя>.md`. Отчёт о выполнении дописывается в конец того же файла.
-Задача закрыта и принята — `git mv` в `archive/specs/`.
+One file per task: `B<n>-<name>.md`. The completion report is appended to the same file. When the task is closed and accepted, `git mv` it to `archive/specs/`.

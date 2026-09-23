@@ -1,74 +1,46 @@
 ---
 name: review-intake
-description: Review and audit intake — gathers scattered review files, merges duplicates across models, sets P0–P3, files tickets after the owner's OK. Use when reviews sit in docs/reviews/inbox/ or elsewhere, when asked to "разбери ревью"/process reviews, or when the owner replies to a triage.
+description: Review and audit intake — gathers scattered review files, merges duplicates across models, sets P0–P3, files tickets after the owner's OK. Use when reviews sit in docs/reviews/inbox/ or elsewhere, when asked to process reviews, or when the owner replies to a triage.
 ---
 
 # review-intake
 
-Владелец кидает ревью как попало: три файла по одной теме от разных моделей, в корень, в `docs/`,
-с любыми именами. Приёмщик превращает эту кучу в **один** список замечаний без повторов,
-отсортированный по приоритету. Думать о файлах владельцу не нужно, он смотрит только на итог.
-Правок в коде скилл не делает.
+The owner drops reviews carelessly: three files on one topic from different models, in the root, in `docs/`, under any name. Intake turns the pile into **one** deduplicated list of findings sorted by priority. The owner looks only at the result. This skill changes no code.
 
-Работа идёт в два захода. Первый собирает и предлагает. Второй раскладывает по докам,
-но только после ответа владельца.
+Two passes: the first collects and proposes; the second files into docs, only after the owner answers.
 
-## Заход 1 — собрать и предложить
+## Pass 1 — collect and propose
 
-1. **Собрать.** Источники: всё в `docs/reviews/inbox/` и всё, что показывает
-   `scripts/check_docs.sh` (md вне карты документов). Имена и места не важны, важно содержание.
-   Файл — ревью, если в нём претензии к проекту; остальное не трогать, назвать владельцу.
-   Все ревью `git mv` во входящие с именем `ГГГГ-ММ-ДД-<тема>-<источник>.md`, тему и источник
-   (модель, скилл) определить по тексту. Готово, когда вне входящих ревью не осталось.
-2. **Разрезать.** Каждое замечание — одна проверяемая претензия с местом (файл, экран, число).
-   Пометить источник: `claude-ui п.3`.
-3. **Склеить дубли.** Одна и та же проблема разными словами — одно замечание с колонкой «кто».
-   Критерий: исправление одного закрыло бы и другое. Близкие, но разные (одно место, разные
-   причины) не склеивать. Если источники спорят, это одно замечание со статусом **вопрос**,
-   обе позиции одной строкой.
-4. **Сверить с памятью проекта.**
-   - противоречит `docs/DECISIONS.md` → **отклонить** со ссылкой на запись. Решения, которые
-     журнал помечает как неприкосновенные, ревьюер не отменяет;
-   - уже есть в `docs/TODO.md` → **дубль** тикета `B<n>`;
-   - уже исправлено (код, `docs/LOG.md`) → **закрыто**;
-   - остальное проверить по коду или живому экрану: **тикет**, **не подтвердилось**, или
-     **вопрос**, если решает владелец (вкус, объём, смена решения).
-   Готово, когда у каждого склеенного замечания ровно один статус.
-5. **Расставить приоритет** подтверждённым. Приоритет ставит приёмщик сам, серьёзность из
-   ревью — только подсказка.
-   - **P0** — неверные данные у пользователя, порча или потеря данных, утечка, прод не работает.
-   - **P1** — безопасность без активной утечки; сломанный основной сценарий;
-     вводящий в заблуждение интерфейс.
-   - **P2** — неудобно, но понятно; техдолг, который скоро укусит.
-   - **P3** — полировка.
-   Совпадение двух-трёх источников поднимает на ступень, но не выше P1 без проверки.
-   Замечание одного источника без воспроизведения — не выше P2.
-6. **Сгруппировать в тикеты.** P0 и P1 — по тикету на замечание. P2 и P3 одной темы — один
-   тикет со списком. Назвать так, как лягут в TODO: «новый B11 (P2): мелочи таблиц — 3, 5, 9».
-7. **Записать разбор** в `docs/reviews/inbox/ГГГГ-ММ-ДД-разбор.md`: сверху тикеты по
-   приоритету, ниже таблица «№ · суть в пять слов · кто · статус · приоритет · куда · почему»,
-   отсортированная так же. Коммит: входящие и перемещённые файлы.
-8. **Показать владельцу** и остановиться. Отчёт — ниже.
+1. **Collect.** Sources: everything in `docs/reviews/inbox/` plus whatever `scripts/check_docs.sh` reports. Names and locations don't matter, content does. A file is a review if it makes claims against the project; leave anything else and mention it to the owner. `git mv` every review into the inbox as `YYYY-MM-DD-<topic>-<source>.md`, inferring topic and source (model, skill) from the text. Done when no review is left outside the inbox.
+2. **Split.** Each finding is one checkable claim with a location (file, screen, number), tagged with its source: `claude-ui #3`.
+3. **Merge duplicates.** The same problem in different words becomes one finding with a "who" column. Test: fixing one would fix the other. Similar but distinct findings (same place, different cause) stay separate. When sources disagree, it's one finding with status **question**, both positions in one line.
+4. **Check against project memory.**
+   - contradicts `docs/DECISIONS.md` → **reject**, citing the entry; `[model]` decisions are not the reviewer's to overturn;
+   - already in `docs/TODO.md` → **duplicate** of `B<n>`;
+   - already fixed (code, `docs/LOG.md`) → **closed**;
+   - otherwise verify in code or the live product: **ticket**, **not confirmed**, or **question** when it's the owner's call (taste, scope, reversing a decision).
+   Done when every merged finding has exactly one status.
+5. **Set priority** for confirmed findings. Intake decides; the reviewer's severity is a hint.
+   - **P0** — wrong data shown to users, data loss or corruption, a leak, prod down.
+   - **P1** — security without an active leak; a broken core flow; misleading UI.
+   - **P2** — awkward but usable; tech debt that will bite soon.
+   - **P3** — polish.
+   Agreement of two or three sources raises one step, but not above P1 without verification. A single-source finding that wasn't reproduced stays at P2 or below.
+6. **Group into tickets.** P0 and P1: one ticket per finding. P2 and P3 of one theme: one ticket with a list. Name them as they'll appear in TODO: "new B11 (P2): table polish — 3, 5, 9".
+7. **Write the triage** to `docs/reviews/inbox/YYYY-MM-DD-triage.md`: proposed tickets by priority on top, then a table "# · gist in five words · who · status · priority · where · why", sorted the same way. Commit the inbox and moved files.
+8. **Show the owner** and stop.
 
-Если во входящих уже лежит разбор без ответа владельца, а пришли новые ревью, добавить их
-в тот же разбор, не заводя второй.
+If an unanswered triage already sits in the inbox and new reviews arrive, add them to it rather than starting a second one.
 
-## Заход 2 — разложить
+## Pass 2 — file
 
-Выполняется по ответу владельца. Его правки по номерам и приоритетам старше предложения.
+Runs on the owner's answer. Their edits to numbers and priorities override the proposal.
 
-1. Тикеты → `docs/TODO.md` с приоритетом: P0–P1 в «Сейчас», P2 в «Дальше», P3 в «Потом».
-   Источник: `archive/reviews/ГГГГ-ММ-ДД/<файл>, п. N`. Дубли — дописать источник
-   в существующий тикет.
-2. Вопросы → `docs/QUESTIONS.md`, «К владельцу». Новая грабля → `docs/PITFALLS.md`.
-3. Разбор — заголовок без «(предложение)», статусы как утвердил владелец. Все файлы
-   входящих `git mv` в `docs/archive/reviews/ГГГГ-ММ-ДД/`. Строка в `docs/LOG.md`: сколько
-   файлов, сколько замечаний до и после склейки, сколько тикетов, сколько отклонено.
-4. Проверить: `scripts/check_docs.sh` молчит, во входящих только `.gitkeep`.
-   Коммит только этих файлов.
+1. Tickets → `docs/TODO.md`: P0–P1 in Now, P2 in Next, P3 in Later. Source: `archive/reviews/YYYY-MM-DD/<file>, #N`. For duplicates, add the source to the existing ticket.
+2. Questions → `docs/QUESTIONS.md`, "For the owner". New traps → `docs/PITFALLS.md`.
+3. Drop "(proposal)" from the triage title, set statuses as approved, `git mv` all inbox files to `docs/archive/reviews/YYYY-MM-DD/`. One `docs/LOG.md` entry: files, findings before and after merging, tickets, rejections.
+4. Check: `scripts/check_docs.sh` is silent, the inbox holds only `.gitkeep`. Commit only these files.
 
-## Отчёт владельцу после первого захода
+## Report after pass 1
 
-Путь к разбору и не больше семи строк: сколько файлов собрано и откуда, сколько замечаний
-до и после склейки; P0 и P1 поимённо; что отклоняю и почему одним словом; где не уверен.
-Закончить так: «Ответь "ок" или правки по номерам, например "7 — P1, 12 — отклонить"».
+Path to the triage and at most seven lines: how many files from where, findings before and after merging, P0 and P1 by name, what's rejected and why in a word, where you're unsure. End with: "Reply OK or edits by number, e.g. '7 → P1, 12 → reject'." Write the report in the owner's language.

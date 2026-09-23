@@ -1,3 +1,3 @@
-# PITFALLS — грабли, на которые уже наступали
+# PITFALLS — traps we already fell into
 
-_Одна запись — одна ловушка: что происходит и как не попасть. Группировать по разделам._
+_One entry per trap: what happens and how to avoid it. Group by section._

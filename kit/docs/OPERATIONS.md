@@ -1,9 +1,9 @@
-# OPERATIONS — как запустить, где сервер, где ключи
+# OPERATIONS — how to run, where it lives, how to get access
 
-_Секретов здесь нет и быть не должно: только имена переменных, пути и id._
+_No secrets here: only variable names, paths and ids._
 
-## Локально
+## Local
 
-## Сервер и выкладка
+## Servers and deploy
 
-## Доступы
+## Access

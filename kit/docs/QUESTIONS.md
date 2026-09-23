@@ -1,13 +1,11 @@
-# QUESTIONS — вопросы и решения, которые ждут человека
+# QUESTIONS — what waits for a human
 
-_Новое сверху. Ответили — ответ в пункт, пункт в «Закрыто», долговременное решение
-переносится в `DECISIONS.md`._
+_Newest on top. Once answered: write the answer into the item, move it to Closed, and log any lasting decision in `DECISIONS.md`._
 
-## К владельцу
+## For the owner
 
-То, что агент решить не вправе, и решения агента, которые владелец может отменить
-(помечать «Р-n, можно отменить»).
+What the agent may not decide, and agent decisions the owner may revert (mark "R-n, revertible").
 
-## К людям
+## For others
 
-## Закрыто
+## Closed

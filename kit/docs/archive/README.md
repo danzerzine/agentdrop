@@ -1,9 +1,8 @@
-# archive — завершённое и устаревшее
+# archive — finished and outdated
 
-Читать для истории и причин, не как инструкцию: числа и планы здесь могли устареть.
-Действующее — в `docs/*.md`. Внутри файлов не правим: это снимок на свою дату.
+Read for history and reasons, not as instructions: numbers and plans here may be stale. Current docs are `docs/*.md`. Files here are snapshots and are never edited.
 
-| Папка | Что внутри |
+| Folder | Contents |
 |---|---|
-| `specs/` | выполненные ТЗ с отчётами |
-| `reviews/` | ревью и аудиты после разбора, по папке на дату |
+| `specs/` | finished specs with their reports |
+| `reviews/` | processed reviews and audits, one folder per date |

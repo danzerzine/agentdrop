@@ -475,9 +475,9 @@ def bootstrap_project(root: Path, dry: bool = False) -> None:
     project_payload = (read(CHARTER) if kit else PROJECT_BLOCK).rstrip()
     if kit and not agents.exists() and not dry:
         agents.write_text(
-            f"# {root.name} — устав для агента\n\n"
-            "_Что это за проект — одна-две фразы. Правила, которые в этом проекте ломают доверие,\n"
-            "и всё своё — здесь, над управляемым блоком. Блок ниже обновляет `agentdrop`._\n",
+            f"# {root.name}\n\n"
+            "_What this project is, in one or two sentences. Project-specific rules go here,\n"
+            "above the managed block; `agentdrop` refreshes the block below._\n",
             encoding="utf-8",
         )
     changed, action = managed_merge(
@@ -513,7 +513,7 @@ def bootstrap_project(root: Path, dry: bool = False) -> None:
             ensure_hooks_path(root, dry=dry)
     elif CHARTER.exists():
         print("! Old layout (root HANDOFF/PROGRESS/...): docs/ kit not applied.")
-        print("  To migrate, ask the agent: «переведи доки проекта на структуру docs/ из ~/.agentdrop/kit», then run agentdrop again.")
+        print("  To migrate, ask the agent to move the notes into the docs/ layout from ~/.agentdrop/kit, then run agentdrop again.")
 
     # Old layout only: create root memory docs if missing. Never overwrite project state.
     for filename, body in ({} if kit else TEMPLATES).items():

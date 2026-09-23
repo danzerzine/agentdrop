@@ -1,11 +1,9 @@
-# TODO — тикеты
+# TODO — tickets
 
-_Один пункт — один тикет `B<n>` с приоритетом P0–P3. Номера не переиспользуются. Сделано —
-пункт уходит, строка «B<n> — сделано, коммит …» пишется в `LOG.md`. Большой тикет получает
-ТЗ в `docs/specs/B<n>-<имя>.md`. Вопросы к людям — в `QUESTIONS.md`._
+_One item = one ticket `B<n>` with priority P0–P3. Numbers are never reused. When done, the item leaves and `LOG.md` gets "B<n> — done, commit …". A large ticket gets a spec in `docs/specs/B<n>-<name>.md`. Questions for people go to `QUESTIONS.md`._
 
-## Сейчас
+## Now
 
-## Дальше
+## Next
 
-## Потом
+## Later
