@@ -20,9 +20,9 @@ if [ -f .docs-allow ]; then
 fi
 
 if [ "$mode" = --staged ]; then
-  files=$(git diff --cached --name-only --diff-filter=AR -- '*.md')
+  files=$(git -c core.quotepath=off diff --cached --name-only --diff-filter=AR -- '*.md')
 else
-  files=$(git ls-files -co --exclude-standard '*.md')
+  files=$(git -c core.quotepath=off ls-files -co --exclude-standard '*.md')
 fi
 stray=$(printf '%s\n' "$files" | grep -Ev "$allowed" | grep -v '^$' || true)
 [ -z "$stray" ] && exit 0
