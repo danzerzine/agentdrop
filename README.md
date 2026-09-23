@@ -61,7 +61,7 @@ scripts/check_docs.sh      guard: markdown only where the map allows
 .githooks/pre-commit       runs the guard on staged files
 ```
 
-The managed block in `AGENTS.md` holds your common rules plus a charter. The charter tells the agent where each kind of note goes, how to run a pass, and which file wins when instructions conflict. Anything project-specific goes above the block. agentdrop never rewrites that part.
+The managed block in `AGENTS.md` holds only the charter: where each kind of note goes, how to finish a pass, and which file wins when instructions conflict. Your common rules stay in the global configs, so no session loads them twice. Anything project-specific goes above the block. agentdrop never rewrites that part.
 
 ## Reviews without the mess
 
