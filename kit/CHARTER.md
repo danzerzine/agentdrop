@@ -1,67 +1,26 @@
-## Устав: документы и проходы
+## Project docs charter
 
-### Приоритет инструкций
+**Precedence:** the owner's live instruction > active spec in `docs/specs/` > `docs/DECISIONS.md` > other docs. If an instruction contradicts a decision, follow the instruction, name the conflict in one line and log a new decision. Decisions tagged `[model]` change only with their author.
 
-1. Живое указание владельца в текущем разговоре.
-2. Активное ТЗ в `docs/specs/`, если задача по нему.
-3. `docs/DECISIONS.md`.
-4. Остальные доки.
+**Before work:** read `docs/STATE.md` and `docs/TODO.md`. Before product, architecture, data or deploy decisions, also read `docs/CONTEXT.md` and the relevant `docs/DECISIONS.md` entries. Before touching fragile code, read `docs/PITFALLS.md`.
 
-Журнал решений не даёт права отказать владельцу. Указание противоречит журналу — выполнить,
-назвать конфликт одной строкой и дописать новое решение в журнал. Решения с пометкой «[модель]»
-меняются только с их автором.
-
-### С чего начать
-
-Перед любой работой — `docs/STATE.md` (что есть сейчас) и `docs/TODO.md` (что делать).
-Перед решением по продукту, архитектуре, данным или деплою — ещё `docs/CONTEXT.md`
-и нужные записи `docs/DECISIONS.md`. Перед правкой хрупкого — `docs/PITFALLS.md`.
-
-### Карта документов
-
-| Файл | Что в нём | Как меняется |
-|---|---|---|
-| `docs/CONTEXT.md` | продукт, люди, данные, словарь, устройство | редко |
-| `docs/DECISIONS.md` | журнал решений: что, почему, что отвергли, чего не откатывать | только дописывается, новое внизу |
-| `docs/CONVENTIONS.md` | правила «всегда делаем так» | при новом правиле |
-| `docs/PITFALLS.md` | грабли, на которые уже наступали | дописывается |
-| `docs/OPERATIONS.md` | запуск, сервер, выкладка, доступы (без секретов) | при изменении инфраструктуры |
-| `docs/STATE.md` | что работает, что наполовину, что сломано | переписывается целиком |
-| `docs/TODO.md` | тикеты `B<n>` с P0–P3: сейчас / дальше / потом | живой список |
-| `docs/QUESTIONS.md` | вопросы к владельцу и людям; решения агента с правом отмены | живой список |
-| `docs/LOG.md` | журнал проходов: дата, что сделано, коммиты | дописывается сверху |
-| `docs/reviews/inbox/` | ревью и аудиты, пока владелец их не принял | пусто после разбора |
-| `docs/specs/` | активные ТЗ: `B<n>-<имя>.md` | закрыта задача — в архив |
-| `docs/research/` | справочные исследования | по мере исследований |
-| `docs/archive/` | закрытые ТЗ, разобранные ревью, старые версии доков | не правится |
-| `LOCAL.md` | заметки машины, вне git | локально |
-
-Общие правила называют файлы памяти по-своему: `HANDOFF.md` = `docs/STATE.md`,
-`PROGRESS.md` = `docs/LOG.md`, `TODO.md` = `docs/TODO.md`, `PITFALLS.md` = `docs/PITFALLS.md`,
-`PROJECT_CONTEXT.md` = `docs/CONTEXT.md`. В корне их нет, заново не создавать.
-
-### Куда что записывать
-
-| Что произошло | Куда |
+| File | What goes there |
 |---|---|
-| Решение, которое дорого забыть (архитектура, термин, «так не делаем») | `DECISIONS.md` в тот же день |
-| Наступили на грабли | `PITFALLS.md` |
-| Появилось правило «всегда делаем так» | `CONVENTIONS.md` |
-| Новая задача или идея | `TODO.md`, новый `B<n>` с приоритетом |
-| Задача больше одного прохода | ТЗ в `docs/specs/B<n>-<имя>.md`, отчёт — в конец того же файла |
-| Закончен проход | строка в `LOG.md`; `STATE.md`, если картина изменилась; пункт из `TODO.md` убрать |
-| Нужен ответ владельца или решил сам с правом отмены | `QUESTIONS.md`, «К владельцу» |
-| Изменились сервер, доступы, команды запуска | `OPERATIONS.md` |
-| Ревью или аудит (любой скилл, любая модель) | `docs/reviews/inbox/`, имя любое. Разбирает скилл `review-intake` (`.claude/skills/review-intake/SKILL.md`; в другом харнесе — прочитать файл и выполнить): склеивает дубли, ставит P0–P3, после «ок» владельца раскладывает в тикеты |
-| Документ устарел или задача закрыта | `git mv` в `docs/archive/<раздел>/` |
+| `docs/CONTEXT.md` | product, people, data sources, glossary, code map; changes rarely |
+| `docs/DECISIONS.md` | decisions costly to forget: what, why, rejected options, what not to undo; append-only, same day |
+| `docs/CONVENTIONS.md` | rules we always follow |
+| `docs/PITFALLS.md` | traps we already fell into |
+| `docs/OPERATIONS.md` | run, deploy, servers, access; names and paths only, no secrets |
+| `docs/STATE.md` | what works, half-done, broken; rewrite whole when the picture changes |
+| `docs/TODO.md` | tickets `B<n>` with P0–P3 (now / next / later); numbers never reused |
+| `docs/QUESTIONS.md` | questions for the owner or others; agent decisions the owner may revert |
+| `docs/LOG.md` | one 3–5 line entry per finished pass, newest on top |
+| `docs/specs/B<n>-<name>.md` | spec for a multi-pass task; report appended at the end |
+| `docs/research/` | reference studies; every number has a source and date |
+| `docs/reviews/inbox/` | raw reviews and audits, any name; the `review-intake` skill (`.claude/skills/review-intake/SKILL.md`, other harnesses: read and follow it) merges duplicates, sets P0–P3 and files tickets after the owner's OK |
+| `docs/archive/` | closed specs, processed reviews, outdated docs; `git mv` here, never edit |
+| `LOCAL.md` | machine-specific notes, not in git |
 
-Каждый md-файл живёт в одном из мест карты. Это проверяет `scripts/check_docs.sh`
-(pre-commit через `.githooks/`, Stop-хук Claude Code). Свои места проекта — в `.docs-allow`.
+Every markdown file lives in a place from this table or `.docs-allow`; `scripts/check_docs.sh` enforces it on commit.
 
-### Как вести проход
-
-1. Прочитать `STATE.md`, `TODO.md`, нужный кусок `DECISIONS.md`. Для рискованной работы —
-   тег отката `pre-<что>-<дата>`.
-2. Сделать и проверить по-настоящему: тесты, линт, сборка; для интерфейса — живой экран.
-3. Закоммитить на зелёном только свои файлы. Сообщение по-русски, без приписок об ИИ.
-4. Обновить доки по таблице выше.
+**Finishing a pass:** entry in `LOG.md`; update `STATE.md` if the picture changed; remove the done ticket from `TODO.md`. Commit only your own files, no AI attribution.

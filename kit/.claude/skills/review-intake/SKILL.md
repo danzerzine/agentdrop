@@ -1,6 +1,6 @@
 ---
 name: review-intake
-description: Приёмщик ревью и аудитов — собирает разбросанные файлы, склеивает дубли, ставит приоритеты, после «ок» владельца раскладывает в тикеты. Использовать, когда в docs/reviews/inbox/ или где-то в репозитории лежат ревью, аудиты, критика, когда check_docs.sh ругается на лишние md, когда просят «разбери ревью», или когда владелец отвечает на разбор («ок», правки по номерам).
+description: Review and audit intake — gathers scattered review files, merges duplicates across models, sets P0–P3, files tickets after the owner's OK. Use when reviews sit in docs/reviews/inbox/ or elsewhere, when asked to "разбери ревью"/process reviews, or when the owner replies to a triage.
 ---
 
 # review-intake

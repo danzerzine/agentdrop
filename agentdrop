@@ -47,120 +47,65 @@ GLOBAL_START = "<!-- AGENTDROP:COMMON:START -->"
 GLOBAL_END = "<!-- AGENTDROP:COMMON:END -->"
 PROJECT_START = "<!-- AGENTDROP:PROJECT:START -->"
 PROJECT_END = "<!-- AGENTDROP:PROJECT:END -->"
-ROUTING_START = "<!-- AGENTDROP:SENIOR-ROUTING:START -->"
-ROUTING_END = "<!-- AGENTDROP:SENIOR-ROUTING:END -->"
 TOOLS_START = "<!-- AGENTDROP:TOOL-EFFICIENCY:START -->"
 TOOLS_END = "<!-- AGENTDROP:TOOL-EFFICIENCY:END -->"
 
 TOOL_EFFICIENCY_BLOCK = """## Tool efficiency
-- Use: **narrow search → symbol → minimal range → edit → short diff**.
-- Start with `rg`/`fd`; use `ast-grep` for code structure and Serena for definitions, references, callers, and cross-file work. Use shell for simple reads/searches.
-- Keep tool output small: target **≤200 lines / ~20 KB per step** unless more is genuinely needed. Bound output with `--max-count`, context lines, `-q`, `--stat`; write large logs to files and query them with `rg`.
-- Parse instead of reading raw data: `jq` (JSON), `yq` (YAML/TOML/XML), `qsv`/`mlr` (CSV/TSV), `jc`/`gron` when useful.
-- For new Python work use `uv` + Ruff. In existing projects preserve the existing package manager, environment, formatter, type checker, test commands, and lockfiles.
-- Validate incrementally: changed files → focused tests → broader checks only when warranted. Inspect `git diff --stat` before a minimal path-scoped diff.
-- Use efficient task-specific tools when useful: `xh`, `difft`, `gh`, `hyperfine`, `watchexec`, `mise`, `just`, `typos`, `tokei`, `dust`, `procs`.
-- Do not use an LLM for information a search, parser, compiler, type checker, test, or benchmark can answer directly."""
-
-SENIOR_ROUTING_BLOCK = """## Model roles
-- Senior models own irreversible or high-leverage decisions, architecture, specification boundaries, and final acceptance. Do not use them as continuous coordinators.
-- Delegate implementation in large coherent chunks, not tiny tasks. Workers should resolve routine implementation details autonomously.
-- Senior review should normally happen once per milestone or final diff. Give the reviewer a concise change summary plus targeted files, diffs, test results, and artifacts; do not make it re-read the whole project.
-- Escalate back to a senior model only for architectural ambiguity, conflicting constraints, security or data-loss risk, or failed acceptance.
-- Do not ask a senior model to review routine intermediate work that can be verified mechanically by tests, builds, or E2E checks.
-"""
+- Narrow search → symbol → minimal range → edit → short diff. `rg`/`fd` first, `ast-grep` for structure, Serena for definitions and references.
+- Keep each step's output ≤200 lines / ~20 KB: bound with `--max-count`, `-q`, `--stat`; write big logs to files and `rg` them.
+- Parse data instead of reading it raw: `jq`, `yq`, `qsv`/`mlr`.
+- New Python: `uv` + Ruff. Existing projects: keep their package manager, formatter, type checker, tests and lockfiles.
+- Don't ask an LLM what a search, parser, compiler, test or benchmark can answer."""
 
 DEFAULT_COMMON = """# Working rules
 
 ## Work with me
-- Treat me primarily as an end user / product manager, not as the developer executing your instructions.
-- Lead with the result, decision, or blocker. Keep explanations concise and use plain language.
-- Explain unfamiliar technical terms briefly on first use.
-- Infer intent from the request, conversation, repository, and existing project context. Assume dictated prompts may contain rough wording.
-- Apply later corrections over earlier instructions.
-- Ask only when missing information materially changes the outcome and cannot be inferred.
-- Make reasonable, reversible decisions yourself.
+- Treat me as the end user / product manager, not as a developer executing your instructions.
+- Lead with the result, decision, or blocker, in plain language; explain unfamiliar terms on first use.
+- Prompts may be dictated and rough: infer intent from the request, repo and context. Later corrections win.
+- Ask only when the answer materially changes the outcome and cannot be inferred; make reversible decisions yourself.
 
 ## Execute
-- Carry work through implementation, integration, and verification. Do not stop at a plan, snippet, passing build, or intermediate artifact when the usable outcome requires more.
-- Do routine developer work yourself. Do not make me create fixtures, edit configs, run routine commands, coordinate agents, or debug your work when you can do it.
-- Inspect the existing system before changing it. Reuse existing tools, components, conventions, and dependencies when sensible.
-- Prefer the smallest complete solution. Avoid speculative refactors, premature abstractions, unnecessary infrastructure, and hypothetical future requirements.
-- Prefer a mature existing/open-source solution over quickly building a custom one when it fits.
-- Consult official documentation when APIs, compatibility, or behavior are uncertain.
-- Find the cause before applying fixes. Preserve working behavior unless the task requires changing it.
+- Carry work through implementation, integration and verification; a plan, snippet or passing build is not the outcome.
+- Do routine developer work yourself: fixtures, configs, commands, debugging.
+- Inspect the existing system first; reuse its tools, conventions and dependencies, or a mature open-source solution, before building custom.
+- Smallest complete solution: no speculative refactors, premature abstractions or hypothetical requirements.
+- Find the cause before fixing; preserve working behavior unless the task requires changing it.
 
 <!-- AGENTDROP:TOOL-EFFICIENCY:START -->
 ## Tool efficiency
-- Use: **narrow search → symbol → minimal range → edit → short diff**.
-- Start with `rg`/`fd`; use `ast-grep` for code structure and Serena for definitions, references, callers, and cross-file work. Use shell for simple reads/searches.
-- Keep tool output small: target **≤200 lines / ~20 KB per step** unless more is genuinely needed. Bound output with `--max-count`, context lines, `-q`, `--stat`; write large logs to files and query them with `rg`.
-- Parse instead of reading raw data: `jq` (JSON), `yq` (YAML/TOML/XML), `qsv`/`mlr` (CSV/TSV), `jc`/`gron` when useful.
-- For new Python work use `uv` + Ruff. In existing projects preserve the existing package manager, environment, formatter, type checker, test commands, and lockfiles.
-- Validate incrementally: changed files → focused tests → broader checks only when warranted. Inspect `git diff --stat` before a minimal path-scoped diff.
-- Use efficient task-specific tools when useful: `xh`, `difft`, `gh`, `hyperfine`, `watchexec`, `mise`, `just`, `typos`, `tokei`, `dust`, `procs`.
-- Do not use an LLM for information a search, parser, compiler, type checker, test, or benchmark can answer directly.
+- Narrow search → symbol → minimal range → edit → short diff. `rg`/`fd` first, `ast-grep` for structure, Serena for definitions and references.
+- Keep each step's output ≤200 lines / ~20 KB: bound with `--max-count`, `-q`, `--stat`; write big logs to files and `rg` them.
+- Parse data instead of reading it raw: `jq`, `yq`, `qsv`/`mlr`.
+- New Python: `uv` + Ruff. Existing projects: keep their package manager, formatter, type checker, tests and lockfiles.
+- Don't ask an LLM what a search, parser, compiler, test or benchmark can answer.
 <!-- AGENTDROP:TOOL-EFFICIENCY:END -->
 
 ## Product, data, and UI
-- Treat UI quality as part of implementation. Inspect the real rendered product and important states/interactions.
-- For data/research, answer the practical question, not only the methodology. Look for mechanisms, regime changes, interactions, anomalies, and useful failure modes.
-- Separate evidence from interpretation. Do not invent certainty, but do not hide behind excessive academic caution.
-- Translate findings into concrete actions and useful deliverables.
+- UI quality is part of the work: inspect the real rendered product and its important states.
+- For data work, answer the practical question; look for mechanisms, regime changes, anomalies. Separate evidence from interpretation without hiding behind caution, and end with concrete actions.
 
 ## Test and verify
-- Test behavior the user actually relies on, not implementation details.
-- Strongly prefer end-to-end checks for user-facing features and important workflows.
-- Make important E2E checks repeatable and inspectable; leave screenshots, traces/reports, generated outputs, or before/after measurements when practical.
-- Do not write unit tests merely for coverage. Use focused unit/integration tests when they are the strongest simple check for complex logic, calculations, parsers, transformations, edge cases, or regressions.
-- Before tricky isolated logic, identify important failure modes, invalid states, edge cases, and invariants.
-- For reproducible bugs: reproduce -> create a repeatable check -> fix the cause -> rerun the same check.
-- Verify the real user outcome yourself. Never say "should work" when you can test it.
+- Test what the user relies on; prefer end-to-end checks for user-facing flows, repeatable and leaving evidence (screenshots, reports, before/after numbers).
+- Unit tests only where they are the strongest simple check: tricky logic, parsers, calculations, regressions. Not for coverage.
+- Bugs: reproduce → repeatable check → fix the cause → rerun the check.
+- Verify the outcome yourself; never say "should work" when you can test it.
 
 ## Project memory and Git
-- Treat project documentation and iterative Git commits as part of the work.
-- Read existing PROJECT_CONTEXT, HANDOFF, PROGRESS, TODO, PITFALLS, and project instruction files before substantial work.
-- Keep `PROJECT_CONTEXT.md` as compact durable memory: only non-obvious decisions, constraints, current state, and pitfalls a cold agent would otherwise need to rediscover; refresh it at natural checkpoints, especially before compact/end/task switch. Do not use it as a log.
-- Keep project memory short, factual, and current. Record decisions another cold agent would otherwise need to rediscover.
-- Commit coherent working iterations: not every tiny edit, and not one giant commit at the end.
-- Never commit secrets, credentials, temporary files, large generated artifacts, or unrelated changes.
-- After major features, architectural changes, difficult debugging, or when asked, refresh HANDOFF.md for a cold agent with zero conversation history.
-- Before ending substantial work: update project memory/TODO/pitfalls, commit the completed iteration, and refresh the handoff when appropriate.
-
-## Delegation
-- Work autonomously within scope. Do not make me coordinate agents.
-- Delegate substantial implementation as large, coherent chunks with a clear goal, constraints, acceptance criteria, and expected artifact.
-- Give workers enough context to finish independently; let them resolve routine implementation details autonomously within the agreed architecture and scope.
-- Prefer one capable worker completing a coherent chunk over many workers handling tiny tasks.
-- Keep final acceptance with the senior model, but avoid repeated review loops unless acceptance fails or a real escalation condition appears.
-
-<!-- AGENTDROP:SENIOR-ROUTING:START -->
-## Model roles
-- Senior models own irreversible or high-leverage decisions, architecture, specification boundaries, and final acceptance. Do not use them as continuous coordinators.
-- Delegate implementation in large coherent chunks, not tiny tasks. Workers should resolve routine implementation details autonomously.
-- Senior review should normally happen once per milestone or final diff. Give the reviewer a concise change summary plus targeted files, diffs, test results, and artifacts; do not make it re-read the whole project.
-- Escalate back to a senior model only for architectural ambiguity, conflicting constraints, security or data-loss risk, or failed acceptance.
-- Do not ask a senior model to review routine intermediate work that can be verified mechanically by tests, builds, or E2E checks.
-
-<!-- AGENTDROP:SENIOR-ROUTING:END -->
+- Keep the project memory files named in the project's `AGENTS.md` short, factual and current while working; record what a cold agent would otherwise rediscover.
+- Commit coherent working iterations. Never commit secrets, temp files, large generated artifacts or unrelated changes.
 
 ## Environment
-- Make local services easy to start, stop, restart, and diagnose.
-- Check existing services and ports before starting new ones. Never kill unrelated processes.
+- Local services must be easy to start, stop, restart and diagnose. Check existing services and ports first; never kill unrelated processes.
 
 ## Defaults
-Prefer simple over clever; working over theoretically perfect; existing solutions over unnecessary custom code; reversible decisions over premature commitment; measured bottlenecks over guessed ones; real verification over confidence; finished user outcomes over technically interesting intermediate states.
+Simple over clever; working over theoretically perfect; reversible over premature commitment; measured bottlenecks over guessed ones; real verification over confidence; finished outcomes over interesting intermediate states.
 """
 
 PROJECT_BLOCK = """## Agent workflow
-
-- Read `PROJECT_CONTEXT.md`, `HANDOFF.md`, `PROGRESS.md`, `TODO.md`, and `PITFALLS.md` before substantial work.
-- Keep `PROJECT_CONTEXT.md` as compact durable memory of non-obvious decisions, constraints, current state, and pitfalls; refresh it at natural checkpoints, especially before compact/end/task switch. Never use it as a log.
-- Keep project memory concise and current while working; do not wait until the end.
-- After a major feature, architectural change, difficult debugging session, or explicit request, refresh `HANDOFF.md` for a cold agent with zero conversation history.
-- Make Git commits after coherent working iterations.
-- Before ending substantial work: update project memory, TODOs and pitfalls; verify the result; commit the finished iteration; refresh the handoff when appropriate.
-- Preserve and obey any existing project- or harness-specific instructions in this repository.
+- Before substantial work read `PROJECT_CONTEXT.md`, `HANDOFF.md`, `PROGRESS.md`, `TODO.md`, `PITFALLS.md`; keep them current.
+- After a major change or on request, refresh `HANDOFF.md` for a cold agent with zero conversation history.
+- Harness- and project-specific instructions in this repo take precedence.
 """
 
 TEMPLATES = {
@@ -251,15 +196,6 @@ def ensure_state() -> None:
     # Migrate managed blocks without replacing the user's own edits.
     existing = COMMON.read_text(encoding="utf-8", errors="replace")
     migrated = existing
-
-    routing_block = f"{ROUTING_START}\n{SENIOR_ROUTING_BLOCK.rstrip()}\n{ROUTING_END}"
-    routing_pattern = re.compile(re.escape(ROUTING_START) + r".*?" + re.escape(ROUTING_END), re.S)
-    if not routing_pattern.search(migrated):
-        env_heading = "\n## Environment"
-        if env_heading in migrated:
-            migrated = migrated.replace(env_heading, "\n\n" + routing_block + env_heading, 1)
-        else:
-            migrated = migrated.rstrip() + "\n\n" + routing_block + "\n"
 
     tools_block = f"{TOOLS_START}\n{TOOL_EFFICIENCY_BLOCK.rstrip()}\n{TOOLS_END}"
     tools_pattern = re.compile(re.escape(TOOLS_START) + r".*?" + re.escape(TOOLS_END), re.S)
@@ -530,13 +466,13 @@ def bootstrap_project(root: Path, dry: bool = False) -> None:
     print(f"\nProject: {root}")
     print("-" * min(80, len(str(root)) + 9))
 
-    # Make the project's AGENTS.md self-contained: full common rules + project workflow.
+    # AGENTS.md: the charter in a managed block; everything outside it is the project's own.
     # Existing project-specific content outside our managed block is preserved.
     agents = root / "AGENTS.md"
-    common = read(COMMON).rstrip()
     kit = uses_kit(root)
-    workflow = read(CHARTER) if kit else PROJECT_BLOCK
-    project_payload = common + "\n\n" + workflow.rstrip()
+    # Common rules reach every harness through the global sync; repeating them here would
+    # load them twice per session. The project block carries only the charter.
+    project_payload = (read(CHARTER) if kit else PROJECT_BLOCK).rstrip()
     if kit and not agents.exists() and not dry:
         agents.write_text(
             f"# {root.name} — устав для агента\n\n"
@@ -699,7 +635,7 @@ def main() -> None:
         print(f"\nAgentDrop will bootstrap/sync the current directory:\n  {cwd}\n")
         print("It will:")
         print("  - preserve existing harness/project instructions")
-        print("  - put the full shared rules + project workflow into AGENTS.md")
+        print("  - put the docs charter into AGENTS.md (shared rules stay global)")
         print("  - add/update harness bridges without overwriting their own instructions")
         print("  - create missing docs/ skeleton, review-intake skill and docs guard (~/.agentdrop/kit)")
         print("  - back up any existing file before AgentDrop changes it")
