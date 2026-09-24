@@ -23,4 +23,6 @@
 
 Every markdown file lives in a place from this table or `.docs-allow`; `scripts/check_docs.sh` enforces it on commit.
 
+**Threads in docs:** the owner comments under an item as `> **Name, dd.mm hh:mm:** …`, from `agentdrop forum` or by hand; the forum's background agent may already have replied as `> **Agent, …:**`. Answer under the comment in the same quote format, not only in chat; keep the thread until the item is archived; commit it with your pass.
+
 **Finishing a pass:** entry in `LOG.md`; update `STATE.md` if the picture changed; remove the done ticket from `TODO.md`. Commit only your own files, no AI attribution.

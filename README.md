@@ -100,6 +100,18 @@ The `review-intake` skill then works in two steps:
 
 `check_docs.sh` keeps new stray files from piling up. The pre-commit hook blocks a commit that adds markdown outside the map. In Claude Code, a Stop hook warns you without blocking the agent. If a project needs extra places for docs, list them as regexes in `.docs-allow`.
 
+## Talk to the agent in your docs
+
+```sh
+agentdrop forum install     # macOS: a LaunchAgent on :5290, reachable from your phone on home Wi-Fi
+agentdrop forum url         # the phone link (with a key; open once, then add to the home screen)
+agentdrop forum             # or just run it in the foreground, this machine only
+```
+
+One small server shows every agentdrop project it finds under `~/Projects`, `~/code` and `~/src`, plus any you add with `agentdrop forum add PATH`. Each project has its own docs and threads. Tap "Discuss" under a ticket or a question and write. The comment goes into the markdown under that item. A background `claude -p` run in that project's directory, limited to read-only tools, writes the reply into the same thread, usually within a minute. The feed collects threads from all projects and marks new answers and comments still waiting for one. "Ask the agent" starts a new topic in `QUESTIONS.md`.
+
+The agent can't change files from the forum. If you ask for real work, it replies with a plan and the next working session does it; that session also commits the threads. Settings (your name, the agent's name, `"lang": "ru"`, roots, port, the agent command) live in `~/.agentdrop/forum.json`. Without `--lan` the server listens on 127.0.0.1 only; with it, every request from another device needs the key from `~/.agentdrop/forum_token`.
+
 ## Customize
 
 - **Rules:** `agentdrop edit`, then `agentdrop sync`.
