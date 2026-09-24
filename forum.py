@@ -402,6 +402,8 @@ class H(BaseHTTPRequestHandler):
     def _authed(self):
         if self.client_address[0] in ("127.0.0.1", "::1") or not LAN["on"]:
             return True
+        if secrets.compare_digest(self.headers.get("X-Forum-Key", ""), LAN["token"]):
+            return True
         c = self.headers.get("Cookie", "")
         return any(secrets.compare_digest(p.strip(), f"af={LAN['token']}") for p in c.split(";"))
 
@@ -414,16 +416,16 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         qs = {k: v[0] for k, v in parse_qs(u.query).items()}
-        if u.path == "/" and LAN["on"] and qs.get("k") and secrets.compare_digest(qs["k"], LAN["token"]):
-            # Serve the page right away: a redirect after a link tapped in another app is a cross-site
-            # navigation, and Safari would drop the fresh cookie. Lax, not Strict, for the same reason;
-            # writes are still guarded by the Origin check in do_POST.
-            ck = f"af={LAN['token']}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax"
-            return self._send(200, PAGE, "text/html; charset=utf-8", [("Set-Cookie", ck)])
+        if u.path == "/":
+            # The page itself holds no data; it keeps the key in localStorage and sends it as a
+            # header, because privacy browsers (Cromite, Safari after a cross-site link) drop cookies.
+            ck = [("Set-Cookie", f"af={LAN['token']}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax")] \
+                if LAN["on"] and qs.get("k") and secrets.compare_digest(qs["k"], LAN["token"]) else []
+            return self._send(200, PAGE, "text/html; charset=utf-8", ck)
         if not self._authed():
-            msg = ("Нет входа. На Mac выполните `agentdrop forum url` и откройте ссылку с ключом на этом устройстве."
-                   if C["lang"] == "ru" else "Not logged in. Run `agentdrop forum url` on the Mac and open the key link here.")
-            return self._send(401, msg, "text/plain; charset=utf-8")
+            print(f"{stamp()} 401 {self.client_address[0]} {u.path} "
+                  f"cookie={'af=' in self.headers.get('Cookie', '')} header={bool(self.headers.get('X-Forum-Key'))}", flush=True)
+            return self._json({"error": "key"}, 401)
         if u.path == "/":
             return self._send(200, PAGE, "text/html; charset=utf-8")
         if u.path == "/api/projects":
@@ -625,9 +627,26 @@ function route() {
   const [p, ...d] = path.split("/").map(decodeURIComponent);
   return { p: p || "", doc: d.join("/"), t: t || "" };
 }
+const KEY = (() => {
+  const k = new URLSearchParams(location.search).get("k");
+  try { if (k) localStorage.setItem("af-key", k); return k || localStorage.getItem("af-key") || ""; } catch { return k || ""; }
+})();
+if (location.search) history.replaceState(null, "", "/" + location.hash);
+const _fetch = window.fetch.bind(window);
+window.fetch = (url, o = {}) => _fetch(url, { ...o, headers: { ...(o.headers || {}), "X-Forum-Key": KEY } });
+function askKey(bad) {
+  $("#bar").innerHTML = "";
+  $("#main").innerHTML = `<form class="newq" id="keyf"><h2>Вход · Sign in</h2>
+    <p class="hint">${bad ? "Ключ не подошёл. " : ""}На Mac: <code>agentdrop forum url</code>, скопируйте ключ после <code>k=</code> или всю ссылку.<br>On the Mac run <code>agentdrop forum url</code> and paste the key or the whole link.</p>
+    <textarea style="min-height:60px" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+    <div class="row"><button class="btn pri" type="submit">OK</button></div></form>`;
+  $("#keyf").onsubmit = (e) => { e.preventDefault(); const v = $("#keyf textarea").value.trim(); const k = (v.match(/[?&]k=([^&#\s]+)/) || [, v])[1];
+    try { localStorage.setItem("af-key", k); } catch {} location.reload(); };
+}
 async function boot() {
-  if (location.search.includes("k=")) history.replaceState(null, "", "/" + location.hash);
-  try { S = await (await fetch("/api/projects")).json(); } catch { $("#main").innerHTML = `<p class="empty">${esc(T.offline)}</p>`; return; }
+  let r; try { r = await fetch("/api/projects"); } catch { $("#main").innerHTML = `<p class="empty">${esc(T.offline)}</p>`; return; }
+  if (r.status === 401) return askKey(!!KEY);
+  S = await r.json();
   T = I18N[S.lang] || I18N.en; document.documentElement.lang = S.lang;
   if (S.projects.length === 1 && !location.hash) P = S.projects[0].id;
   window.onhashchange = show; show(); setInterval(tick, 4000);
