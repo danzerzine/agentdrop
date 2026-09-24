@@ -15,7 +15,7 @@ Two passes: the first collects and proposes; the second files into docs, only af
 2. **Split.** Each finding is one checkable claim with a location (file, screen, number), tagged with its source: `claude-ui #3`.
 3. **Merge duplicates.** The same problem in different words becomes one finding with a "who" column. Test: fixing one would fix the other. Similar but distinct findings (same place, different cause) stay separate. When sources disagree, it's one finding with status **question**, both positions in one line.
 4. **Check against project memory.**
-   - contradicts `docs/DECISIONS.md` → **reject**, citing the entry; `[model]` decisions are not the reviewer's to overturn;
+   - contradicts a `docs/DECISIONS.md` entry tagged `[model]` or naming a human author → **reject**, citing the entry; contradicts an entry with no named author (an agent default) → **question** for the owner, not a rejection: such entries don't shield themselves from critique;
    - already in `docs/TODO.md` → **duplicate** of `B<n>`;
    - already fixed (code, `docs/LOG.md`) → **closed**;
    - otherwise verify in code or the live product: **ticket**, **not confirmed**, or **question** when it's the owner's call (taste, scope, reversing a decision).

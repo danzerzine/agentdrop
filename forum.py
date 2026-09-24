@@ -44,7 +44,7 @@ def git_name():
 
 def config():
     c = {"author": git_name() or "Owner", "agent": "Agent", "lang": "en", "port": 5290,
-         "roots": ["~/Projects", "~/code", "~/src"], "projects": [], "answer": True,
+         "roots": ["~/Projects", "~/code", "~/src", "~/Downloads"], "projects": [], "answer": True,
          "agent_cmd": ["claude", "-p", "--output-format", "text", "--no-session-persistence",
                        "--permission-mode", "default", "--strict-mcp-config",
                        "--allowedTools", "Read,Grep,Glob,Bash(git log:*),Bash(git show:*),Bash(git diff:*)",
@@ -65,13 +65,13 @@ LAN = {"on": False, "token": ""}
 # ---------- projects ----------
 
 def is_project(d):
-    """An agentdrop project: AGENTS.md with the managed block and the docs/ layout."""
+    """An agentdrop project: AGENTS.md with the managed block (kit or older layout)."""
     try:
         with open(os.path.join(d, "AGENTS.md"), encoding="utf-8") as f:
             head = f.read()
     except OSError:
         return False
-    return "AGENTDROP" in head and os.path.exists(os.path.join(d, "docs", "STATE.md"))
+    return "AGENTDROP" in head
 
 
 def projects():
@@ -95,13 +95,28 @@ def projects():
     return out
 
 
+def mds(d):
+    return sorted(p for p in glob.glob(os.path.join(d, "*")) if p.lower().endswith(".md") and os.path.isfile(p))
+
+
+SKIP = {"AGENTS", "CLAUDE", "GEMINI", "README", "LOCAL"}
+
+
 def docs(root):
-    """Doc name → path relative to the project. Only these files can be read or written."""
+    """Doc name → path relative to the project. Only these files can be read or written.
+    Kit docs first, then other docs/*.md, then notes in the project root (older layouts
+    keep TODO.md or PITFALLS.md there), then specs and the review inbox."""
     out = {n: f"docs/{n}.md" for n in MAIN if os.path.exists(os.path.join(root, f"docs/{n}.md"))}
+    for d in ("docs", ""):
+        for p in mds(os.path.join(root, d)):
+            stem = os.path.basename(p).rsplit(".", 1)[0]
+            if stem.upper() in SKIP or os.path.relpath(p, root) in out.values():
+                continue
+            out[stem if stem not in out else "./" + stem] = os.path.relpath(p, root)
     for sub in ("specs", "reviews/inbox"):
-        for p in sorted(glob.glob(os.path.join(root, "docs", sub, "*.md"))):
+        for p in mds(os.path.join(root, "docs", sub)):
             rel = os.path.relpath(p, root)
-            out[rel[len("docs/"):-3]] = rel
+            out[rel[len("docs/"):].rsplit(".", 1)[0]] = rel
     return out
 
 
