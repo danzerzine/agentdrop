@@ -415,10 +415,15 @@ class H(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         qs = {k: v[0] for k, v in parse_qs(u.query).items()}
         if u.path == "/" and LAN["on"] and qs.get("k") and secrets.compare_digest(qs["k"], LAN["token"]):
-            ck = f"af={LAN['token']}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict"
-            return self._send(302, b"", "text/plain", [("Set-Cookie", ck), ("Location", "/")])
+            # Serve the page right away: a redirect after a link tapped in another app is a cross-site
+            # navigation, and Safari would drop the fresh cookie. Lax, not Strict, for the same reason;
+            # writes are still guarded by the Origin check in do_POST.
+            ck = f"af={LAN['token']}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax"
+            return self._send(200, PAGE, "text/html; charset=utf-8", [("Set-Cookie", ck)])
         if not self._authed():
-            return self._send(401, "Open the key link printed by: agentdrop forum url", "text/plain; charset=utf-8")
+            msg = ("Нет входа. На Mac выполните `agentdrop forum url` и откройте ссылку с ключом на этом устройстве."
+                   if C["lang"] == "ru" else "Not logged in. Run `agentdrop forum url` on the Mac and open the key link here.")
+            return self._send(401, msg, "text/plain; charset=utf-8")
         if u.path == "/":
             return self._send(200, PAGE, "text/html; charset=utf-8")
         if u.path == "/api/projects":
@@ -621,6 +626,7 @@ function route() {
   return { p: p || "", doc: d.join("/"), t: t || "" };
 }
 async function boot() {
+  if (location.search.includes("k=")) history.replaceState(null, "", "/" + location.hash);
   try { S = await (await fetch("/api/projects")).json(); } catch { $("#main").innerHTML = `<p class="empty">${esc(T.offline)}</p>`; return; }
   T = I18N[S.lang] || I18N.en; document.documentElement.lang = S.lang;
   if (S.projects.length === 1 && !location.hash) P = S.projects[0].id;
