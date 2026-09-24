@@ -32,6 +32,11 @@ LABEL = "com.agentdrop.forum"
 PLIST = os.path.join(HOME, "Library", "LaunchAgents", LABEL + ".plist")
 MAIN = ["QUESTIONS", "TODO", "STATE", "LOG", "DECISIONS", "CONTEXT", "PITFALLS", "CONVENTIONS", "OPERATIONS"]
 TOPICS = {"ru": "## Вопросы агенту", "en": "## Questions for the agent"}
+CLOSED = {"ru": "_Ветка закрыта._", "en": "_Thread closed._"}   # last line of a closed thread
+
+
+def closed(md):
+    return md.rstrip().endswith(tuple(CLOSED.values()))
 LOCK = threading.Lock()          # one markdown write at a time
 
 
@@ -284,6 +289,9 @@ How to answer:
   you will do and that it happens in the next working session. If it is a decision or an answer to the agent's
   question, confirm how you understood it and what follows from it;
 - if asked for a draft text, give it in full in a ```text block;
+- if the item is already done or the question is fully answered, and nothing is left for {author} to decide
+  or for anyone to do, end the answer with a separate last line `CLOSE`: the forum then closes the thread
+  ({author} can reopen it by replying). Otherwise do not write it;
 - output only the answer in markdown: no "{agent}, date" header, no ">" quote marks.
 
 The item with its thread:
@@ -315,7 +323,9 @@ def worker():
             b = next((x for x in blocks(read(job["path"])) if head in x["md"]), None)
             if b is None:
                 raise RuntimeError("the item with this comment is gone: the doc changed")
-            reply = ask_agent(root, job["path"], b["md"])
+            reply = ask_agent(root, job["path"], b["md"]).rstrip()
+            if reply.endswith("\nCLOSE") or reply == "CLOSE":
+                reply = reply[:-len("CLOSE")].rstrip() + "\n\n" + CLOSED.get(C["lang"], CLOSED["en"])
             if not append_to_block(job["path"], lambda x: head in x["md"], reply, C["agent"]):
                 raise RuntimeError("the item disappeared while the agent was thinking")
             JOBS.pop(key, None)
@@ -341,7 +351,9 @@ def view(root, name, path):
     for b in blocks(read(path)):
         body, msgs = thread(b["md"]) if b["kind"] in ("item", "para") else (b["md"], [])
         st, err = "", ""
-        if msgs and msgs[-1]["author"] != C["agent"]:
+        if msgs and closed(msgs[-1]["md"]):
+            st = "closed"
+        elif msgs and msgs[-1]["author"] != C["agent"]:
             job = JOBS.get((root, msgs[-1]["head"]))
             st, err = (job["state"], job["error"]) if job else ("waiting", "")
         out.append({"kind": b["kind"], "start": b["start"], "hash": b["hash"], "body": body,
@@ -470,7 +482,9 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/retry":
             enqueue(root, path, str(q.get("head", "")))
             return self._json({"ok": True})
-        if p != "/api/comment":
+        if p == "/api/close":
+            text, ask = CLOSED.get(C["lang"], CLOSED["en"]), False
+        elif p != "/api/comment":
             return self._send(404, "{}")
         if not text.strip():
             return self._json({"error": "empty comment"}, 400)
@@ -574,6 +588,9 @@ textarea:focus-visible, button:focus-visible, select:focus-visible { outline:2px
 .pill.new { background:var(--acc); color:var(--acc-ink) }
 .pill.wait { background:var(--warn-bg); color:var(--warn) }
 .pill.run { background:var(--me); color:var(--acc) }
+.pill.done { background:var(--bg); color:var(--ink2); border:1px solid var(--line) }
+details.thread summary { cursor:pointer; color:var(--ink2); font-size:14px; min-height:40px; display:flex; align-items:center; gap:6px }
+details.thread[open] { gap:8px }
 .pill.bad { background:var(--warn-bg); color:var(--err) }
 .seg { display:flex; gap:6px; flex-wrap:wrap; margin:16px 0 0 }
 .seg button { font:inherit; font-size:14px; min-height:36px; padding:0 14px; border-radius:999px; border:1px solid var(--line); background:var(--card); color:var(--ink); cursor:pointer }
@@ -597,6 +614,7 @@ const I18N = {
     reply:"Reply", discuss:"Discuss", sections:"Sections…", notFound:"Doc not found",
     stRun:"The agent is reading the repository and writing an answer", stQueued:"The agent is queued", stErr:"The agent did not answer: ", retry:"Retry",
     stWait:"No answer yet", askNow:"Ask the agent", phReply:"Reply", phNew:"Comment or question about this item", send:"Send", cancel:"Cancel", wantAnswer:"agent answers",
+    close:"Close", reopen:"Reopen", closedSum:"Discussion closed", closedPill:"closed",
     stale:"The item changed: reload the page", offline:"Forum is not reachable", noProjects:"No agentdrop projects found. Run agentdrop in a project or add one: agentdrop forum add PATH" },
   ru: { feed:"Лента", all:"Все проекты", more:"Ещё", docs:{QUESTIONS:"Вопросы",TODO:"Задачи",STATE:"Состояние",LOG:"Журнал",DECISIONS:"Решения",CONTEXT:"Контекст",PITFALLS:"Грабли",CONVENTIONS:"Правила",OPERATIONS:"Эксплуатация"},
     spec:"ТЗ · ", review:"Ревью · ", ask:"Вопрос агенту", askHint:"Агент прочитает репозиторий и ответит здесь, обычно за минуту. Вопрос ляжет в «Вопросы», раздел «Вопросы агенту».",
@@ -606,9 +624,11 @@ const I18N = {
     reply:"Ответить", discuss:"Обсудить", sections:"Разделы…", notFound:"Документ не найден",
     stRun:"Агент читает репозиторий и пишет ответ", stQueued:"Агент в очереди", stErr:"Агент не ответил: ", retry:"Повторить",
     stWait:"Ответа пока нет", askNow:"Спросить агента", phReply:"Ответ", phNew:"Комментарий или вопрос по этому пункту", send:"Отправить", cancel:"Отмена", wantAnswer:"ответ агента",
+    close:"Закрыть", reopen:"Открыть снова", closedSum:"Обсуждение закрыто", closedPill:"закрыто",
     stale:"Пункт изменился — обновите страницу", offline:"Нет связи с форумом", noProjects:"Проектов agentdrop не найдено. Запустите agentdrop в проекте или добавьте: agentdrop forum add ПУТЬ" } };
 const TABS = ["QUESTIONS","TODO","STATE","LOG"];
 const ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>';
+const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
 const $ = (s, r=document) => r.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const md = (s) => marked.parse(s).replace(/<table>/g, '<div class="tbl"><table>').replace(/<\/table>/g, "</table></div>");
@@ -619,6 +639,7 @@ const seen = (() => { try { return JSON.parse(localStorage.getItem("af-seen") ||
 const saveSeen = () => { try { localStorage.setItem("af-seen", JSON.stringify(seen)); } catch {} };
 const skey = (t) => t.stamp + "|" + t.count;
 const isNew = (t) => t.last === S.agent && seen[t.p + ":" + t.tid] !== skey(t);
+const OPEN = ["waiting", "queued", "running", "error"];
 const proj = () => S.projects.find(p => p.id === P);
 const go = (p, doc, t) => { location.hash = [p, doc].filter(Boolean).map(encodeURIComponent).join("/") + (t ? "~" + t : ""); };
 
@@ -681,14 +702,14 @@ async function feed(force) {
   bar(ts.filter(isNew).length);
   if (writing) return;
   if (!S.projects.length) { $("#main").innerHTML = `<p class="empty">${esc(T.noProjects)}</p>`; return; }
-  const order = (t) => (t.status==="running"||t.status==="queued") ? 0 : isNew(t) ? 1 : t.status ? 2 : 3;
+  const order = (t) => (t.status==="running"||t.status==="queued") ? 0 : isNew(t) ? 1 : OPEN.includes(t.status) ? 2 : t.status==="closed" ? 4 : 3;
   const when = (s) => { const m = s.match(/(\d+)\.(\d+)(?: (\d+):(\d+))?/); return m ? (+m[2])*1e6 + (+m[1])*1e4 + (+(m[3]||0))*100 + (+(m[4]||0)) : 0; };
   let list = ts.slice().sort((a, b) => order(a) - order(b) || when(b.stamp) - when(a.stamp));
   if (filter === "new") list = list.filter(t => order(t) <= 1);
-  if (filter === "wait") list = list.filter(t => t.status);
+  if (filter === "wait") list = list.filter(t => OPEN.includes(t.status));
   const pill = (t) => t.status==="running" ? `<span class="pill run">${T.running}</span>` : t.status==="queued" ? `<span class="pill run">${T.queued}</span>`
     : t.status==="error" ? `<span class="pill bad">${T.failed}</span>` : t.status==="waiting" ? `<span class="pill wait">${T.waiting}</span>`
-    : isNew(t) ? `<span class="pill new">${T.fresh}</span>` : "";
+    : isNew(t) ? `<span class="pill new">${T.fresh}</span>` : t.status==="closed" ? `<span class="pill done">${T.closedPill}</span>` : "";
   const multi = S.projects.length > 1;
   $("#main").innerHTML = `
     <form class="newq" id="newq">
@@ -731,6 +752,7 @@ async function doc(force, focusT) {
     + d.blocks.map(block).join("");
   const toc = $("#toc"); if (toc) toc.onchange = () => { document.querySelector(`[data-s="${toc.value}"]`)?.scrollIntoView({ behavior:"smooth" }); toc.value = ""; };
   $("#main").querySelectorAll("[data-c]").forEach(btn => btn.onclick = () => compose(btn, d.blocks[+btn.dataset.c]));
+  $("#main").querySelectorAll("[data-close]").forEach(btn => btn.onclick = async () => { const b = d.blocks[+btn.dataset.close]; await post("/api/close", { p: P, name: cur, start: b.start, hash: b.hash }); doc(true); });
   $("#main").querySelectorAll("[data-retry]").forEach(btn => btn.onclick = async () => { await post("/api/retry", { p: P, name: cur, head: d.blocks[+btn.dataset.retry].msgs.at(-1).head }); doc(true); });
   d.blocks.forEach(b => { if (b.msgs.length && b.msgs.at(-1).author === S.agent) seen[P + ":" + b.tid] = skey({ stamp: b.msgs.at(-1).stamp, count: b.msgs.length }); }); saveSeen();
   if (force && focusT) { const el = document.getElementById("t-" + focusT); if (el) { el.scrollIntoView({ block:"start" }); el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 1600); } }
@@ -740,8 +762,11 @@ async function doc(force, focusT) {
 function block(b, i) {
   const can = b.kind === "item" || b.kind === "para";
   let h = `<div class="blk ${b.kind}" id="t-${b.tid}" data-s="${b.start}">${md(b.body)}`;
-  if (b.msgs.length) h += `<div class="thread">${b.msgs.map(m => `<div class="msg ${m.author===S.agent?"":"me"}"><div class="who"><b>${esc(m.author)}</b><span>${esc(m.stamp)}</span></div>${md(m.md)}</div>`).join("")}${status(b, i)}</div>`;
-  if (can) h += `<div class="act ${b.msgs.length ? "" : "quiet"}"><button class="lnk" data-c="${i}">${ICON}${b.msgs.length ? T.reply : T.discuss}</button></div>`;
+  const msgs = b.msgs.map(m => `<div class="msg ${m.author===S.agent?"":"me"}"><div class="who"><b>${esc(m.author)}</b><span>${esc(m.stamp)}</span></div>${md(m.md)}</div>`).join("");
+  if (b.status === "closed") h += `<details class="thread"><summary>${T.closedSum} · ${T.msgs(b.msgs.length)}</summary>${msgs}</details>`;
+  else if (b.msgs.length) h += `<div class="thread">${msgs}${status(b, i)}</div>`;
+  if (can) h += `<div class="act ${b.msgs.length ? "" : "quiet"}"><button class="lnk" data-c="${i}">${ICON}${b.status === "closed" ? T.reopen : b.msgs.length ? T.reply : T.discuss}</button>`
+    + (b.msgs.length && b.status !== "closed" ? `<button class="lnk" data-close="${i}">${CHECK}${T.close}</button>` : "") + `</div>`;
   return h + "</div>";
 }
 function status(b, i) {
