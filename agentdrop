@@ -110,6 +110,7 @@ DEFAULT_COMMON = """# Working rules
 
 ## Product, data, and UI
 - UI quality is part of the work: inspect the real rendered product and its important states.
+- Design by the project's design system, never by eye. Before any UI change, read its design doc (named in `AGENTS.md`) and take every size, spacing, color and weight from a named role or token there. No role fits: stop and propose one to the owner, don't invent a value. When reporting UI work, name the roles you used.
 - For data work, answer the practical question; look for mechanisms, regime changes, anomalies. Separate evidence from interpretation without hiding behind caution, and end with concrete actions.
 
 ## Test and verify

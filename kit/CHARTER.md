@@ -2,7 +2,7 @@
 
 **Precedence:** the owner's live instruction > active spec in `docs/specs/` > `docs/DECISIONS.md` > other docs. If an instruction contradicts a decision, follow the instruction, name the conflict in one line and log a new decision. Decisions tagged `[model]` change only with their author.
 
-**Before work:** read `docs/STATE.md` and `docs/TODO.md`. Before product, architecture, data or deploy decisions, also read `docs/CONTEXT.md` and the relevant `docs/DECISIONS.md` entries. Before touching fragile code, read `docs/PITFALLS.md`.
+**Before work:** read `docs/STATE.md` and `docs/TODO.md`. Before product, architecture, data or deploy decisions, also read `docs/CONTEXT.md` and the relevant `docs/DECISIONS.md` entries. Before touching fragile code, read `docs/PITFALLS.md`. Before any UI change, read the project's design system doc named in `AGENTS.md`; sizes, spacing and colors come from its roles and tokens, not from the eye.
 
 | File | What goes there |
 |---|---|
