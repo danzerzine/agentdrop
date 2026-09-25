@@ -1,0 +1,3 @@
+# From agentdrop: the docs guard and git hooks are shell scripts and must stay LF on Windows too
+*.sh text eol=lf
+.githooks/* text eol=lf

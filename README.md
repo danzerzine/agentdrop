@@ -29,6 +29,30 @@ This copies the script to `~/.local/bin` and creates `~/.agentdrop/COMMON.md` (y
 
 Existing files keep their content. agentdrop only adds or updates a block between `<!-- AGENTDROP:… -->` markers and backs up every file to `~/.agentdrop/backups/` before it touches it.
 
+### Windows
+
+```powershell
+git clone https://github.com/danzerzine/agentdrop
+python agentdrop\agentdrop --install
+```
+
+On Windows, `--install` puts three files into `%USERPROFILE%\.local\bin`:
+- `agentdrop.py`;
+- `agentdrop.cmd`, the launcher for cmd and PowerShell;
+- `agentdrop`, the launcher for Git Bash.
+
+The launchers look for a working `python`, then fall back to `py -3`. That way they skip the Microsoft Store stub and cope with pyenv-win's `.bat` shims.
+
+The folder goes onto your user PATH directly in the registry, not through `setx`. `setx` truncates a long PATH. Open a new terminal afterwards.
+
+Other Windows behaviour:
+- Files keep their line endings and BOM.
+- The console prints ASCII when it can't show `✓`.
+- The kit's shell scripts are written with LF, because a clone with `core.autocrlf=true` would give them CRLF.
+- `agentdrop edit` uses `$EDITOR`, then the `.md` association, then Notepad.
+
+The docs guard and the git hook need `bash`. Git for Windows ships it, and Claude Code uses it for hooks.
+
 ## Everyday use
 
 ```sh

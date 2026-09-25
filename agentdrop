@@ -33,6 +33,32 @@ import subprocess
 import sys
 from pathlib import Path
 
+WINDOWS = platform.system() == "Windows"
+
+
+def _console_safe() -> None:
+    """A Windows console or pipe may be cp866/cp1251: print ASCII stand-ins for our few symbols."""
+    import builtins
+    enc = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        "✓·—→".encode(enc)
+        return
+    except (UnicodeEncodeError, LookupError):
+        pass
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(errors="replace")
+        except Exception:
+            pass
+    table = str.maketrans({"✓": "+", "·": ".", "—": "-", "→": "->"})
+    plain = builtins.print
+
+    def safe_print(*args, **kwargs):
+        plain(*(str(a).translate(table) for a in args), **kwargs)
+
+    builtins.print = safe_print
+
+
 HOME = Path.home()
 STATE = HOME / ".agentdrop"
 COMMON = STATE / "COMMON.md"
@@ -190,7 +216,7 @@ def ensure_state() -> None:
     if not KIT.exists() and bundled.is_dir():
         shutil.copytree(bundled, KIT)
     if not COMMON.exists():
-        COMMON.write_text(DEFAULT_COMMON.rstrip() + "\n", encoding="utf-8")
+        write(COMMON, DEFAULT_COMMON.rstrip() + "\n")
         return
 
     # Migrate managed blocks without replacing the user's own edits.
@@ -210,7 +236,7 @@ def ensure_state() -> None:
         backup_dir = BACKUPS / now_stamp()
         backup_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(COMMON, backup_dir / "COMMON.md")
-        COMMON.write_text(migrated, encoding="utf-8")
+        write(COMMON, migrated)
 
 
 def backup(path: Path) -> None:
@@ -227,10 +253,12 @@ def backup(path: Path) -> None:
 
 
 def read(path: Path) -> str:
+    # utf-8-sig: Windows editors (Notepad, PowerShell 5.1) prepend a BOM, which would hide
+    # a first-line "@AGENTS.md" import from the regex. Newlines come back as "\n".
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:
-        return path.read_text(encoding="utf-8", errors="replace")
+        return path.read_text(encoding="utf-8-sig", errors="replace")
 
 
 def write(path: Path, text: str, dry: bool = False) -> bool:
@@ -240,9 +268,15 @@ def write(path: Path, text: str, dry: bool = False) -> bool:
     if dry:
         return True
     path.parent.mkdir(parents=True, exist_ok=True)
+    # keep the file's own line endings and BOM; new files get "\n" on every OS
+    newline, bom = "\n", False
     if path.exists():
+        raw = path.read_bytes()
+        newline = "\r\n" if b"\r\n" in raw else "\n"
+        bom = raw.startswith(b"\xef\xbb\xbf")
         backup(path)
-    path.write_text(text, encoding="utf-8")
+    with open(path, "w", encoding="utf-8-sig" if bom else "utf-8", newline=newline) as f:
+        f.write(text)
     return True
 
 
@@ -418,7 +452,13 @@ def copy_kit(root: Path, dry: bool = False) -> None:
             continue
         if not dry:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
+            data = src.read_bytes()
+            if data.startswith(b"#!"):
+                # a Windows clone (core.autocrlf) gives the kit CRLF; bash and git hooks want LF
+                dest.write_bytes(data.replace(b"\r\n", b"\n"))
+                shutil.copystat(src, dest)
+            else:
+                shutil.copy2(src, dest)
         print(f"✓ {rel:<40} — {'would create' if dry else 'created'}")
 
 
@@ -439,8 +479,12 @@ def ensure_stop_hook(root: Path, dry: bool = False) -> None:
 
 
 def ensure_hooks_path(root: Path, dry: bool = False) -> None:
-    r = subprocess.run(["git", "-C", str(root), "config", "core.hooksPath"],
-                       text=True, capture_output=True)
+    try:
+        r = subprocess.run(["git", "-C", str(root), "config", "core.hooksPath"],
+                           text=True, capture_output=True)
+    except FileNotFoundError:
+        print("! git not found — .githooks/pre-commit not activated")
+        return
     current = r.stdout.strip()
     if current == ".githooks":
         print("· git core.hooksPath                      — already .githooks")
@@ -474,11 +518,11 @@ def bootstrap_project(root: Path, dry: bool = False) -> None:
     # load them twice per session. The project block carries only the charter.
     project_payload = (read(CHARTER) if kit else PROJECT_BLOCK).rstrip()
     if kit and not agents.exists() and not dry:
-        agents.write_text(
+        write(
+            agents,
             f"# {root.name}\n\n"
             "_What this project is, in one or two sentences. Project-specific rules go here,\n"
             "above the managed block; `agentdrop` refreshes the block below._\n",
-            encoding="utf-8",
         )
     changed, action = managed_merge(
         agents, project_payload, PROJECT_START, PROJECT_END, dry=dry
@@ -523,7 +567,7 @@ def bootstrap_project(root: Path, dry: bool = False) -> None:
             continue
         content = project_template_with_meta(filename, body, root)
         if not dry:
-            path.write_text(content.rstrip() + "\n", encoding="utf-8")
+            write(path, content.rstrip() + "\n")
         print(f"✓ {filename:<14} — {'would create' if dry else 'created'}")
 
     # Report other instruction systems without trying to mash incompatible formats together.
@@ -554,8 +598,115 @@ def bootstrap_project(root: Path, dry: bool = False) -> None:
         print("\nDone. Open this folder in any harness; its own existing instructions were preserved.")
 
 
+WIN_CMD_SHIM = """@echo off
+rem agentdrop launcher for cmd and PowerShell; the script itself is agentdrop.py next to this file
+rem "call": python may itself be a .bat shim (pyenv-win) that would otherwise never return
+setlocal
+set "AGENTDROP=%~dp0agentdrop.py"
+call python -c "" >nul 2>&1 || goto trypy
+call python "%AGENTDROP%" %*
+exit /b %ERRORLEVEL%
+:trypy
+call py -3 -c "" >nul 2>&1 || goto nopython
+call py -3 "%AGENTDROP%" %*
+exit /b %ERRORLEVEL%
+:nopython
+echo agentdrop: Python 3 not found. Install it from python.org and tick "Add python.exe to PATH". 1>&2
+exit /b 9009
+"""
+
+WIN_SH_SHIM = """#!/bin/sh
+# agentdrop launcher for Git Bash / MSYS; the script itself is agentdrop.py next to this file
+here=$(dirname "$0")
+# the Microsoft Store "python" stub exists but fails, so probe before using
+for py in python python3; do
+  "$py" -c "" >/dev/null 2>&1 && exec "$py" "$here/agentdrop.py" "$@"
+done
+command -v py >/dev/null 2>&1 && exec py -3 "$here/agentdrop.py" "$@"
+echo "agentdrop: Python 3 not found" >&2
+exit 127
+"""
+
+
+def _win_user_path_add(bindir: Path) -> bool:
+    """Put bindir on the user PATH (HKCU\\Environment) without setx: setx cuts PATH at 1024 chars
+    and flattens %VARS%. Returns True if PATH changed."""
+    import ctypes
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                        winreg.KEY_READ | winreg.KEY_WRITE) as key:
+        try:
+            value, kind = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            value, kind = "", winreg.REG_EXPAND_SZ
+        parts = [p for p in value.split(";") if p]
+        norm = lambda p: os.path.normcase(os.path.expandvars(p)).rstrip("\\/")
+        if norm(str(bindir)) in {norm(p) for p in parts}:
+            return False
+        home = str(HOME)
+        entry = "%USERPROFILE%" + str(bindir)[len(home):] if str(bindir).startswith(home) else str(bindir)
+        if kind not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+            kind = winreg.REG_EXPAND_SZ
+        if "%" in entry:
+            kind = winreg.REG_EXPAND_SZ
+        winreg.SetValueEx(key, "Path", 0, kind, ";".join(parts + [entry]))
+    # tell Explorer (and so new terminals) that the environment changed
+    HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG = 0xFFFF, 0x1A, 0x2
+    ctypes.windll.user32.SendMessageTimeoutW(
+        HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", SMTO_ABORTIFHUNG, 3000,
+        ctypes.byref(ctypes.c_ulong()))
+    return True
+
+
+def install_self_windows(dry: bool = False) -> None:
+    """Windows: agentdrop.py + agentdrop.cmd (cmd/PowerShell) + agentdrop (Git Bash) in ~/.local/bin."""
+    src = Path(__file__).resolve()
+    bindir = HOME / ".local" / "bin"
+    dest = bindir / "agentdrop.py"
+    on_path = os.path.normcase(str(bindir)) in {
+        os.path.normcase(p.rstrip("\\/")) for p in os.environ.get("PATH", "").split(os.pathsep) if p}
+
+    if dry:
+        print(f"Would install {src} -> {dest}")
+        print(f"Would create launchers {bindir / 'agentdrop.cmd'} and {bindir / 'agentdrop'}")
+        if not on_path:
+            print(f"Would add {bindir} to the user PATH")
+        sync_globals(dry=True)
+        return
+
+    bindir.mkdir(parents=True, exist_ok=True)
+    if dest.resolve() != src:
+        backup(dest)
+        dest.write_bytes(src.read_bytes().replace(b"\r\n", b"\n"))
+    # cmd.exe wants CRLF in .cmd files; sh wants LF
+    for name, body, nl in (("agentdrop.cmd", WIN_CMD_SHIM, "\r\n"), ("agentdrop", WIN_SH_SHIM, "\n")):
+        shim = bindir / name
+        if shim.exists() and shim.read_bytes() != body.replace("\n", nl).encode():
+            backup(shim)
+        with open(shim, "w", encoding="ascii", newline=nl) as f:
+            f.write(body)
+
+    print(f"Installed: {dest}")
+    print(f"           {bindir / 'agentdrop.cmd'} (cmd, PowerShell) and {bindir / 'agentdrop'} (Git Bash)")
+    if not on_path:
+        try:
+            if _win_user_path_add(bindir):
+                print(f"Added to the user PATH: {bindir}")
+        except OSError as e:
+            print(f"! Could not update the user PATH ({e}). Add {bindir} to it by hand.")
+    sync_globals(dry=False)
+    print("\nOpen a new terminal (cmd, PowerShell or Git Bash), then use:")
+    print("  cd $HOME\\Projects\\MyProject; agentdrop")
+    print("or:")
+    print("  agentdrop $HOME\\Projects\\MyProject")
+
+
 def install_self(dry: bool = False) -> None:
     ensure_state()
+    if WINDOWS:
+        install_self_windows(dry)
+        return
     src = Path(__file__).resolve()
     bindir = HOME / ".local" / "bin"
     dest = bindir / "agentdrop"
@@ -593,8 +744,19 @@ def open_common() -> None:
     ensure_state()
     if platform.system() == "Darwin":
         subprocess.run(["open", "-e", str(COMMON)])
-    elif platform.system() == "Windows":
-        os.startfile(str(COMMON))  # type: ignore[attr-defined]
+    elif WINDOWS:
+        # $EDITOR first (may carry flags, e.g. "code -w"); .md often has no association, so Notepad last
+        editor = os.environ.get("EDITOR")
+        if editor:
+            try:
+                subprocess.run(f'{editor} "{COMMON}"', shell=True, check=True)
+                return
+            except (OSError, subprocess.CalledProcessError):
+                pass
+        try:
+            os.startfile(str(COMMON), "edit")  # type: ignore[attr-defined]
+        except OSError:
+            subprocess.Popen(["notepad.exe", str(COMMON)])
     else:
         editor = os.environ.get("EDITOR")
         if editor:
@@ -611,6 +773,7 @@ def main() -> None:
     parser.add_argument("--install", action="store_true", help="Install agentdrop command and sync global rules")
     parser.add_argument("--dry-run", action="store_true", help="Show what would change")
     args = parser.parse_args()
+    _console_safe()
 
     if args.install:
         install_self(dry=args.dry_run)

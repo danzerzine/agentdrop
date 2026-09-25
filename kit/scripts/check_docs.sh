@@ -33,7 +33,10 @@ Reviews and audits: ask to process reviews, the review-intake skill collects the
 Anything else: merge into a docs/*.md, move to docs/archive/, or add the path to .docs-allow."
 
 if [ "$mode" = --stop-hook ]; then
-  python3 -c 'import json,sys; print(json.dumps({"systemMessage": sys.argv[1]}))' "$msg"
+  # JSON by hand: python3 may be missing, or a Microsoft Store stub, on Windows
+  json=$(printf '%s' "$msg" | tr -d '\r' | tr '\t' ' ' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' |
+    awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }')
+  printf '{"systemMessage": "%s"}\n' "$json"
   exit 0
 fi
 echo "$msg" >&2
