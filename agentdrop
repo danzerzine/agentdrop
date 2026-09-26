@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import platform
@@ -72,12 +73,21 @@ KIT = STATE / "kit"            # project skeleton: docs/, skill, guard; files co
 CHARTER = KIT / "CHARTER.md"   # generic charter, goes into AGENTS.md managed block
 LEGACY_FILES = ("HANDOFF.md", "PROGRESS.md", "PITFALLS.md", "PROJECT_CONTEXT.md")
 KIT_SKIP = {"CHARTER.md", ".claude/settings.json"}
+KIT_LOCK = STATE / "kit.lock.json"   # what agentdrop last installed, so updates skip the user's edits
+KIT_NEW = STATE / "kit.new"          # new versions of files the user edited, to merge by hand
+SOURCE = STATE / "source"            # path of the agentdrop clone --install ran from (for harvest)
 MODES = KIT / "modes"          # opt-in overlays, e.g. modes/research: CHARTER.md block + files
 RESEARCH = MODES / "research"
 RESEARCH_START = "<!-- AGENTDROP:RESEARCH:START -->"
 RESEARCH_END = "<!-- AGENTDROP:RESEARCH:END -->"
 RESEARCH_ALLOW = r"^docs/(ASKS|HYPOTHESES|CLAIMS)\.md$"
 STOP_HOOK_CMD = '"$CLAUDE_PROJECT_DIR"/scripts/check_docs.sh --stop-hook'
+START_HOOK_CMD = '"$CLAUDE_PROJECT_DIR"/scripts/check_docs.sh --session-start'
+# Kit files agentdrop owns: refreshed in projects on every run (old copy backed up), unlike the
+# docs templates, which are only created. Project-specific tweaks go to .docs-allow and AGENTS.md.
+OWNED = {"scripts/check_docs.sh", ".githooks/pre-commit", ".claude/skills/review-intake/SKILL.md",
+         ".claude/skills/harvest/SKILL.md", "scripts/owner_asks.py", ".claude/agents/skeptic.md",
+         ".claude/agents/acceptance-judge.md"}
 
 # Where the project docs live relative to git: the owner's answer is kept in the code repo's
 # local config, so a re-run never moves them back.
@@ -86,11 +96,12 @@ DOCS_KEY = "agentdrop.docs"
 DOCS_GIT = ".git-docs"
 # leave the code repo in "separate" and "local" modes (LOCAL.md is never committed anywhere)
 DOCS_PATHS = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", "LOCAL.md", ".docs-allow", "docs/",
-              ".githooks/", "scripts/check_docs.sh", "scripts/owner_asks.py", ".claude/")
+              ".githooks/", "scripts/check_docs.sh", ".claude/")
 # what the separate docs repo holds; the rest of .claude/ (worktrees, local settings) stays out
 DOCS_REPO_PATHS = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", ".docs-allow", "docs", ".githooks",
-                   "scripts/check_docs.sh", "scripts/owner_asks.py", ".claude/CLAUDE.md",
-                   ".claude/settings.json", ".claude/skills", ".claude/agents")
+                   "scripts/check_docs.sh", ".claude/CLAUDE.md", ".claude/settings.json", ".claude/skills")
+RESEARCH_DOCS_PATHS = ("scripts/owner_asks.py",)             # added in research mode
+RESEARCH_REPO_PATHS = ("scripts/owner_asks.py", ".claude/agents")
 EXCLUDE_START = "# >>> agentdrop: project docs are not in this repo (agentdrop --docs)"
 EXCLUDE_END = "# <<< agentdrop"
 DOCS_FILES_PHRASE = ("the docs, `AGENTS.md`, `GEMINI.md`, `.claude/`, `.githooks/`, `.docs-allow` "
@@ -254,22 +265,63 @@ def now_stamp() -> str:
     return dt.datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
+def sha(data: bytes) -> str:
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+
+
+def update_kit(bundled: Path) -> None:
+    """Bring ~/.agentdrop/kit and COMMON.md up to the bundled version without losing edits.
+
+    A file agentdrop installed and nobody touched since is replaced; a missing one is added;
+    one the user edited stays, and the new version goes next to it (kit.new/, COMMON.new.md).
+    """
+    try:
+        lock = json.loads(read(KIT_LOCK)) if KIT_LOCK.exists() else {}
+    except json.JSONDecodeError:
+        lock = {}
+    kept = []
+
+    def place(key: str, new: bytes, dest: Path, side: Path, mode_from: Path | None = None) -> None:
+        new_sha = sha(new)
+        if dest.exists():
+            cur = sha(dest.read_bytes())
+            if cur == new_sha:
+                lock[key] = new_sha
+                return
+            if lock.get(key) != cur:          # edited by the user, or installed before the lock
+                if not side.exists() or side.read_bytes() != new:
+                    side.parent.mkdir(parents=True, exist_ok=True)
+                    side.write_bytes(new)
+                    kept.append(side)
+                return
+            backup(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(new)
+        if mode_from:
+            shutil.copymode(mode_from, dest)
+        lock[key] = new_sha
+
+    for src in sorted(bundled.rglob("*")):
+        if src.is_file() and src.name != ".DS_Store" and "__pycache__" not in src.parts:
+            rel = src.relative_to(bundled).as_posix()
+            place(rel, src.read_bytes(), KIT / rel, KIT_NEW / rel, src)
+    place("COMMON.md", (DEFAULT_COMMON.rstrip() + "\n").encode(), COMMON, STATE / "COMMON.new.md")
+    write(KIT_LOCK, json.dumps(lock, indent=1, sort_keys=True) + "\n")
+    if kept:
+        print(f"! Kept your edited versions; the new ones are next to them ({len(kept)}):")
+        for side in kept:
+            print(f"    {side}")
+        print("  Ask your agent to merge them, then delete the .new copies.")
+
+
 def ensure_state() -> None:
     STATE.mkdir(parents=True, exist_ok=True)
     BACKUPS.mkdir(parents=True, exist_ok=True)
     bundled = Path(__file__).resolve().parent / "kit"
-    if not KIT.exists() and bundled.is_dir():
-        shutil.copytree(bundled, KIT)
-    elif (bundled / "modes").is_dir():
-        # modes arrive with updates; add missing files only, never touch the user's edits
-        for src in (bundled / "modes").rglob("*"):
-            dest = MODES / src.relative_to(bundled / "modes")
-            if src.is_file() and src.name != ".DS_Store" and not dest.exists():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dest)
-    if not COMMON.exists():
+    if bundled.is_dir():                      # running from a clone: install or update the kit
+        update_kit(bundled)
+    elif not COMMON.exists():
         write(COMMON, DEFAULT_COMMON.rstrip() + "\n")
-        return
 
     # Migrate managed blocks without replacing the user's own edits.
     existing = COMMON.read_text(encoding="utf-8", errors="replace")
@@ -502,7 +554,13 @@ def copy_kit(root: Path, dry: bool = False, src_root: Path = KIT) -> list[str]:
             continue
         dest = root / rel
         if dest.exists():
-            continue
+            if rel not in OWNED or sha(dest.read_bytes()) == sha(src.read_bytes()):
+                continue
+            if not dry:
+                backup(dest)
+            action = "would update" if dry else "updated (old copy in ~/.agentdrop/backups)"
+        else:
+            action = "would create" if dry else "created"
         if not dry:
             dest.parent.mkdir(parents=True, exist_ok=True)
             data = src.read_bytes()
@@ -512,7 +570,7 @@ def copy_kit(root: Path, dry: bool = False, src_root: Path = KIT) -> list[str]:
                 shutil.copystat(src, dest)
             else:
                 shutil.copy2(src, dest)
-        print(f"✓ {rel:<40} — {'would create' if dry else 'created'}")
+        print(f"✓ {rel:<40} — {action}")
         created.append(rel)
     return created
 
@@ -576,20 +634,29 @@ def apply_research(root: Path, on: bool, dry: bool = False) -> list[str]:
     return created
 
 
-def ensure_stop_hook(root: Path, dry: bool = False) -> None:
+def ensure_hooks(root: Path, dry: bool = False) -> None:
+    """Claude Code hooks: the docs guard on Stop, reminders (harvest, research asks) on SessionStart."""
     path = root / ".claude" / "settings.json"
     try:
         data = json.loads(read(path)) if path.exists() else {}
     except json.JSONDecodeError:
-        print(f"! {path.relative_to(root)} — not valid JSON, Stop hook not added")
+        print(f"! {path.relative_to(root)} — not valid JSON, hooks not added")
         return
-    stops = data.setdefault("hooks", {}).setdefault("Stop", [])
-    if any("check_docs.sh" in h.get("command", "") for g in stops for h in g.get("hooks", [])):
-        print("· .claude/settings.json                   — Stop hook present")
+    wanted = [("Stop", STOP_HOOK_CMD, "--stop-hook")]
+    guard = root / "scripts" / "check_docs.sh"
+    if dry or (guard.exists() and "--session-start" in read(guard)):
+        wanted.append(("SessionStart", START_HOOK_CMD, "--session-start"))
+    added = []
+    for event, cmd, flag in wanted:
+        groups = data.setdefault("hooks", {}).setdefault(event, [])
+        if not any(flag in h.get("command", "") for g in groups for h in g.get("hooks", [])):
+            groups.append({"hooks": [{"type": "command", "command": cmd}]})
+            added.append(event)
+    if not added:
+        print("· .claude/settings.json                   — hooks present")
         return
-    stops.append({"hooks": [{"type": "command", "command": STOP_HOOK_CMD}]})
     write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n", dry)
-    print(f"✓ .claude/settings.json                   — {'would add' if dry else 'added'} Stop hook")
+    print(f"✓ .claude/settings.json                   — {'would add' if dry else 'added'} {' and '.join(added)} hook")
 
 
 def git(root: Path, *args: str, git_dir: Path | None = None) -> subprocess.CompletedProcess:
@@ -672,6 +739,9 @@ def update_exclude(root: Path, lines: list[str], dry: bool) -> bool:
 
 
 def apply_docs_mode(root: Path, mode: str, created: list[str], dry: bool = False) -> None:
+    research = research_on(root)
+    docs_paths = DOCS_PATHS + (RESEARCH_DOCS_PATHS if research else ())
+    repo_paths = DOCS_REPO_PATHS + (RESEARCH_REPO_PATHS if research else ())
     docs_git = root / DOCS_GIT
     prefix = git(root, "rev-parse", "--show-prefix").stdout.strip()   # project may sit below the repo top
 
@@ -684,7 +754,7 @@ def apply_docs_mode(root: Path, mode: str, created: list[str], dry: bool = False
         print("Project docs stay in the code repo; the agent commits them with its next coherent iteration.")
         return
 
-    lines = [f"/{prefix}{p}" for p in (DOCS_GIT + "/", *DOCS_PATHS)]
+    lines = [f"/{prefix}{p}" for p in (DOCS_GIT + "/", *docs_paths)]
     changed = update_exclude(root, lines, dry)
     print(f"{'✓' if changed else '·'} .git/info/exclude                        — "
           f"{'would list' if dry and changed else 'listed' if changed else 'already lists'} the docs paths")
@@ -701,8 +771,8 @@ def apply_docs_mode(root: Path, mode: str, created: list[str], dry: bool = False
                 git(root, "config", "status.showUntrackedFiles", "no", git_dir=docs_git)
             print(f"✓ {DOCS_GIT + '/':<40} — {'would create' if dry else 'created'} the local docs repo")
         ensure_hooks_path(root, dry, git_dir=docs_git)
-        in_repo = lambda rel: any(rel == p or rel.startswith(p + "/") for p in DOCS_REPO_PATHS)
-        to_add = [p for p in DOCS_REPO_PATHS if (root / p).exists()] if fresh else [c for c in created if in_repo(c)]
+        in_repo = lambda rel: any(rel == p or rel.startswith(p + "/") for p in repo_paths)
+        to_add = [p for p in repo_paths if (root / p).exists()] if fresh else [c for c in created if in_repo(c)]
         if to_add:
             if not dry:
                 r = git(root, "add", "--", *to_add, git_dir=docs_git)
@@ -716,9 +786,9 @@ def apply_docs_mode(root: Path, mode: str, created: list[str], dry: bool = False
             print(f"! {DOCS_GIT} left in place with its history; agentdrop no longer uses it")
         print("Project docs stay on this machine only, outside git.")
 
-    tracked = [t for t in git(root, "ls-files", "-z", "--", *(p.rstrip("/") for p in DOCS_PATHS)).stdout.split("\0") if t]
+    tracked = [t for t in git(root, "ls-files", "-z", "--", *(p.rstrip("/") for p in docs_paths)).stdout.split("\0") if t]
     if tracked:
-        specs = [p.rstrip("/") for p in DOCS_PATHS
+        specs = [p.rstrip("/") for p in docs_paths
                  if any(t == p.rstrip("/") or t.startswith(p) for t in tracked)]
         print(f"! {len(tracked)} of these files are still tracked in the code repo; the exclude list doesn't untrack them.")
         print(f"  Untrack them, keeping the files:  git rm -r -q --cached -- {' '.join(specs)}")
@@ -792,7 +862,7 @@ def bootstrap_project(root: Path, dry: bool = False, docs: str | None = None,
     if kit:
         created = copy_kit(root, dry=dry)
         created += apply_research(root, research, dry=dry)
-        ensure_stop_hook(root, dry=dry)
+        ensure_hooks(root, dry=dry)
     elif research:
         print("! Research mode needs the docs/ kit layout; migrate the old notes first.")
     elif CHARTER.exists():
@@ -956,6 +1026,9 @@ def install_self_windows(dry: bool = False) -> None:
 
 def install_self(dry: bool = False) -> None:
     ensure_state()
+    repo = Path(__file__).resolve().parent
+    if not dry and (repo / ".git").exists():   # the harvest skill proposes upstream edits here
+        write(SOURCE, str(repo) + "\n")
     if WINDOWS:
         install_self_windows(dry)
         return

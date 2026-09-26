@@ -6,6 +6,8 @@ Only what the owner typed: no tool results, system inserts or post-compaction su
     python3 scripts/owner_asks.py --new          messages after the "Checked up to" mark in docs/ASKS.md
     python3 scripts/owner_asks.py --since 2026-09-26T12:00
     python3 scripts/owner_asks.py --dump data/owner_asks   write messages.jsonl + messages.md there
+    python3 scripts/owner_asks.py --hook         one line for the SessionStart hook (scripts/check_docs.sh):
+                                                 how many messages wait for a row; silent when none, never fails
 
 Times are UTC, as in the transcripts. Two numbered series: M for ordinary turns, Q for
 messages sent while the agent was working (queued) or starting with a paste; Q used to be
@@ -16,6 +18,7 @@ old session transcripts or the numbers shift.
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,7 +27,7 @@ ASKS = ROOT / "docs/ASKS.md"
 MARK_RE = re.compile(r"(?:Checked up to|Сверено по):\s*(\d{4}-\d\d-\d\dT\d\d:\d\d)")
 
 SKIP_PREFIX = ("<", "[Request interrupted", "Caveat:", "This session is being continued")
-PASTE_RE = re.compile(r"<pasted_content[^>]*>(.*?)</pasted_content[^>]*>", re.S)
+PASTE_RE = re.compile(r"<pasted_content[^>]*>(.*?)</pasted_content[^>]*>", re.DOTALL)
 MARKER_RE = re.compile(r"^<!-- (?:reply|attach) -->\s*")  # desktop app: reply-to-quote, attachment
 SECRET_RE = re.compile(
     r"(?i)((?:api[_ -]?key|apikey|token|bearer|password|пароль)\W{0,3}[:=]?\s*)\S{6,}"
@@ -40,12 +43,12 @@ def text_of(content):
 
 def compact_comment(text):
     """An artifact comment: keep the address, the location and the owner's own text."""
-    body = re.search(r"=== BEGIN ARTIFACT COMMENT \S+ ===\n(.*?)\n=== END", text, re.S)
+    body = re.search(r"=== BEGIN ARTIFACT COMMENT \S+ ===\n(.*?)\n=== END", text, re.DOTALL)
     if not body:
         return text
     url = re.search(r"Artifact: (\S+)", text)
     loc = re.search(r"Location: (.*)", text)
-    body = re.sub(r"^> ?", "", body.group(1), flags=re.M).strip()
+    body = re.sub(r"^> ?", "", body.group(1), flags=re.MULTILINE).strip()
     return f"[artifact comment {url.group(1) if url else '?'} · {loc.group(1).strip() if loc else '?'}]\n{body}"
 
 
@@ -99,20 +102,45 @@ def show(m, limit=1500):
     return f"--- {m['id']} · {m['ts'][:16]} · {m['session']}\n{text[:limit]}\n"
 
 
+def since_mark():
+    mark = MARK_RE.search(ASKS.read_text(encoding="utf-8")) if ASKS.exists() else None
+    return mark.group(1) if mark else ""
+
+
+def hook():
+    if not TRANSCRIPTS.is_dir():
+        return
+    since = since_mark()
+    n = sum(1 for m in load() if m["ts"][:16] > since)
+    if n:
+        text = (f"agentdrop research mode: {n} owner messages since the 'Checked up to' mark in docs/ASKS.md. "
+                "Before the pass ends, run `python3 scripts/owner_asks.py --new`, give every research ask a row "
+                "(verbatim, mode, ticket, status) and move the mark.")
+        print(text)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--new", action="store_true", help="messages after the mark in docs/ASKS.md")
     ap.add_argument("--since", default="", help="messages from this UTC time on, e.g. 2026-09-26T12:00")
     ap.add_argument("--dump", metavar="DIR", help="write messages.jsonl and messages.md into DIR")
+    ap.add_argument("--hook", action="store_true", help="SessionStart hook output (JSON), silent if nothing new")
     args = ap.parse_args()
+    if hasattr(sys.stdout, "reconfigure"):  # Windows consoles default to a legacy code page
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if args.hook:
+        try:
+            hook()
+        except Exception:  # noqa: BLE001, S110 — a reminder must never break the session
+            pass
+        return
     if not TRANSCRIPTS.is_dir():
         raise SystemExit(f"No Claude Code transcripts at {TRANSCRIPTS}; reread the conversation by hand.")
     rows = load()
 
     since = args.since
     if args.new:
-        mark = MARK_RE.search(ASKS.read_text(encoding="utf-8")) if ASKS.exists() else None
-        since = mark.group(1) if mark else ""
+        since = since_mark()
     rows = [m for m in rows if m["ts"][:16] > since] if args.new else [m for m in rows if m["ts"] >= since]
 
     if args.dump:

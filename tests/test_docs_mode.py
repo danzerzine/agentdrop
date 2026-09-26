@@ -41,6 +41,8 @@ class DocsMode(unittest.TestCase):
                               text=True, capture_output=True).stdout.strip()
 
     def run_agentdrop(self, *args, answer=None):
+        if answer is not None and not {"--research", "--no-research"} & set(args):
+            args = ("--no-research", *args)   # only the docs question here; research has its own tests
         cmd = [sys.executable, str(SCRIPT), *args, "."]
         if answer is None:
             r = subprocess.run(cmd, cwd=self.root, env=self.env, text=True,

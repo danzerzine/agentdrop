@@ -26,3 +26,5 @@ Every markdown file lives in a place from this table or `.docs-allow`; `scripts/
 **Threads in docs:** the owner comments under an item as `> **Name, dd.mm hh:mm:** …`. Answer under the comment in the same quote format, not only in chat; keep the thread until the item is archived; commit it with your pass. A thread ending in `_Thread closed._` (or `_Ветка закрыта._`) is resolved: in your next pass finish the item by the project's rules (move it to done, remove the ticket, log the decision).
 
 **Finishing a pass:** entry in `LOG.md`; update `STATE.md` if the picture changed; remove the done ticket from `TODO.md`. Commit only your own files, no AI attribution.
+
+**Harvest:** lessons that would help any project go up into the owner's agentdrop rules, not only into this project's docs. When five or more passes sit above the `<!-- harvest -->` marker in `LOG.md` (in Claude Code a SessionStart hook says so), or a pass produced a rule that isn't about this project, offer a harvest in one line; the `harvest` skill (`.claude/skills/harvest/SKILL.md`, other harnesses: read and follow it) proposes and writes after the owner's OK.

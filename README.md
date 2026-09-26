@@ -4,6 +4,16 @@
 
 You keep one set of working rules and run one command. After that, Claude Code, Codex, Gemini CLI, OpenCode and Command Code all read the same instructions. The command also sets up a new project with a docs layout that agents keep tidy. Projects that explore the unknown can add a research mode on top.
 
+It is meant as a bicycle for the mind, in Steve Jobs's phrase, for people who think faster than they can keep track. Nothing depends on holding things in your head: every ask, decision and trap lands in a file the next session reads. And what one project teaches doesn't stay there. It flows back into your rules, so the next project starts smarter:
+
+```
+you work ──► the agent writes docs as it goes ──► lessons pile up in LOG, CONVENTIONS, PITFALLS
+   ▲                                                              │
+   │                                  every few passes the agent offers a harvest
+   │                                                              ▼
+every project and harness ◄── agentdrop sync ◄── your rules (~/.agentdrop) ──► upstream, if you share
+```
+
 ```sh
 agentdrop .                 # set up the current project
 agentdrop --research .      # same, with research mode
@@ -30,7 +40,7 @@ This copies the script to `~/.local/bin` and creates `~/.agentdrop/COMMON.md` (y
 
 Existing files keep their content. agentdrop only adds or updates a block between `<!-- AGENTDROP:… -->` markers and backs up every file to `~/.agentdrop/backups/` before it touches it.
 
-Run the same command again after `git pull`: it updates the script and adds new kit modes without touching the ones you edited.
+Run the same command again after `git pull` to update. Files agentdrop installed and you never touched are replaced with the new versions. Files you edited stay as they are, and the new version lands next to them (`~/.agentdrop/kit.new/`, `COMMON.new.md`) for your agent to merge.
 
 ### Windows
 
@@ -55,7 +65,7 @@ Other Windows behaviour:
 - `agentdrop edit` uses `$EDITOR`, then the `.md` association, then Notepad.
 - The docs question needs a console. If Git Bash skips it, run agentdrop from cmd or PowerShell, or pass `--docs`. The `.git-docs` commands it prints use double quotes, so they paste into cmd as well.
 
-The docs guard and the git hook need `bash`. Git for Windows ships it, and Claude Code uses it for hooks.
+The docs guard, the git hook and the SessionStart reminders need `bash`. Git for Windows ships it, and Claude Code uses it for hooks. The research reminder also needs Python; the hook tries `python3`, `python` and `py -3` and skips the Microsoft Store stub.
 
 ## Everyday use
 
@@ -88,11 +98,26 @@ docs/
   specs/ research/ archive/
   reviews/inbox/           drop raw reviews here
 .claude/skills/review-intake/
+.claude/skills/harvest/    moves lessons from this project into your rules
+.claude/settings.json      Claude Code hooks: the guard on Stop, reminders on SessionStart
 scripts/check_docs.sh      guard: markdown only where the map allows
 .githooks/pre-commit       runs the guard on staged files
 ```
 
+The docs templates are created once and are yours from then on. The files agentdrop owns (the guard, the git hook, the skills, the research scripts and agents) are refreshed on every `agentdrop .`, with the old copy backed up.
+
 The managed block in `AGENTS.md` holds only the charter: where each kind of note goes, how to finish a pass, and which file wins when instructions conflict. A new entry in `DECISIONS.md` has to end with a `Decided: who, where, quote` line; the guard rejects it otherwise, so agent defaults land in `QUESTIONS.md` instead of posing as decisions. Your common rules stay in the global configs, so no session loads them twice. Anything project-specific goes above the block. agentdrop never rewrites that part.
+
+## The loop: harvest
+
+A project keeps learning: a convention after a mistake, a trap, a decision about how to work. Most of it is about that project. Some of it is about working at all, and that part should reach every project.
+
+When five passes have piled up in `docs/LOG.md` since the last harvest, a SessionStart hook tells the agent, and the agent offers a harvest in one line. Other harnesses follow the same rule from the charter. The `harvest` skill then works like review intake, in two steps:
+
+1. It reads what the project gained since the last harvest, keeps the lessons that would change how an agent works anywhere, rewrites them without project names and checks them against your rules. You get a numbered table: the lesson as it will be written, where it goes (your `COMMON.md`, the kit charter, research mode), whether it's general enough to share.
+2. You answer "ok" or "3 → personal, 5 drop". It writes into `~/.agentdrop/`, runs `agentdrop sync` so every harness picks it up, and moves the harvest marker in `LOG.md`.
+
+If you installed from a clone, agentdrop remembers where it is (`~/.agentdrop/source`). Lessons you mark as general are then prepared there on a branch with the tests run, and pushed only after a second OK. Without a clone, the skill gives you the text of an issue for this repository.
 
 ## Research mode
 
@@ -118,11 +143,13 @@ The rules, in short:
 - The agent tags each ask as a question, a "wide" ask, an idea, an errand or a correction. A wide ask is accepted by breadth: where the agent searched and what it found beyond the owner's example.
 - Collect first, filter later. Correlations are recorded as experiment candidates, and every report ends with **Nearby**: two to five neighbouring topics with a number each, for the owner to pick from.
 - Hypotheses get one standard check: within a segment, a placebo on an outcome the feature shouldn't move, a minimum sample. The prediction is written before the numbers.
-- Claims carry a level (fact on our data, observation, hypothesis, someone else's opinion) and change it only through the registry, after the skeptic has had a go.
+- Claims carry a level (fact on our data, observation, hypothesis, someone else's opinion) and change it only through the registry. The skeptic's verdict is recorded next to each: holds, holds narrowed, withdrawn. In texts for people the level shows in the words: "we counted", "the data shows", "it looks like".
 - When several tickets rebuild the same data, the project builds one verified table instead, checked against raw by three independent agents.
 - A summary across passes says what we learned that we didn't know at the start. An early guess stays only with new evidence behind it.
 
-`owner_asks.py --new` reads Claude Code transcripts, including messages sent while the agent was busy, which naive readers miss. In other harnesses the agent rereads the conversation instead. The mode lives in the `AGENTS.md` block: rerunning `agentdrop .` keeps it, `--no-research` removes the block and leaves the registries in place.
+`owner_asks.py --new` reads Claude Code transcripts, including messages sent while the agent was busy, which naive readers miss. In Claude Code the SessionStart hook runs it for you and tells the agent how many of your messages still wait for a row; other harnesses reread the conversation. The mode lives in the `AGENTS.md` block: rerunning `agentdrop .` keeps it, `--no-research` removes the block and leaves the registries in place.
+
+The skeptic and the claims registry have already been through a real project: its first run narrowed all three headline claims it checked and showed that one "step change" was noise. The hypotheses registry is the newest part and is marked experimental in the charter; harvest will refine it as projects use it.
 
 ## Docs in the code repo, or not
 
@@ -156,7 +183,8 @@ Comment right under a ticket or a question, as a quote: `> **Name, 24.09 12:30:*
 ## Customize
 
 - **Rules:** `agentdrop edit`, then `agentdrop sync`.
-- **Charter and templates:** edit files in `~/.agentdrop/kit/`, then run `agentdrop .` in a project. Only missing files are copied; the charter block is refreshed every time.
+- **Charter and templates:** edit files in `~/.agentdrop/kit/`, then run `agentdrop .` in a project. Templates are copied only when missing; the charter block and the files agentdrop owns are refreshed every time.
+- **Or let harvest do it:** most edits to your rules come from your own projects; see "The loop" above.
 - **Research mode:** its block and files live in `~/.agentdrop/kit/modes/research/`. Edit `CHARTER.md` there and rerun `agentdrop .` in research projects to refresh the block.
 
 ## Older layouts

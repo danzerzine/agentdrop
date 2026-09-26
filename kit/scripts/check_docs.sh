@@ -4,11 +4,42 @@
 #   scripts/check_docs.sh              whole tree; exit 2 if stray files
 #   scripts/check_docs.sh --staged     only files added in this commit (pre-commit)
 #   scripts/check_docs.sh --stop-hook  Claude Code Stop hook: warn, don't block
+#   scripts/check_docs.sh --session-start  Claude Code SessionStart hook: tells the agent
+#                                      when enough passes piled up since the last harvest
 # With a .git-docs folder (docs in a separate local repo) the checks run against it.
 # Project-specific allowed paths: .docs-allow, one ERE per line.
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
 mode=${1:-}
+
+# SessionStart: reminders for the agent, never a failure. Passes logged since the last
+# harvest ("## " entries above <!-- harvest --> in docs/LOG.md); in research mode, owner
+# messages not yet registered in docs/ASKS.md. No git needed.
+if [ "$mode" = --session-start ]; then
+  cd "$(dirname "$0")/.."
+  notes=()
+  every=${AGENTDROP_HARVEST_EVERY:-5}
+  n=$(awk '/^<!-- harvest -->/ { exit } /^## / { n++ } END { print n + 0 }' docs/LOG.md 2>/dev/null || echo 0)
+  if [ "$n" -ge "$every" ]; then
+    notes+=("agentdrop: $n passes logged in docs/LOG.md since the last harvest. At a natural pause, offer the owner in one line to harvest lessons (skill .claude/skills/harvest/SKILL.md) so what this project taught reaches their rules for every project.")
+  fi
+  if [ -f scripts/owner_asks.py ] && [ -f docs/ASKS.md ]; then
+    # python3, python or py -3, whichever runs (Windows has a Store stub named python3)
+    for py in python3 python "py -3"; do
+      if $py -c "" >/dev/null 2>&1; then
+        asks=$($py scripts/owner_asks.py --hook 2>/dev/null || true)
+        [ -n "$asks" ] && notes+=("$asks")
+        break
+      fi
+    done
+  fi
+  [ ${#notes[@]} -eq 0 ] && exit 0
+  text=$(printf '%s\n' "${notes[@]}" | tr -d '\r' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' |
+    awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }')
+  printf '{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "%s"}}\n' "$text"
+  exit 0
+fi
+
+cd "$(git rev-parse --show-toplevel)"
 # Docs in a local repo next to the code one (agentdrop --docs separate): check that repo.
 # Its commit hook already arrives with GIT_DIR set.
 if [ -z "${GIT_DIR:-}" ] && [ -d .git-docs ]; then

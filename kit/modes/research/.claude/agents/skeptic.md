@@ -25,7 +25,6 @@ For the claim you are given:
 Never edit project files, commit or publish. Temporary files go to a scratch
 directory and are removed when you finish.
 
-Return: verdict (holds / holds with narrower wording / level too high /
-refuted), the evidence level the claim deserves (fact / observation /
-hypothesis / opinion), each attack you ran with the command and the number it
+Return: verdict (holds / holds narrowed / withdrawn / can't check), the
+evidence level the claim deserves (fact / observation / hypothesis / opinion), each attack you ran with the command and the number it
 gave, and a suggested wording. Separate what you verified from what you assume.
