@@ -15,6 +15,8 @@ Project skeleton (docs/, charter, review-intake skill, docs guard) lives at:
   agentdrop /path/to/project   Bootstrap/sync a project
   agentdrop .                  Bootstrap/sync current project without the extra cwd prompt
   agentdrop --dry-run [PATH]   Preview changes; defaults to the current directory
+  agentdrop --docs MODE PATH   Docs in the code repo (track), a local .git-docs (separate)
+                               or nowhere (local); asked on the first run, then remembered
 
 The master rules live at:
   ~/.agentdrop/COMMON.md
@@ -69,6 +71,38 @@ CHARTER = KIT / "CHARTER.md"   # generic charter, goes into AGENTS.md managed bl
 LEGACY_FILES = ("HANDOFF.md", "PROGRESS.md", "PITFALLS.md", "PROJECT_CONTEXT.md")
 KIT_SKIP = {"CHARTER.md", ".claude/settings.json"}
 STOP_HOOK_CMD = '"$CLAUDE_PROJECT_DIR"/scripts/check_docs.sh --stop-hook'
+
+# Where the project docs live relative to git: the owner's answer is kept in the code repo's
+# local config, so a re-run never moves them back.
+DOCS_MODES = ("track", "separate", "local")
+DOCS_KEY = "agentdrop.docs"
+DOCS_GIT = ".git-docs"
+# leave the code repo in "separate" and "local" modes (LOCAL.md is never committed anywhere)
+DOCS_PATHS = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", "LOCAL.md", ".docs-allow", "docs/",
+              ".githooks/", "scripts/check_docs.sh", ".claude/")
+# what the separate docs repo holds; the rest of .claude/ (worktrees, local settings) stays out
+DOCS_REPO_PATHS = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", ".docs-allow", "docs", ".githooks",
+                   "scripts/check_docs.sh", ".claude/CLAUDE.md", ".claude/settings.json", ".claude/skills")
+EXCLUDE_START = "# >>> agentdrop: project docs are not in this repo (agentdrop --docs)"
+EXCLUDE_END = "# <<< agentdrop"
+DOCS_FILES_PHRASE = ("the docs, `AGENTS.md`, `GEMINI.md`, `.claude/`, `.githooks/`, `.docs-allow` "
+                     "and `scripts/check_docs.sh`")
+DOCS_NOTES = {
+    "track": "",
+    "separate": (
+        "**Two repos in one folder.** The code repo (`.git`) holds the code; "
+        f"{DOCS_FILES_PHRASE} live in a local-only repo. Run every git command on them (`add`, `mv`, "
+        "`commit`, `log`) as `git --git-dir=.git-docs --work-tree=. …`; it shows only its own files "
+        "(`status.showUntrackedFiles=no`), so add new files by name. The code repo ignores these paths "
+        "through `.git/info/exclude`: never `git add -f` them there, never push `.git-docs`."
+    ),
+    "local": (
+        f"**Docs outside git.** {DOCS_FILES_PHRASE[0].upper()}{DOCS_FILES_PHRASE[1:]} live only on this "
+        "machine; the code repo ignores them through `.git/info/exclude`. Never `git add -f` them, use "
+        "plain `mv` instead of `git mv` and leave them out of commits. Nothing keeps their history, so "
+        "archive rather than delete."
+    ),
+}
 
 GLOBAL_START = "<!-- AGENTDROP:COMMON:START -->"
 GLOBAL_END = "<!-- AGENTDROP:COMMON:END -->"
@@ -444,7 +478,8 @@ def uses_kit(root: Path) -> bool:
     return not any((root / f).exists() for f in LEGACY_FILES)
 
 
-def copy_kit(root: Path, dry: bool = False) -> None:
+def copy_kit(root: Path, dry: bool = False) -> list[str]:
+    created = []
     for src in sorted(KIT.rglob("*")):
         rel = src.relative_to(KIT).as_posix()
         if src.is_dir() or rel in KIT_SKIP or src.name == ".DS_Store":
@@ -462,6 +497,8 @@ def copy_kit(root: Path, dry: bool = False) -> None:
             else:
                 shutil.copy2(src, dest)
         print(f"✓ {rel:<40} — {'would create' if dry else 'created'}")
+        created.append(rel)
+    return created
 
 
 def ensure_stop_hook(root: Path, dry: bool = False) -> None:
@@ -480,25 +517,140 @@ def ensure_stop_hook(root: Path, dry: bool = False) -> None:
     print(f"✓ .claude/settings.json                   — {'would add' if dry else 'added'} Stop hook")
 
 
-def ensure_hooks_path(root: Path, dry: bool = False) -> None:
+def git(root: Path, *args: str, git_dir: Path | None = None) -> subprocess.CompletedProcess:
+    cmd = ["git", "-C", str(root)]
+    if git_dir:
+        cmd += [f"--git-dir={git_dir}", f"--work-tree={root}"]
+    # git prints paths in UTF-8 whatever the Windows console code page is
+    return subprocess.run(cmd + list(args), capture_output=True, encoding="utf-8", errors="replace")
+
+
+def ensure_hooks_path(root: Path, dry: bool = False, git_dir: Path | None = None) -> None:
+    label = f"{DOCS_GIT} core.hooksPath" if git_dir else "git core.hooksPath"
     try:
-        r = subprocess.run(["git", "-C", str(root), "config", "core.hooksPath"],
-                           text=True, capture_output=True)
+        current = git(root, "config", "core.hooksPath", git_dir=git_dir).stdout.strip()
     except FileNotFoundError:
         print("! git not found — .githooks/pre-commit not activated")
         return
-    current = r.stdout.strip()
     if current == ".githooks":
-        print("· git core.hooksPath                      — already .githooks")
+        print(f"· {label:<40} — already .githooks")
     elif current:
-        print(f"! git core.hooksPath is '{current}' — left as is; .githooks/pre-commit not active")
+        print(f"! {label} is '{current}' — left as is; .githooks/pre-commit not active")
     else:
         if not dry:
-            subprocess.run(["git", "-C", str(root), "config", "core.hooksPath", ".githooks"], check=True)
-        print(f"✓ git core.hooksPath = .githooks          — {'would set' if dry else 'set'}")
+            git(root, "config", "core.hooksPath", ".githooks", git_dir=git_dir).check_returncode()
+        print(f"✓ {label + ' = .githooks':<40} — {'would set' if dry else 'set'}")
 
 
-def bootstrap_project(root: Path, dry: bool = False) -> None:
+def saved_docs_mode(root: Path) -> str | None:
+    mode = git(root, "config", "--get", DOCS_KEY).stdout.strip()
+    if mode in DOCS_MODES:
+        return mode
+    if (root / DOCS_GIT).is_dir():   # a docs repo set up by hand before agentdrop asked
+        return "separate"
+    return None
+
+
+def ask_docs_mode(dry: bool) -> tuple[str | None, bool]:
+    """(mode, save): the owner's answer is saved; a default for a run without a terminal is not."""
+    if dry:
+        print("· docs in git  — not chosen yet: agentdrop will ask (or pass --docs track|separate|local)")
+        return None, False
+    if not sys.stdin.isatty():
+        print("· docs in git  — no terminal to ask: left in the code repo this time "
+              "(to choose: agentdrop --docs track|separate|local .)")
+        return "track", False
+    print("\nWhere should the project docs and agent files live?")
+    print("  (docs/, AGENTS.md, GEMINI.md, .claude/, .githooks/, scripts/check_docs.sh)")
+    print("  1) in this git repo, committed with the code")
+    print(f"  2) in a separate local git in this folder ({DOCS_GIT}), never pushed")
+    print("  3) only on this machine, ignored by git, no history")
+    choices = {"": "track", "1": "track", "2": "separate", "3": "local", **{m: m for m in DOCS_MODES}}
+    while True:
+        try:
+            answer = input("Choice [1]: ").strip().lower()
+        except EOFError:
+            answer = ""
+        except KeyboardInterrupt:
+            print("\nNot chosen; agentdrop will ask again next time.")
+            return None, False
+        if answer in choices:
+            return choices[answer], True
+        print("Type 1, 2 or 3.")
+
+
+def update_exclude(root: Path, lines: list[str], dry: bool) -> bool:
+    """Our marked block in .git/info/exclude holds the lines the file doesn't already have."""
+    path = Path(git(root, "rev-parse", "--git-path", "info/exclude").stdout.strip())
+    path = root / path   # relative to root unless git gave an absolute path (worktrees)
+    existing = read(path) if path.exists() else ""
+    block_re = re.compile(r"\n*" + re.escape(EXCLUDE_START) + r".*?" + re.escape(EXCLUDE_END) + r"\n?", re.S)
+    rest = block_re.sub("\n", existing).rstrip("\n")
+    have = {ln.strip().lstrip("/") for ln in rest.splitlines()}
+    missing = [ln for ln in lines if ln.lstrip("/") not in have]
+    if not missing and not block_re.search(existing):
+        return False
+    text = rest + "\n" if rest else ""
+    if missing:
+        text += ("\n" if rest else "") + "\n".join([EXCLUDE_START, *missing, EXCLUDE_END]) + "\n"
+    return write(path, text, dry)
+
+
+def apply_docs_mode(root: Path, mode: str, created: list[str], dry: bool = False) -> None:
+    docs_git = root / DOCS_GIT
+    prefix = git(root, "rev-parse", "--show-prefix").stdout.strip()   # project may sit below the repo top
+
+    if mode == "track":
+        if update_exclude(root, [], dry):
+            print(f"✓ .git/info/exclude                        — {'would remove' if dry else 'removed'} the agentdrop docs block")
+        ensure_hooks_path(root, dry)
+        if docs_git.is_dir():
+            print(f"! {DOCS_GIT} left in place; the docs now belong to the code repo: git add them there")
+        print("Project docs stay in the code repo; the agent commits them with its next coherent iteration.")
+        return
+
+    lines = [f"/{prefix}{p}" for p in (DOCS_GIT + "/", *DOCS_PATHS)]
+    changed = update_exclude(root, lines, dry)
+    print(f"{'✓' if changed else '·'} .git/info/exclude                        — "
+          f"{'would list' if dry and changed else 'listed' if changed else 'already lists'} the docs paths")
+    if git(root, "config", "core.hooksPath").stdout.strip() == ".githooks":
+        if not dry:
+            git(root, "config", "--unset", "core.hooksPath")
+        print(f"✓ git core.hooksPath (code repo)           — {'would unset' if dry else 'unset'}")
+
+    if mode == "separate":
+        fresh = not docs_git.exists()
+        if fresh:
+            if not dry:
+                git(root, "init", "-q", git_dir=docs_git).check_returncode()
+                git(root, "config", "status.showUntrackedFiles", "no", git_dir=docs_git)
+            print(f"✓ {DOCS_GIT + '/':<40} — {'would create' if dry else 'created'} the local docs repo")
+        ensure_hooks_path(root, dry, git_dir=docs_git)
+        in_repo = lambda rel: any(rel == p or rel.startswith(p + "/") for p in DOCS_REPO_PATHS)
+        to_add = [p for p in DOCS_REPO_PATHS if (root / p).exists()] if fresh else [c for c in created if in_repo(c)]
+        if to_add:
+            if not dry:
+                r = git(root, "add", "--", *to_add, git_dir=docs_git)
+                if r.returncode:
+                    print(f"! {DOCS_GIT}: git add failed — {r.stderr.strip().splitlines()[0]}")
+            print(f"✓ {DOCS_GIT + '/':<40} — {'would stage' if dry else 'staged'} {len(to_add)} path(s), not committed")
+        print(f"Project docs live in {DOCS_GIT}, never pushed. Commit them with:")
+        print(f'  git --git-dir={DOCS_GIT} --work-tree=. commit -m "docs: ..."')
+    else:
+        if docs_git.is_dir():
+            print(f"! {DOCS_GIT} left in place with its history; agentdrop no longer uses it")
+        print("Project docs stay on this machine only, outside git.")
+
+    tracked = [t for t in git(root, "ls-files", "-z", "--", *(p.rstrip("/") for p in DOCS_PATHS)).stdout.split("\0") if t]
+    if tracked:
+        specs = [p.rstrip("/") for p in DOCS_PATHS
+                 if any(t == p.rstrip("/") or t.startswith(p) for t in tracked)]
+        print(f"! {len(tracked)} of these files are still tracked in the code repo; the exclude list doesn't untrack them.")
+        print(f"  Untrack them, keeping the files:  git rm -r -q --cached -- {' '.join(specs)}")
+        print("  Past commits still contain them; removing them from history takes git filter-repo.")
+
+
+def bootstrap_project(root: Path, dry: bool = False, docs: str | None = None) -> None:
     ensure_state()
     root = root.expanduser().resolve()
     if not root.exists():
@@ -519,6 +671,12 @@ def bootstrap_project(root: Path, dry: bool = False) -> None:
     # Common rules reach every harness through the global sync; repeating them here would
     # load them twice per session. The project block carries only the charter.
     project_payload = (read(CHARTER) if kit else PROJECT_BLOCK).rstrip()
+    is_git, branch = git_info(root)
+    # --docs, else the earlier answer; still unknown → asked once the layout is in place
+    docs_mode = (docs or saved_docs_mode(root)) if kit and is_git else None
+    save_mode = bool(docs_mode) and not dry
+    if docs_mode and DOCS_NOTES[docs_mode]:
+        project_payload += "\n\n" + DOCS_NOTES[docs_mode]
     if kit and not agents.exists() and not dry:
         write(
             agents,
@@ -551,12 +709,10 @@ def bootstrap_project(root: Path, dry: bool = False) -> None:
     changed, action = ensure_import(gemini, "@AGENTS.md", dry=dry)
     print(f"{'✓' if changed else '·'} Gemini bridge  GEMINI.md — {action}")
 
-    is_git_repo, _ = git_info(root)
+    created = []
     if kit:
-        copy_kit(root, dry=dry)
+        created = copy_kit(root, dry=dry)
         ensure_stop_hook(root, dry=dry)
-        if is_git_repo:
-            ensure_hooks_path(root, dry=dry)
     elif CHARTER.exists():
         print("! Old layout (root HANDOFF/PROGRESS/...): docs/ kit not applied.")
         print("  To migrate, ask the agent to move the notes into the docs/ layout from ~/.agentdrop/kit, then run agentdrop again.")
@@ -587,8 +743,20 @@ def bootstrap_project(root: Path, dry: bool = False) -> None:
         for p in found:
             print(f"  · {p.relative_to(root)}")
 
-    is_git, branch = git_info(root)
-    if is_git:
+    if is_git and kit:
+        print(f"\nGit repository detected (branch: {branch}).")
+        if not docs_mode:
+            docs_mode, save_mode = ask_docs_mode(dry)
+            if docs_mode and DOCS_NOTES[docs_mode]:
+                managed_merge(agents, project_payload + "\n\n" + DOCS_NOTES[docs_mode],
+                              PROJECT_START, PROJECT_END, dry=dry)
+                print("✓ AGENTS.md      — added the docs-in-git note to the managed block")
+        if docs_mode:
+            if save_mode:
+                git(root, "config", DOCS_KEY, docs_mode)
+            print(f"Docs mode: {docs_mode}{'' if save_mode or dry else ' (this run only)'}")
+            apply_docs_mode(root, docs_mode, created, dry=dry)
+    elif is_git:
         print(f"\nGit repository detected (branch: {branch}).")
         print("Project memory files are intentionally left trackable; the agent can commit them with the next coherent iteration.")
     else:
@@ -788,6 +956,10 @@ def main() -> None:
     parser.add_argument("target", nargs="?", help="Project directory, or one of: sync, edit")
     parser.add_argument("--install", action="store_true", help="Install agentdrop command and sync global rules")
     parser.add_argument("--dry-run", action="store_true", help="Show what would change")
+    parser.add_argument("--docs", choices=DOCS_MODES,
+                        help="Where project docs live: track (in the code repo), separate (local "
+                             ".git-docs in the same folder) or local (ignored, no history). "
+                             "Saved per repo; asked on the first run if omitted")
     args = parser.parse_args()
     _console_safe()
 
@@ -808,7 +980,7 @@ def main() -> None:
 
         # `agentdrop --dry-run` is deliberately non-interactive and previews CWD.
         if args.dry_run:
-            bootstrap_project(cwd, dry=True)
+            bootstrap_project(cwd, dry=True, docs=args.docs)
             return
 
         print(f"\nAgentDrop will bootstrap/sync the current directory:\n  {cwd}\n")
@@ -818,7 +990,8 @@ def main() -> None:
         print("  - add/update harness bridges without overwriting their own instructions")
         print("  - create missing docs/ skeleton, review-intake skill and docs guard (~/.agentdrop/kit)")
         print("  - back up any existing file before AgentDrop changes it")
-        print("\nIt will NOT initialize Git, commit automatically, or overwrite project memory.")
+        print("  - ask whether the docs go into this repo, a local .git-docs, or nowhere (git repos only)")
+        print("\nIt will NOT initialize the project's Git, commit automatically, or overwrite project memory.")
 
         try:
             answer = input("\nProceed? [y/N] ").strip().lower()
@@ -830,10 +1003,10 @@ def main() -> None:
             print("Cancelled.")
             return
 
-        bootstrap_project(cwd, dry=False)
+        bootstrap_project(cwd, dry=False, docs=args.docs)
         return
 
-    bootstrap_project(Path(args.target), dry=args.dry_run)
+    bootstrap_project(Path(args.target), dry=args.dry_run, docs=args.docs)
 
 
 if __name__ == "__main__":

@@ -4,10 +4,16 @@
 #   scripts/check_docs.sh              whole tree; exit 2 if stray files
 #   scripts/check_docs.sh --staged     only files added in this commit (pre-commit)
 #   scripts/check_docs.sh --stop-hook  Claude Code Stop hook: warn, don't block
+# With a .git-docs folder (docs in a separate local repo) the checks run against it.
 # Project-specific allowed paths: .docs-allow, one ERE per line.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 mode=${1:-}
+# Docs in a local repo next to the code one (agentdrop --docs separate): check that repo.
+# Its commit hook already arrives with GIT_DIR set.
+if [ -z "${GIT_DIR:-}" ] && [ -d .git-docs ]; then
+  export GIT_DIR=.git-docs GIT_WORK_TREE=.
+fi
 
 allowed='^(AGENTS|CLAUDE|GEMINI|README|LOCAL|CHANGELOG|CONTRIBUTING|LICENSE)\.md$'
 allowed+='|^docs/(CONTEXT|DECISIONS|CONVENTIONS|PITFALLS|OPERATIONS|STATE|TODO|QUESTIONS|LOG)\.md$'

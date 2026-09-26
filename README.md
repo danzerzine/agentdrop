@@ -50,6 +50,7 @@ Other Windows behaviour:
 - The console prints ASCII when it can't show `✓`.
 - The kit's shell scripts are written with LF, because a clone with `core.autocrlf=true` would give them CRLF.
 - `agentdrop edit` uses `$EDITOR`, then the `.md` association, then Notepad.
+- The docs question needs a console. If Git Bash skips it, run agentdrop from cmd or PowerShell, or pass `--docs`. The `.git-docs` commands it prints use double quotes, so they paste into cmd as well.
 
 The docs guard and the git hook need `bash`. Git for Windows ships it, and Claude Code uses it for hooks.
 
@@ -61,6 +62,7 @@ agentdrop sync              # push edited rules to all harnesses
 agentdrop .                 # set up or refresh the project you're in
 agentdrop ~/code/app        # same, for another path
 agentdrop --dry-run .       # show what would change
+agentdrop --docs separate . # keep the docs out of the code repo (see below)
 ```
 
 ## What a project gets
@@ -86,6 +88,18 @@ scripts/check_docs.sh      guard: markdown only where the map allows
 ```
 
 The managed block in `AGENTS.md` holds only the charter: where each kind of note goes, how to finish a pass, and which file wins when instructions conflict. Your common rules stay in the global configs, so no session loads them twice. Anything project-specific goes above the block. agentdrop never rewrites that part.
+
+## Docs in the code repo, or not
+
+The first time agentdrop sets up a git project, it asks where the docs and agent files (`docs/`, `AGENTS.md`, `GEMINI.md`, `CLAUDE.md`, `.claude/`, `.githooks/`, `.docs-allow`, `scripts/check_docs.sh`) should live:
+
+1. **track**: in the project's own repo, committed with the code. This is the default.
+2. **separate**: in a second, local-only git in the same folder, `.git-docs`. The code repo ignores those paths through `.git/info/exclude`, the pre-commit guard moves to `.git-docs`, and `AGENTS.md` tells agents to commit docs with `git --git-dir=.git-docs --work-tree=. commit`. Nothing from it reaches GitHub.
+3. **local**: the same paths ignored by the code repo, with no version control at all.
+
+The answer is saved in the repo's local git config (`agentdrop.docs`), so later runs keep the docs where you put them. A folder that already has a `.git-docs` counts as "separate". To change your mind, run `agentdrop --docs track|separate|local .`. agentdrop never deletes `.git-docs` and never untracks files by itself. If docs were already committed to the code repo, it prints the `git rm --cached` command; the old commits keep them until you rewrite history with `git filter-repo`.
+
+Without a terminal (CI, a pipe) there is no question: the docs stay in the code repo for that run and nothing is saved. Pass `--docs` there.
 
 ## Reviews without the mess
 
