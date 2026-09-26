@@ -1,10 +1,8 @@
 # agentdrop
 
-**Dotfiles for your coding agents.**
+**Recursive self-improvement for humans.**
 
-You keep one set of working rules and run one command. After that, Claude Code, Codex, Gemini CLI, OpenCode and Command Code all read the same instructions. The command also sets up a new project with a docs layout that agents keep tidy. Projects that explore the unknown can add a research mode on top.
-
-It is meant as a bicycle for the mind, in Steve Jobs's phrase, for people who think faster than they can keep track. Nothing depends on holding things in your head: every ask, decision and trap lands in a file the next session reads. And what one project teaches doesn't stay there. It flows back into your rules, so the next project starts smarter:
+AI people use that phrase for a model that makes itself smarter. agentdrop runs the same loop through you. Every project you do with a coding agent teaches something: a rule after a mistake, a trap in the data, a better way to ask. agentdrop catches those lessons in files as you work, lifts the ones that matter beyond one project into your own rules, and hands those rules to every agent in the next project. Each project starts smarter than the last, and so do you.
 
 ```
 you work ──► the agent writes docs as it goes ──► lessons pile up in LOG, CONVENTIONS, PITFALLS
@@ -13,6 +11,10 @@ you work ──► the agent writes docs as it goes ──► lessons pile up in
    │                                                              ▼
 every project and harness ◄── agentdrop sync ◄── your rules (~/.agentdrop) ──► upstream, if you share
 ```
+
+It's built for people who think faster than they can keep track. Nothing depends on holding things in your head: every ask, decision and trap lands in a file the next session reads, and the agent is reminded to look.
+
+Under the hood it's plain: one set of working rules and one command. After that, Claude Code, Codex, Gemini CLI, OpenCode and Command Code all read the same instructions, and each project gets a docs layout that agents keep tidy. Projects that explore the unknown can add a research mode on top.
 
 ```sh
 agentdrop .                 # set up the current project
