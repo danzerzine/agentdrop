@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Docs guard: markdown files only where the AGENTS.md map allows.
+# Docs guard: markdown files only where the AGENTS.md map allows; a new entry
+# in docs/DECISIONS.md carries a 'Decided:' line.
 #   scripts/check_docs.sh              whole tree; exit 2 if stray files
 #   scripts/check_docs.sh --staged     only files added in this commit (pre-commit)
 #   scripts/check_docs.sh --stop-hook  Claude Code Stop hook: warn, don't block
@@ -25,12 +26,39 @@ else
   files=$(git -c core.quotepath=off ls-files -co --exclude-standard '*.md')
 fi
 stray=$(printf '%s\n' "$files" | grep -Ev "$allowed" | grep -v '^$' || true)
-[ -z "$stray" ] && exit 0
 
-msg="Docs outside the AGENTS.md map:
+# A new DECISIONS.md entry must name who decided: a line "Decided: who, where, quote".
+# Only added lines count. A heading edited in place (same first 30 chars as a removed
+# one) is not new.
+if [ "$mode" = --staged ]; then diff_args=(--cached); else diff_args=(HEAD); fi
+unsigned=$(git diff "${diff_args[@]}" -U0 -- docs/DECISIONS.md 2>/dev/null | awk '
+  /^-## /  { old[substr($0, 2, 30)] = 1; next }
+  /^\+/    { add[++n] = substr($0, 2) }
+  END {
+    for (i = 1; i <= n; i++) {
+      if (add[i] ~ /^## /) {
+        if (head != "" && !signed) print "  " head
+        head = (substr(add[i], 1, 30) in old) ? "" : add[i]; signed = 0
+      } else if (add[i] ~ /(Decided|Решил|Решила|Решили)( by)?:/) signed = 1
+    }
+    if (head != "" && !signed) print "  " head
+  }' || true)
+
+[ -z "$stray" ] && [ -z "$unsigned" ] && exit 0
+
+msg=""
+if [ -n "$stray" ]; then
+  msg="Docs outside the AGENTS.md map:
 $(echo "$stray" | sed 's/^/  /')
 Reviews and audits: ask to process reviews, the review-intake skill collects them.
 Anything else: merge into a docs/*.md, move to docs/archive/, or add the path to .docs-allow."
+fi
+if [ -n "$unsigned" ]; then
+  [ -n "$msg" ] && msg+=$'\n'
+  msg+="New docs/DECISIONS.md entries without a 'Decided: who, where, quote' line:
+$unsigned
+If no human chose it, it is not a decision: put it in QUESTIONS.md as an agent default (rules: DECISIONS.md header)."
+fi
 
 if [ "$mode" = --stop-hook ]; then
   # JSON by hand: python3 may be missing, or a Microsoft Store stub, on Windows

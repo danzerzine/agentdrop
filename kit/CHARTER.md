@@ -7,7 +7,7 @@
 | File | What goes there |
 |---|---|
 | `docs/CONTEXT.md` | product, people, data sources, glossary, code map; changes rarely |
-| `docs/DECISIONS.md` | decisions costly to forget: what, why, rejected options, what not to undo; append-only, same day |
+| `docs/DECISIONS.md` | only choices a named human made between alternatives, costly to forget: what, why, rejected, what not to undo, last line `Decided: who, where, quote` (`check_docs.sh` checks it). Bugs, UI, ops, facts and agent defaults go to their own files; same day. Superseded entries move whole to `DECISIONS.archive.md` |
 | `docs/CONVENTIONS.md` | rules we always follow |
 | `docs/PITFALLS.md` | traps we already fell into |
 | `docs/OPERATIONS.md` | run, deploy, servers, access; names and paths only, no secrets |
