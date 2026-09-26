@@ -391,7 +391,7 @@ def item_parts(body):
 def board(root, name, path):
     """Sections of a doc with their items: [{title, level, path, cat, items}]."""
     a = C["author"].lower()
-    stem = a[:max(3, len(a) - 1)]   # "Данияр" also matches "К Данияру"
+    stem = a[:max(3, len(a) - 1)]   # "Ivan" also matches "Ivanu" (Russian case endings)
     groups, heads = [], {}
     for b in view(root, name, path):
         if b["kind"] == "heading":
