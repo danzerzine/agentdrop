@@ -12,8 +12,8 @@
 | `docs/PITFALLS.md` | traps we already fell into |
 | `docs/OPERATIONS.md` | run, deploy, servers, access; names and paths only, no secrets |
 | `docs/STATE.md` | what works, half-done, broken; rewrite whole when the picture changes |
-| `docs/TODO.md` | tickets `B<n>` with P0–P3 (now / next / later); numbers never reused |
-| `docs/QUESTIONS.md` | questions for the owner or others; agent decisions the owner may revert |
+| `docs/TODO.md` | tickets `B<n>` with P0–P3 (now / next / later): only what remains and its source; done → `LOG.md`, history → spec; numbers never reused |
+| `docs/QUESTIONS.md` | questions for the owner or others; agent decisions the owner may revert; closed items kept a week, then deleted |
 | `docs/LOG.md` | one 3–5 line entry per finished pass, newest on top |
 | `docs/specs/B<n>-<name>.md` | spec for a multi-pass task; report appended at the end |
 | `docs/research/` | reference studies; every number has a source and date |
