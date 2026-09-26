@@ -72,13 +72,13 @@ AGENTS.md                  your project notes on top, managed block below
 CLAUDE.md / GEMINI.md      one-line @AGENTS.md imports
 docs/
   CONTEXT.md               what the product is, who uses it, glossary
-  DECISIONS.md             decision log: what, why, what was rejected
+  DECISIONS.md             choices a named person made: what, why, what was rejected
   CONVENTIONS.md           "we always do it this way"
   PITFALLS.md              traps someone already fell into
   OPERATIONS.md            how to run, deploy, access (no secrets)
   STATE.md                 what works right now
-  TODO.md                  tickets B1, B2… with P0–P3
-  QUESTIONS.md             what the agent needs a human for
+  TODO.md                  tickets B1, B2… with P0–P3, only what remains
+  QUESTIONS.md             what the agent needs a human for; closed items kept a week
   LOG.md                   one entry per finished pass
   specs/ research/ archive/
   reviews/inbox/           drop raw reviews here
@@ -87,7 +87,7 @@ scripts/check_docs.sh      guard: markdown only where the map allows
 .githooks/pre-commit       runs the guard on staged files
 ```
 
-The managed block in `AGENTS.md` holds only the charter: where each kind of note goes, how to finish a pass, and which file wins when instructions conflict. Your common rules stay in the global configs, so no session loads them twice. Anything project-specific goes above the block. agentdrop never rewrites that part.
+The managed block in `AGENTS.md` holds only the charter: where each kind of note goes, how to finish a pass, and which file wins when instructions conflict. A new entry in `DECISIONS.md` has to end with a `Decided: who, where, quote` line; the guard rejects it otherwise, so agent defaults land in `QUESTIONS.md` instead of posing as decisions. Your common rules stay in the global configs, so no session loads them twice. Anything project-specific goes above the block. agentdrop never rewrites that part.
 
 ## Docs in the code repo, or not
 
@@ -116,15 +116,7 @@ The `review-intake` skill then works in two steps:
 
 ## Talk to the agent in your docs
 
-```sh
-agentdrop forum install     # macOS: a LaunchAgent on :5290, reachable from your phone on home Wi-Fi
-agentdrop forum url         # the phone link (with a key; open once, then add to the home screen)
-agentdrop forum             # or just run it in the foreground, this machine only
-```
-
-One small server shows every agentdrop project it finds under `~/Projects`, `~/code`, `~/src` and `~/Downloads` (the kit layout or an older one with notes in the root), plus any you add with `agentdrop forum add PATH`. Each project has its own docs and threads. Tap "Discuss" under a ticket or a question and write. The comment goes into the markdown under that item. A background `claude -p` run in that project's directory, limited to read-only tools, writes the reply into the same thread, usually within a minute. The feed collects threads from all projects and marks new answers and comments still waiting for one. "Ask the agent" starts a new topic in `QUESTIONS.md`.
-
-The agent can't change files from the forum. If you ask for real work, it replies with a plan and the next working session does it; that session also commits the threads. Settings (your name, the agent's name, `"lang": "ru"`, roots, port, the agent command) live in `~/.agentdrop/forum.json`. Without `--lan` the server listens on 127.0.0.1 only; with it, every request from another device needs the key from `~/.agentdrop/forum_token`.
+Comment right under a ticket or a question, as a quote: `> **Name, 24.09 12:30:** text`. The next session answers in the same thread and commits it with its pass. End a thread with `_Thread closed._` and the agent finishes the item by the project's rules: removes the ticket, logs the pass, records the decision.
 
 ## Customize
 

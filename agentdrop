@@ -8,7 +8,6 @@ Usage:
   agentdrop --install          Install command + sync global rules
   agentdrop sync               Re-sync global rules after editing COMMON.md
   agentdrop edit               Open the master COMMON.md
-  agentdrop forum [install|url|status]  Docs forum for all projects (see forum.py)
 
 Project skeleton (docs/, charter, review-intake skill, docs guard) lives at:
   ~/.agentdrop/kit/   — CHARTER.md goes into AGENTS.md, other files are copied if missing
@@ -892,9 +891,6 @@ def install_self(dry: bool = False) -> None:
     if dest.resolve() != src:
         shutil.copy2(src, dest)
     dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    forum = src.parent / "forum.py"
-    if forum.exists() and forum.resolve() != (STATE / "forum.py").resolve():
-        shutil.copy2(forum, STATE / "forum.py")
 
     # macOS default shell is zsh. Add ~/.local/bin to PATH only when needed.
     path_parts = os.environ.get("PATH", "").split(os.pathsep)
@@ -938,18 +934,7 @@ def open_common() -> None:
             print(COMMON)
 
 
-def run_forum(argv: list[str]) -> None:
-    """`agentdrop forum ...` → forum.py next to this script, or the installed copy."""
-    here = Path(__file__).resolve().parent / "forum.py"
-    src = here if here.exists() else STATE / "forum.py"
-    if not src.exists():
-        raise SystemExit("forum.py not found: run `agentdrop --install` from the agentdrop repo")
-    os.execv(sys.executable, [sys.executable, str(src), *argv])
-
-
 def main() -> None:
-    if len(sys.argv) > 1 and sys.argv[1] == "forum":
-        run_forum(sys.argv[2:])
     parser = argparse.ArgumentParser(
         description="Deploy shared AI-agent rules without overwriting harness-specific instructions."
     )
