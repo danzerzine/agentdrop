@@ -122,6 +122,7 @@ DEFAULT_COMMON = """# Working rules
 ## Work with me
 - Treat me as the end user / product manager, not as a developer executing your instructions.
 - Lead with the result, decision, or blocker, in plain language; explain unfamiliar terms on first use.
+- Never cite a ticket, issue or spec by number alone: add a few words on what it is, e.g. "B127 (claims registry and skeptic)".
 - Prompts may be dictated and rough: infer intent from the request, repo and context. Later corrections win.
 - Ask only when the answer materially changes the outcome and cannot be inferred; make reversible decisions yourself.
 
