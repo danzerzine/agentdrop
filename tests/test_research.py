@@ -160,6 +160,8 @@ class Research(unittest.TestCase):
         self.assertIn("new line from upstream",
                       (self.home / ".agentdrop" / "kit.new" / "docs" / "STATE.md").read_text())
         self.assertIn("Kept your edited versions", out)
+        shutil.rmtree(self.home / ".agentdrop" / "kit.new")    # merged: the same version isn't offered again
+        self.assertNotIn("Kept your edited versions", self.run_agentdrop())
 
 
 if __name__ == "__main__":

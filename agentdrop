@@ -289,10 +289,11 @@ def update_kit(bundled: Path) -> None:
                 lock[key] = new_sha
                 return
             if lock.get(key) != cur:          # edited by the user, or installed before the lock
-                if not side.exists() or side.read_bytes() != new:
+                if lock.get("offered:" + key) != new_sha:   # each new version is offered once
                     side.parent.mkdir(parents=True, exist_ok=True)
                     side.write_bytes(new)
                     kept.append(side)
+                    lock["offered:" + key] = new_sha
                 return
             backup(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
