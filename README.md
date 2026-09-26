@@ -2,10 +2,11 @@
 
 **Dotfiles for your coding agents.**
 
-You keep one set of working rules and run one command. After that, Claude Code, Codex, Gemini CLI, OpenCode and Command Code all read the same instructions. The command also sets up a new project with a docs layout that agents keep tidy.
+You keep one set of working rules and run one command. After that, Claude Code, Codex, Gemini CLI, OpenCode and Command Code all read the same instructions. The command also sets up a new project with a docs layout that agents keep tidy. Projects that explore the unknown can add a research mode on top.
 
 ```sh
-agentdrop .          # set up the current project
+agentdrop .                 # set up the current project
+agentdrop --research .      # same, with research mode
 ```
 
 The script is a single Python file with no dependencies and never overwrites what you wrote.
@@ -28,6 +29,8 @@ This copies the script to `~/.local/bin` and creates `~/.agentdrop/COMMON.md` (y
 | Command Code | `~/.commandcode/AGENTS.md` |
 
 Existing files keep their content. agentdrop only adds or updates a block between `<!-- AGENTDROP:… -->` markers and backs up every file to `~/.agentdrop/backups/` before it touches it.
+
+Run the same command again after `git pull`: it updates the script and adds new kit modes without touching the ones you edited.
 
 ### Windows
 
@@ -63,6 +66,8 @@ agentdrop .                 # set up or refresh the project you're in
 agentdrop ~/code/app        # same, for another path
 agentdrop --dry-run .       # show what would change
 agentdrop --docs separate . # keep the docs out of the code repo (see below)
+agentdrop --research .      # turn research mode on (the first setup asks)
+agentdrop --no-research .   # turn it off; the registries stay
 ```
 
 ## What a project gets
@@ -88,6 +93,36 @@ scripts/check_docs.sh      guard: markdown only where the map allows
 ```
 
 The managed block in `AGENTS.md` holds only the charter: where each kind of note goes, how to finish a pass, and which file wins when instructions conflict. A new entry in `DECISIONS.md` has to end with a `Decided: who, where, quote` line; the guard rejects it otherwise, so agent defaults land in `QUESTIONS.md` instead of posing as decisions. Your common rules stay in the global configs, so no session loads them twice. Anything project-specific goes above the block. agentdrop never rewrites that part.
+
+## Research mode
+
+Some projects start from a question nobody can answer yet: why traffic fell, what a ranking algorithm rewards, which of forty ideas holds up. There the usual failure is not a bug. It's drift. The agent answers a slightly different question from the one asked, half of the owner's asides never become tickets, a correlation from week one turns into a "fact" by week three, and each pass rebuilds the data its own way. Research mode is a set of rules and registries that came out of such a project after all of this happened.
+
+```sh
+agentdrop --research .      # or answer "y" when the first setup asks
+```
+
+It adds a second managed block to `AGENTS.md` and these files:
+
+```
+docs/ASKS.md               every research ask of the owner: verbatim, message id, mode, ticket, status
+docs/HYPOTHESES.md         hypothesis, source, prediction written before computing, verdict
+docs/CLAIMS.md             claims that leave the project, with an evidence level and who checked
+scripts/owner_asks.py      owner messages from Claude Code transcripts since the last check
+.claude/agents/skeptic.md           tries to refute a claim before it goes out
+.claude/agents/acceptance-judge.md  accepts a pass against the owner's quote, not the report
+```
+
+The rules, in short:
+- Every ticket carries `Why:` with the owner's words and a date. A pass closes only when an independent judge confirms the report answers that quote; the rest goes into "Not answered" and a new ticket.
+- The agent tags each ask as a question, a "wide" ask, an idea, an errand or a correction. A wide ask is accepted by breadth: where the agent searched and what it found beyond the owner's example.
+- Collect first, filter later. Correlations are recorded as experiment candidates, and every report ends with **Nearby**: two to five neighbouring topics with a number each, for the owner to pick from.
+- Hypotheses get one standard check: within a segment, a placebo on an outcome the feature shouldn't move, a minimum sample. The prediction is written before the numbers.
+- Claims carry a level (fact on our data, observation, hypothesis, someone else's opinion) and change it only through the registry, after the skeptic has had a go.
+- When several tickets rebuild the same data, the project builds one verified table instead, checked against raw by three independent agents.
+- A summary across passes says what we learned that we didn't know at the start. An early guess stays only with new evidence behind it.
+
+`owner_asks.py --new` reads Claude Code transcripts, including messages sent while the agent was busy, which naive readers miss. In other harnesses the agent rereads the conversation instead. The mode lives in the `AGENTS.md` block: rerunning `agentdrop .` keeps it, `--no-research` removes the block and leaves the registries in place.
 
 ## Docs in the code repo, or not
 
@@ -122,6 +157,7 @@ Comment right under a ticket or a question, as a quote: `> **Name, 24.09 12:30:*
 
 - **Rules:** `agentdrop edit`, then `agentdrop sync`.
 - **Charter and templates:** edit files in `~/.agentdrop/kit/`, then run `agentdrop .` in a project. Only missing files are copied; the charter block is refreshed every time.
+- **Research mode:** its block and files live in `~/.agentdrop/kit/modes/research/`. Edit `CHARTER.md` there and rerun `agentdrop .` in research projects to refresh the block.
 
 ## Older layouts
 

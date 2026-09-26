@@ -16,6 +16,9 @@ Project skeleton (docs/, charter, review-intake skill, docs guard) lives at:
   agentdrop --dry-run [PATH]   Preview changes; defaults to the current directory
   agentdrop --docs MODE PATH   Docs in the code repo (track), a local .git-docs (separate)
                                or nowhere (local); asked on the first run, then remembered
+  agentdrop --research PATH    Also turn on research mode (registries of asks, hypotheses
+                               and claims; skeptic and acceptance agents). First setup asks.
+  agentdrop --no-research PATH Turn research mode off (removes its block, keeps the files)
 
 The master rules live at:
   ~/.agentdrop/COMMON.md
@@ -69,6 +72,11 @@ KIT = STATE / "kit"            # project skeleton: docs/, skill, guard; files co
 CHARTER = KIT / "CHARTER.md"   # generic charter, goes into AGENTS.md managed block
 LEGACY_FILES = ("HANDOFF.md", "PROGRESS.md", "PITFALLS.md", "PROJECT_CONTEXT.md")
 KIT_SKIP = {"CHARTER.md", ".claude/settings.json"}
+MODES = KIT / "modes"          # opt-in overlays, e.g. modes/research: CHARTER.md block + files
+RESEARCH = MODES / "research"
+RESEARCH_START = "<!-- AGENTDROP:RESEARCH:START -->"
+RESEARCH_END = "<!-- AGENTDROP:RESEARCH:END -->"
+RESEARCH_ALLOW = r"^docs/(ASKS|HYPOTHESES|CLAIMS)\.md$"
 STOP_HOOK_CMD = '"$CLAUDE_PROJECT_DIR"/scripts/check_docs.sh --stop-hook'
 
 # Where the project docs live relative to git: the owner's answer is kept in the code repo's
@@ -78,10 +86,11 @@ DOCS_KEY = "agentdrop.docs"
 DOCS_GIT = ".git-docs"
 # leave the code repo in "separate" and "local" modes (LOCAL.md is never committed anywhere)
 DOCS_PATHS = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", "LOCAL.md", ".docs-allow", "docs/",
-              ".githooks/", "scripts/check_docs.sh", ".claude/")
+              ".githooks/", "scripts/check_docs.sh", "scripts/owner_asks.py", ".claude/")
 # what the separate docs repo holds; the rest of .claude/ (worktrees, local settings) stays out
 DOCS_REPO_PATHS = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", ".docs-allow", "docs", ".githooks",
-                   "scripts/check_docs.sh", ".claude/CLAUDE.md", ".claude/settings.json", ".claude/skills")
+                   "scripts/check_docs.sh", "scripts/owner_asks.py", ".claude/CLAUDE.md",
+                   ".claude/settings.json", ".claude/skills", ".claude/agents")
 EXCLUDE_START = "# >>> agentdrop: project docs are not in this repo (agentdrop --docs)"
 EXCLUDE_END = "# <<< agentdrop"
 DOCS_FILES_PHRASE = ("the docs, `AGENTS.md`, `GEMINI.md`, `.claude/`, `.githooks/`, `.docs-allow` "
@@ -251,6 +260,13 @@ def ensure_state() -> None:
     bundled = Path(__file__).resolve().parent / "kit"
     if not KIT.exists() and bundled.is_dir():
         shutil.copytree(bundled, KIT)
+    elif (bundled / "modes").is_dir():
+        # modes arrive with updates; add missing files only, never touch the user's edits
+        for src in (bundled / "modes").rglob("*"):
+            dest = MODES / src.relative_to(bundled / "modes")
+            if src.is_file() and src.name != ".DS_Store" and not dest.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
     if not COMMON.exists():
         write(COMMON, DEFAULT_COMMON.rstrip() + "\n")
         return
@@ -478,11 +494,11 @@ def uses_kit(root: Path) -> bool:
     return not any((root / f).exists() for f in LEGACY_FILES)
 
 
-def copy_kit(root: Path, dry: bool = False) -> list[str]:
+def copy_kit(root: Path, dry: bool = False, src_root: Path = KIT) -> list[str]:
     created = []
-    for src in sorted(KIT.rglob("*")):
-        rel = src.relative_to(KIT).as_posix()
-        if src.is_dir() or rel in KIT_SKIP or src.name == ".DS_Store":
+    for src in sorted(src_root.rglob("*")):
+        rel = src.relative_to(src_root).as_posix()
+        if src.is_dir() or rel in KIT_SKIP or rel.startswith("modes/") or src.name == ".DS_Store":
             continue
         dest = root / rel
         if dest.exists():
@@ -498,6 +514,65 @@ def copy_kit(root: Path, dry: bool = False) -> list[str]:
                 shutil.copy2(src, dest)
         print(f"✓ {rel:<40} — {'would create' if dry else 'created'}")
         created.append(rel)
+    return created
+
+
+def research_on(root: Path) -> bool:
+    agents = root / "AGENTS.md"
+    return agents.exists() and RESEARCH_START in read(agents)
+
+
+def ask_research(root: Path) -> bool:
+    """First setup in a terminal: ask whether this project explores the unknown."""
+    if not sys.stdin.isatty() or not RESEARCH.is_dir():
+        return False
+    print("\nResearch mode is for projects that explore the unknown and test hypotheses:")
+    print("  owner asks kept verbatim in docs/ASKS.md, hypotheses with a prediction before")
+    print("  computing, claims with an evidence level, a skeptic and an acceptance judge.")
+    print("  Turn it on or off later with --research / --no-research.")
+    try:
+        return input("Is this a research project? [y/N] ").strip().lower() in {"y", "yes"}
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
+def ensure_docs_allow(root: Path, line: str, dry: bool = False) -> bool:
+    path = root / ".docs-allow"
+    existing = read(path) if path.exists() else ""
+    if line in existing.splitlines():
+        return False
+    text = existing + ("" if not existing or existing.endswith("\n") else "\n") + line + "\n"
+    write(path, text, dry)
+    print(f"✓ .docs-allow                             — {'would add' if dry else 'added'} research registries")
+    return True
+
+
+def apply_research(root: Path, on: bool, dry: bool = False) -> list[str]:
+    agents = root / "AGENTS.md"
+    if not on:
+        if research_on(root):
+            pattern = re.compile(r"\n*" + re.escape(RESEARCH_START) + r".*?" + re.escape(RESEARCH_END) + r"\n?", re.S)
+            write(agents, pattern.sub("\n", read(agents)).rstrip() + "\n", dry)
+            print(f"✓ AGENTS.md      — {'would remove' if dry else 'removed'} research block (files kept)")
+        return []
+    if not (RESEARCH / "CHARTER.md").exists():
+        print(f"! Research mode not in {RESEARCH}; run `agentdrop --install` from the repo to add it")
+        return []
+    payload = read(RESEARCH / "CHARTER.md").rstrip()
+    text = read(agents) if agents.exists() else ""
+    if RESEARCH_START not in text and PROJECT_END in text:
+        # right under the charter, above whatever the project wrote after it
+        block = f"{RESEARCH_START}\n{payload}\n{RESEARCH_END}"
+        changed = write(agents, text.replace(PROJECT_END, f"{PROJECT_END}\n\n{block}", 1), dry)
+        action = "added block"
+    else:
+        changed, action = managed_merge(agents, payload, RESEARCH_START, RESEARCH_END, dry=dry)
+    print(f"{'✓' if changed else '·'} AGENTS.md      — research: {action}")
+    created = copy_kit(root, dry=dry, src_root=RESEARCH)
+    had_allow = (root / ".docs-allow").exists()
+    if ensure_docs_allow(root, RESEARCH_ALLOW, dry=dry) and not had_allow:
+        created.append(".docs-allow")
     return created
 
 
@@ -650,7 +725,8 @@ def apply_docs_mode(root: Path, mode: str, created: list[str], dry: bool = False
         print("  Past commits still contain them; removing them from history takes git filter-repo.")
 
 
-def bootstrap_project(root: Path, dry: bool = False, docs: str | None = None) -> None:
+def bootstrap_project(root: Path, dry: bool = False, docs: str | None = None,
+                      research: bool | None = None) -> None:
     ensure_state()
     root = root.expanduser().resolve()
     if not root.exists():
@@ -668,6 +744,9 @@ def bootstrap_project(root: Path, dry: bool = False, docs: str | None = None) ->
     # Existing project-specific content outside our managed block is preserved.
     agents = root / "AGENTS.md"
     kit = uses_kit(root)
+    first_setup = not (agents.exists() and PROJECT_START in read(agents))
+    if research is None:
+        research = research_on(root) or (kit and first_setup and not dry and ask_research(root))
     # Common rules reach every harness through the global sync; repeating them here would
     # load them twice per session. The project block carries only the charter.
     project_payload = (read(CHARTER) if kit else PROJECT_BLOCK).rstrip()
@@ -712,7 +791,10 @@ def bootstrap_project(root: Path, dry: bool = False, docs: str | None = None) ->
     created = []
     if kit:
         created = copy_kit(root, dry=dry)
+        created += apply_research(root, research, dry=dry)
         ensure_stop_hook(root, dry=dry)
+    elif research:
+        print("! Research mode needs the docs/ kit layout; migrate the old notes first.")
     elif CHARTER.exists():
         print("! Old layout (root HANDOFF/PROGRESS/...): docs/ kit not applied.")
         print("  To migrate, ask the agent to move the notes into the docs/ layout from ~/.agentdrop/kit, then run agentdrop again.")
@@ -946,6 +1028,11 @@ def main() -> None:
                         help="Where project docs live: track (in the code repo), separate (local "
                              ".git-docs in the same folder) or local (ignored, no history). "
                              "Saved per repo; asked on the first run if omitted")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--research", dest="research", action="store_true", default=None,
+                      help="Turn on research mode: asks, hypotheses and claims registries, skeptic")
+    mode.add_argument("--no-research", dest="research", action="store_false",
+                      help="Turn research mode off (keeps its files)")
     args = parser.parse_args()
     _console_safe()
 
@@ -966,7 +1053,7 @@ def main() -> None:
 
         # `agentdrop --dry-run` is deliberately non-interactive and previews CWD.
         if args.dry_run:
-            bootstrap_project(cwd, dry=True, docs=args.docs)
+            bootstrap_project(cwd, dry=True, docs=args.docs, research=args.research)
             return
 
         print(f"\nAgentDrop will bootstrap/sync the current directory:\n  {cwd}\n")
@@ -975,6 +1062,7 @@ def main() -> None:
         print("  - put the docs charter into AGENTS.md (shared rules stay global)")
         print("  - add/update harness bridges without overwriting their own instructions")
         print("  - create missing docs/ skeleton, review-intake skill and docs guard (~/.agentdrop/kit)")
+        print("  - on first setup, ask whether this is a research project (--research / --no-research)")
         print("  - back up any existing file before AgentDrop changes it")
         print("  - ask whether the docs go into this repo, a local .git-docs, or nowhere (git repos only)")
         print("\nIt will NOT initialize the project's Git, commit automatically, or overwrite project memory.")
@@ -989,10 +1077,10 @@ def main() -> None:
             print("Cancelled.")
             return
 
-        bootstrap_project(cwd, dry=False, docs=args.docs)
+        bootstrap_project(cwd, dry=False, docs=args.docs, research=args.research)
         return
 
-    bootstrap_project(Path(args.target), dry=args.dry_run, docs=args.docs)
+    bootstrap_project(Path(args.target), dry=args.dry_run, docs=args.docs, research=args.research)
 
 
 if __name__ == "__main__":
