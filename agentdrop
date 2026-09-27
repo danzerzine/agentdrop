@@ -4320,7 +4320,7 @@ def limits_verdict(readings: list[dict], now: float) -> dict:
     if not readings:
         return {"can_start": False, "reason": "no_reading", "why": "no measurement in the run logs"}
     last = readings[-1]
-    age = int((now - last["written"]) // 60)
+    age = max(int((now - last["written"]) // 60), 0)   # a log written this very second
     midnight = dt.datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     today = [r for r in readings if r["at"] >= midnight and r["seven_day_resets"] == last["seven_day_resets"]]
     first = today[0] if today else last
