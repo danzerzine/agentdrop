@@ -1142,6 +1142,7 @@ ITEM_TICKET = re.compile(r"^(?:(P[0-3]):?\s+)?(B\d+)\b\s*(?:\(?(P[0-3])\)?)?\s*(
 WHY_RE = re.compile(r"(?:Зачем|Why):\s*(«[^»]*»(?:\s*\([^)]*\))?|\"[^\"]*\"(?:\s*\([^)]*\))?|[^.]*\.)")
 WAITS_RE = re.compile(r"(?i)(?<!\w)(жд[её]т|жд[её]м|ждем|waiting (?:for|on)|blocked (?:by|on)|(?:только )?после (?:ответа|OK)\b)"
                       r"[^.;]{0,200}")
+DEFERRED_RE = re.compile(r"(?i)(?<!\w)(?:отложен[оаы]?|deferred|parked|on hold)(?!\w)")
 RECO_RE = re.compile(r"(?i)(?:^|(?<=[.!?]\s))[^.!?]*(?:рекоменд|предлага|предложение|мой выбор|моя ставка|"
                      r"recommend|i suggest|my pick|proposal)[^.!?]*[.!?]?")
 COMMENT_RE = re.compile(r"^\s*>\s*\*\*([^,*]+?)(?:,[^*]*)?:\*\*")
@@ -1288,6 +1289,7 @@ def parse_todo(root: Path, cfg: dict) -> list[dict]:
             "images": item_images(root, text),
             # the owner wrote last under the ticket: the agent's move, whatever the ticket says it waits for
             "owner_last": bool(comments and by_owner(comments[-1][0], words)),
+            "deferred": bool(DEFERRED_RE.search(text.split("\n\n", 1)[0])),
             "last": clip(re.sub(r"^\s*>\s*", "", comments[-1][1]), 400) if comments else "",
         })
     return out
@@ -1295,7 +1297,7 @@ def parse_todo(root: Path, cfg: dict) -> list[dict]:
 
 def parse_questions(root: Path, cfg: dict) -> dict:
     words = owner_words(cfg)
-    res = {"waiting": [], "your_turn": [], "revertible": 0, "people": 0}
+    res = {"waiting": [], "your_turn": [], "revertible": 0, "people": 0, "deferred": 0}
     text_all = doc(root, "QUESTIONS.md")
     sections = [h for h in re.findall(r"(?m)^## (.+)$", text_all)
                 if not re.search(r"(?i)закрыт|closed|resolved", h)]
@@ -1313,6 +1315,9 @@ def parse_questions(root: Path, cfg: dict) -> dict:
         title = key
         if REVERT_RE.search(path) or REVERT_RE.search(body[:300]):
             res["revertible"] += 1
+            continue
+        if DEFERRED_RE.search(re.split(r"\n\s*>", body, maxsplit=1)[0][:400]):
+            res["deferred"] += 1
             continue
         code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)\.\s*", title)
         if code:
@@ -1487,7 +1492,8 @@ def collect_status(root: Path) -> dict:
 
     q = parse_questions(root, cfg)
     turn = [t for t in tickets if t["owner_last"] and t["id"] not in claimed]
-    open_ = [t for t in tickets if t["id"] not in claimed and not t["owner_last"]]
+    deferred = [t for t in tickets if t["deferred"] and t["id"] not in claimed and not t["owner_last"]]
+    open_ = [t for t in tickets if t["id"] not in claimed and not t["owner_last"] and not t["deferred"]]
     owner_tickets = [t for t in open_ if t["waits_owner"]]
     # a ticket blocked on someone else (a client's answer) is nobody's next step: counted, not listed
     blocked = [t for t in open_ if t["waits"] and not t["waits_owner"]]
@@ -1512,7 +1518,8 @@ def collect_status(root: Path) -> dict:
                     "asks": parse_asks(root)},
         "running": {"claims": claims, "unclaimed_active_sessions": active, "active_minutes": ACTIVE_MINUTES},
         "done": {"since_seen": bool(seen), "seen_at": seen.get("at") if seen else None, "entries": done},
-        "next": {"tickets": free[:SHOW["next"]], "rest": free[SHOW["next"]:], "blocked": blocked},
+        "next": {"tickets": free[:SHOW["next"]], "rest": free[SHOW["next"]:], "blocked": blocked,
+                 "deferred": deferred},
         "git": git_summary(root),
     }
 
@@ -3529,7 +3536,8 @@ def collect_items(root: Path, cfg: dict) -> tuple[dict, list[dict]]:
     proj = {"key": prefix, "label": label, "root": str(root), "ru": s["ru"]}
     state = {}
     for key, ts in (("owner", s["waiting"]["tickets"]), ("turn", s["waiting"]["turn_tickets"]),
-                    ("next", s["next"]["tickets"] + s["next"]["rest"]), ("others", s["next"]["blocked"])):
+                    ("next", s["next"]["tickets"] + s["next"]["rest"]), ("others", s["next"]["blocked"]),
+                    ("later", s["next"]["deferred"])):
         for t in ts:
             state.setdefault(t["id"], key)
     for c in s["running"]["claims"]:

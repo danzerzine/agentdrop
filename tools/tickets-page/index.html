@@ -41,6 +41,16 @@ aside { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); align
 .chip:focus-visible, .row:focus-visible, input:focus-visible, .back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #q { font: inherit; width: 100%; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 7px 10px; }
 .list { overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding-right: 4px; }
+.group summary { list-style: none; cursor: pointer; }
+.group summary::-webkit-details-marker { display: none; }
+.group summary h3::after { content: "▾"; margin-left: auto; color: var(--ink-3); }
+.group:not([open]) summary h3::after { content: "▸"; }
+.group.g-blocker h3 { color: var(--owner); }
+.row .note { font-size: 12.5px; color: var(--ink-3); line-height: 1.4; }
+.triage { margin: 0; padding: 10px 14px; border-radius: 8px; font-weight: 500; background: var(--quote); }
+.triage.t-blocker { background: var(--owner-bg); color: var(--owner); }
+.triage.t-route { background: var(--others-bg); }
+.s-blocker { color: var(--owner); background: var(--owner-bg); } .s-route, .s-later { color: var(--others); background: var(--others-bg); }
 .group h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); display: flex; gap: 6px; }
 .group h3 span { font-variant-numeric: tabular-nums; }
 .row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; padding: 6px 8px; border-radius: 8px; color: inherit; text-decoration: none; }
@@ -103,11 +113,13 @@ code { font-family: var(--mono); font-size: .86em; background: var(--quote); bor
 
 <script>
 const STATES = [
-  ["owner", "Ждёт тебя"], ["turn", "Ты ответил, ход агента"], ["running", "В работе"],
-  ["next", "Дальше"], ["others", "Ждёт других"],
+  ["blocker", "Стопорит работу"], ["owner", "Ждёт твоего решения"], ["route", "Передать другим людям"],
+  ["turn", "Ты ответил, ход агента"], ["running", "В работе"], ["next", "Дальше"], ["others", "Ждёт других"],
+  ["later", "Отложено и справочно"],
 ];
 const LABEL = Object.fromEntries(STATES);
-let data = { projects: [], items: [] }, project = "all";
+let data = { projects: [], items: [] }, project = "all", triage = {};
+const tierOf = i => { const t = (triage[i.id] || {}).tier; return t === "decide" ? "owner" : t || i.state; };
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 function inline(s) {
@@ -148,11 +160,13 @@ function renderList() {
   const pick = data.items.filter(i => (project === "all" || i.project === project) &&
     (!q || (i.code + " " + i.title).toLowerCase().includes(q)));
   const html = STATES.map(([st, label]) => {
-    const rows = pick.filter(i => i.state === st);
+    const rows = pick.filter(i => tierOf(i) === st);
     if (!rows.length) return "";
-    return `<section class="group"><h3>${label} <span>${rows.length}</span></h3>` + rows.map(i =>
+    const open = st !== "later" && st !== "next" || q;
+    return `<details class="group g-${st}"${open ? " open" : ""}><summary><h3>${label} <span>${rows.length}</span></h3></summary>` + rows.map(i =>
       `<a class="row${i.id === cur ? " on" : ""}" href="#${i.id}"><span class="code">${esc(i.code || "вопрос")}</span>` +
-      `<span class="t">${project === "all" ? `<span style="color:var(--ink-3)">${esc(projLabel(i.project))} · </span>` : ""}${esc(i.title)}</span></a>`).join("") + "</section>";
+      `<span class="t">${project === "all" ? `<span style="color:var(--ink-3)">${esc(projLabel(i.project))} · </span>` : ""}${esc(i.title)}</span>` +
+      (triage[i.id] && st !== "later" ? `<span></span><span class="note">${esc(triage[i.id].note)}</span>` : "") + `</a>`).join("") + "</details>";
   }).join("");
   document.getElementById("list").innerHTML = html || '<p class="empty">Ничего не нашлось.</p>';
 }
@@ -169,8 +183,9 @@ function renderItem() {
   }).join("");
   const tag = `${projLabel(it.project)} ${it.code || "вопрос"}`;
   view.innerHTML = `<article id="t-${it.id}" data-item="${esc(tag)}" data-comment-target>
-    <div class="meta"><span>${esc(projLabel(it.project))}</span>${it.code ? `<span class="code">${esc(it.code)}</span>` : ""}${it.priority ? `<span>${esc(it.priority)}</span>` : ""}<span class="pill s-${it.state}">${LABEL[it.state] || it.state}</span></div>
+    <div class="meta"><span>${esc(projLabel(it.project))}</span>${it.code ? `<span class="code">${esc(it.code)}</span>` : ""}${it.priority ? `<span>${esc(it.priority)}</span>` : ""}<span class="pill s-${tierOf(it)}">${LABEL[tierOf(it)] || it.state}</span></div>
     <h1 id="h-${it.id}">${inline(it.title)}</h1>
+    ${triage[it.id] ? `<p class="triage t-${tierOf(it)}">${esc(triage[it.id].note)}</p>` : ""}
     ${it.why ? `<p class="why"><b>Зачем:</b> ${inline(it.why)}</p>` : ""}
     <div class="body">${md(it.body)}${it.pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(it.pick.replace(/^Предложение[^:]*:\s*/i, ""))}</p>` : ""}</div>
     ${thread ? `<section class="thread"><h4>Ветка</h4>${thread}</section>` : ""}
@@ -224,6 +239,7 @@ async function start() {
     document.getElementById("view").innerHTML = '<p class="empty">Не загрузился список тикетов. Обнови страницу.</p>';
     return;
   }
+  try { const t = await fetch("triage.json", { cache: "no-store" }); if (t.ok) triage = await t.json(); } catch (e) {}
   if (!data.projects.some(p => p.key === project)) project = "all";
   const d = new Date(data.generated);
   document.getElementById("gen").textContent = isNaN(d) ? "" : "на " + d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
