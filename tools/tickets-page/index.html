@@ -219,7 +219,7 @@ function renderList() {
   const html = STATES.map(([st, label]) => {
     const rows = pick.filter(i => tierOf(i) === st).sort((x, y) => prio(x) - prio(y));
     if (!rows.length) return "";
-    const open = !["later", "next", "done"].includes(st) || q;
+    const open = !["later", "done"].includes(st) || q;
     let body;
     if (st === "next" && !q && Object.keys(themes).length) {   // the queue, grouped by theme in the order of the pick
       const projs = data.projects.map(p => p.key).filter(k => project === "all" || k === project);
