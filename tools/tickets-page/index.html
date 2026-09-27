@@ -1,0 +1,201 @@
+<meta charset="utf-8">
+<title>Тикеты Данияра</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+:root {
+  --bg: #f5f6f3; --surface: #ffffff; --ink: #1c2230; --ink-2: #4a5263; --ink-3: #7b8292;
+  --line: #e2e5df; --accent: #0f6e6a; --accent-bg: #e3f1ef;
+  --owner: #a4471a; --owner-bg: #fbeadf; --turn: #2d56c8; --turn-bg: #e6ecfb;
+  --run: #6b4bb8; --run-bg: #efe9fb; --others: #6b7280; --others-bg: #eef0f2;
+  --quote: #f0f2ec;
+  --font: "Golos Text", -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #13171c; --surface: #1b2027; --ink: #e7eaee; --ink-2: #b4bac5; --ink-3: #858d9b;
+    --line: #2b313b; --accent: #5cc0b5; --accent-bg: #16302e;
+    --owner: #f09a6b; --owner-bg: #3a2418; --turn: #8fa9f5; --turn-bg: #1d2640;
+    --run: #b69cf0; --run-bg: #2a2140; --others: #a3aab6; --others-bg: #252a32; --quote: #20262e;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #13171c; --surface: #1b2027; --ink: #e7eaee; --ink-2: #b4bac5; --ink-3: #858d9b;
+  --line: #2b313b; --accent: #5cc0b5; --accent-bg: #16302e;
+  --owner: #f09a6b; --owner-bg: #3a2418; --turn: #8fa9f5; --turn-bg: #1d2640;
+  --run: #b69cf0; --run-bg: #2a2140; --others: #a3aab6; --others-bg: #252a32; --quote: #20262e;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font); font-size: 15px; line-height: 1.55; }
+.wrap { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 28px; max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block: 20px 48px; }
+aside { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); align-self: start; max-height: calc(100vh - 24px); display: flex; flex-direction: column; gap: 12px; }
+.brand { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.brand h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.brand small { color: var(--ink-3); font-size: 12px; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: inherit; font-size: 13px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); border-radius: 999px; padding: 3px 11px; cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--accent-bg); border-color: var(--accent); color: var(--ink); }
+.chip:focus-visible, .row:focus-visible, input:focus-visible, .back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#q { font: inherit; width: 100%; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 7px 10px; }
+.list { overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding-right: 4px; }
+.group h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); display: flex; gap: 6px; }
+.group h3 span { font-variant-numeric: tabular-nums; }
+.row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; padding: 6px 8px; border-radius: 8px; color: inherit; text-decoration: none; }
+.row:hover { background: var(--surface); }
+.row.on { background: var(--surface); box-shadow: inset 3px 0 0 var(--accent); }
+.row .code { font-family: var(--mono); font-size: 12px; color: var(--ink-3); padding-top: 2px; white-space: nowrap; }
+.row .t { font-size: 14px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+main { min-width: 0; }
+article { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 26px 30px 30px; display: flex; flex-direction: column; gap: 18px; }
+.meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-3); }
+.meta .code { font-family: var(--mono); color: var(--ink-2); }
+.pill { font-size: 12px; font-weight: 500; border-radius: 999px; padding: 2px 10px; }
+.s-owner { color: var(--owner); background: var(--owner-bg); } .s-turn { color: var(--turn); background: var(--turn-bg); }
+.s-running { color: var(--run); background: var(--run-bg); } .s-next { color: var(--accent); background: var(--accent-bg); }
+.s-others { color: var(--others); background: var(--others-bg); }
+h1 { margin: 0; font-size: 24px; line-height: 1.3; font-weight: 600; text-wrap: balance; }
+.why { margin: 0; padding: 12px 16px; background: var(--quote); border-radius: 8px; color: var(--ink-2); }
+.why b { color: var(--ink); font-weight: 600; }
+.body { max-width: 68ch; display: flex; flex-direction: column; gap: 10px; }
+.body p, .body ul { margin: 0; }
+.body ul { padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+code { font-family: var(--mono); font-size: .86em; background: var(--quote); border-radius: 4px; padding: 1px 5px; overflow-wrap: anywhere; }
+.pick { border-left: 3px solid var(--accent); padding: 4px 0 4px 12px; }
+.thread { display: flex; flex-direction: column; gap: 10px; }
+.thread h4, .howto h4 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
+.msg { max-width: 68ch; padding: 10px 14px; border-radius: 10px; background: var(--quote); }
+.msg.me { background: var(--owner-bg); }
+.msg .who { font-size: 12px; color: var(--ink-3); margin-bottom: 2px; }
+.msg .who b { color: var(--ink-2); font-weight: 600; }
+.howto { border-top: 1px dashed var(--line); padding-top: 14px; color: var(--ink-2); font-size: 14px; display: flex; flex-direction: column; gap: 4px; }
+.back { display: none; color: var(--accent); text-decoration: none; font-size: 14px; margin-bottom: 10px; }
+.empty { color: var(--ink-3); padding: 40px 0; }
+@media (max-width: 760px) {
+  .wrap { grid-template-columns: minmax(0, 1fr); padding-inline: 16px; }
+  aside { position: static; max-height: none; }
+  .list { overflow: visible; }
+  body.one aside { display: none; }
+  body:not(.one) main { display: none; }
+  .back { display: inline-block; }
+  article { padding: 18px 16px 22px; }
+  h1 { font-size: 21px; }
+}
+</style>
+
+<div class="wrap">
+  <aside>
+    <div class="brand"><h2>Тикеты</h2><small id="gen"></small></div>
+    <div class="filters" id="projects" role="group" aria-label="Проект"></div>
+    <input id="q" type="search" placeholder="Номер или слово из названия" aria-label="Поиск">
+    <nav class="list" id="list" aria-label="Все тикеты"></nav>
+  </aside>
+  <main>
+    <a class="back" href="#" id="back">← Все тикеты</a>
+    <div id="view"><p class="empty">Выбери тикет слева.</p></div>
+  </main>
+</div>
+
+<script>
+const STATES = [
+  ["owner", "Ждёт тебя"], ["turn", "Ты ответил, ход агента"], ["running", "В работе"],
+  ["next", "Дальше"], ["others", "Ждёт других"],
+];
+const LABEL = Object.fromEntries(STATES);
+let data = { projects: [], items: [] }, project = "all";
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function inline(s) {
+  return esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+}
+function md(text) {
+  const out = [];
+  for (const block of String(text || "").split(/\n\s*\n/)) {
+    const lines = block.split("\n").map(l => l.trim()).filter(Boolean);
+    if (!lines.length) continue;
+    if (lines.every(l => /^[-*] /.test(l))) {
+      out.push("<ul>" + lines.map(l => `<li>${inline(l.slice(2))}</li>`).join("") + "</ul>");
+      continue;
+    }
+    const parts = [], items = [];
+    for (const l of lines) {
+      if (/^[-*] /.test(l)) items.push(l.slice(2));
+      else if (items.length) items[items.length - 1] += " " + l;
+      else parts.push(l);
+    }
+    if (parts.length) out.push(`<p>${inline(parts.join(" "))}</p>`);
+    if (items.length) out.push("<ul>" + items.map(i => `<li>${inline(i)}</li>`).join("") + "</ul>");
+  }
+  return out.join("");
+}
+const projLabel = k => (data.projects.find(p => p.key === k) || {}).label || k;
+
+function renderFilters() {
+  const el = document.getElementById("projects");
+  const opts = [["all", "Все"], ...data.projects.map(p => [p.key, p.label])];
+  el.innerHTML = opts.map(([k, l]) => `<button class="chip" id="p-${k}" aria-pressed="${k === project}" data-k="${k}">${esc(l)}</button>`).join("");
+  el.querySelectorAll("button").forEach(b => b.onclick = () => { project = b.dataset.k; try { localStorage.setItem("proj", project); } catch (e) {} renderFilters(); renderList(); });
+}
+
+function renderList() {
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  const cur = location.hash.slice(1);
+  const pick = data.items.filter(i => (project === "all" || i.project === project) &&
+    (!q || (i.code + " " + i.title).toLowerCase().includes(q)));
+  const html = STATES.map(([st, label]) => {
+    const rows = pick.filter(i => i.state === st);
+    if (!rows.length) return "";
+    return `<section class="group"><h3>${label} <span>${rows.length}</span></h3>` + rows.map(i =>
+      `<a class="row${i.id === cur ? " on" : ""}" href="#${i.id}"><span class="code">${esc(i.code || "вопрос")}</span>` +
+      `<span class="t">${project === "all" ? `<span style="color:var(--ink-3)">${esc(projLabel(i.project))} · </span>` : ""}${esc(i.title)}</span></a>`).join("") + "</section>";
+  }).join("");
+  document.getElementById("list").innerHTML = html || '<p class="empty">Ничего не нашлось.</p>';
+}
+
+function renderItem() {
+  const id = location.hash.slice(1);
+  const it = data.items.find(i => i.id === id);
+  document.body.classList.toggle("one", !!it);
+  const view = document.getElementById("view");
+  if (!it) { view.innerHTML = `<p class="empty">${id ? "Такого тикета больше нет: закрыт или переименован." : "Выбери тикет слева."}</p>`; return; }
+  const thread = (it.thread || []).map(m => {
+    const me = /данияр|владел/i.test(m.author);
+    return `<div class="msg${me ? " me" : ""}"><div class="who"><b>${esc(m.author || "—")}</b>${m.when ? ", " + esc(m.when) : ""}</div>${md(m.text)}</div>`;
+  }).join("");
+  view.innerHTML = `<article>
+    <div class="meta"><span>${esc(projLabel(it.project))}</span>${it.code ? `<span class="code">${esc(it.code)}</span>` : ""}${it.priority ? `<span>${esc(it.priority)}</span>` : ""}<span class="pill s-${it.state}">${LABEL[it.state] || it.state}</span></div>
+    <h1>${inline(it.title)}</h1>
+    ${it.why ? `<p class="why"><b>Зачем:</b> ${inline(it.why)}</p>` : ""}
+    <div class="body">${md(it.body)}${it.pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(it.pick.replace(/^Предложение[^:]*:\s*/i, ""))}</p>` : ""}</div>
+    ${thread ? `<section class="thread"><h4>Ветка</h4>${thread}</section>` : ""}
+    <div class="howto"><h4>Как ответить</h4>
+      <span>Выдели фразу или абзац и оставь комментарий. Нажми «Send to Claude»: отвечу в этой же ветке и запишу твои слова под пункт в ${esc(it.doc)} проекта ${esc(projLabel(it.project))}.</span></div>
+  </article>`;
+  document.title = `${it.code || "Вопрос"} · Тикеты Данияра`;
+  window.scrollTo({ top: 0 });
+}
+
+function route() { renderList(); renderItem(); }
+
+async function start() {
+  try { project = localStorage.getItem("proj") || "all"; } catch (e) {}
+  try {
+    const r = await fetch("tickets.json", { cache: "no-store" });
+    data = await r.json();
+  } catch (e) {
+    document.getElementById("view").innerHTML = '<p class="empty">Не загрузился список тикетов. Обнови страницу.</p>';
+    return;
+  }
+  if (!data.projects.some(p => p.key === project)) project = "all";
+  const d = new Date(data.generated);
+  document.getElementById("gen").textContent = isNaN(d) ? "" : "на " + d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  renderFilters();
+  document.getElementById("q").addEventListener("input", renderList);
+  document.getElementById("back").onclick = e => { e.preventDefault(); history.pushState(null, "", location.pathname + location.search); route(); };
+  window.addEventListener("hashchange", route);
+  route();
+}
+start();
+</script>
