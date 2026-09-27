@@ -1872,6 +1872,19 @@ def save_tg_state(st: dict) -> None:
     os.replace(tmp, TG_STATE)
 
 
+def pid_alive(raw: str) -> bool:
+    """False only when the lock names a process that is gone; an empty or foreign lock counts as held."""
+    if not raw.strip().isdigit() or platform.system() == "Windows":
+        return True
+    try:
+        os.kill(int(raw), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+
+
 class tg_lock:
     """A lock file, so two sessions running `status` at once don't both take the same answer.
     Without `wait` it gives up at once: the listener service may be holding the bot."""
@@ -1884,11 +1897,13 @@ class tg_lock:
         STATE.mkdir(parents=True, exist_ok=True)
         for _ in range(self.tries):
             try:
-                os.close(os.open(TG_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                fd = os.open(TG_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
                 return self
             except FileExistsError:
                 try:
-                    if time.time() - TG_LOCK.stat().st_mtime > 120:
+                    if time.time() - TG_LOCK.stat().st_mtime > 120 or not pid_alive(TG_LOCK.read_text()):
                         TG_LOCK.unlink()
                         continue
                 except OSError:
