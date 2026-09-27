@@ -71,6 +71,9 @@ code { font-family: var(--mono); font-size: .86em; background: var(--quote); bor
 .msg .who { font-size: 12px; color: var(--ink-3); margin-bottom: 2px; }
 .msg .who b { color: var(--ink-2); font-weight: 600; }
 .howto { border-top: 1px dashed var(--line); padding-top: 14px; color: var(--ink-2); font-size: 14px; display: flex; flex-direction: column; gap: 4px; }
+.ask { font: inherit; font-size: 15px; font-weight: 500; align-self: flex-start; border: 0; border-radius: 10px; padding: 10px 16px; background: var(--accent); color: var(--surface); cursor: pointer; }
+.ask:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.ask-hint { font-size: 13px; color: var(--ink-3); }
 .back { display: none; color: var(--accent); text-decoration: none; font-size: 14px; margin-bottom: 10px; }
 .empty { color: var(--ink-3); padding: 40px 0; }
 @media (max-width: 760px) {
@@ -165,18 +168,50 @@ function renderItem() {
     return `<div class="msg${me ? " me" : ""}"><div class="who"><b>${esc(m.author || "—")}</b>${m.when ? ", " + esc(m.when) : ""}</div>${md(m.text)}</div>`;
   }).join("");
   const tag = `${projLabel(it.project)} ${it.code || "вопрос"}`;
-  view.innerHTML = `<article id="t-${it.id}" data-item="${esc(tag)}">
+  view.innerHTML = `<article id="t-${it.id}" data-item="${esc(tag)}" data-comment-target>
     <div class="meta"><span>${esc(projLabel(it.project))}</span>${it.code ? `<span class="code">${esc(it.code)}</span>` : ""}${it.priority ? `<span>${esc(it.priority)}</span>` : ""}<span class="pill s-${it.state}">${LABEL[it.state] || it.state}</span></div>
     <h1 id="h-${it.id}">${inline(it.title)}</h1>
     ${it.why ? `<p class="why"><b>Зачем:</b> ${inline(it.why)}</p>` : ""}
     <div class="body">${md(it.body)}${it.pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(it.pick.replace(/^Предложение[^:]*:\s*/i, ""))}</p>` : ""}</div>
     ${thread ? `<section class="thread"><h4>Ветка</h4>${thread}</section>` : ""}
-    <div class="howto"><h4>Как ответить · ${esc(tag)}</h4>
-      <span>${esc(tag)}: выдели фразу или абзац и оставь комментарий. Нажми «Send to Claude»: отвечу в этой же ветке и запишу твои слова под пункт в ${esc(it.doc)} проекта ${esc(projLabel(it.project))}.</span></div>
+    <div class="howto"><h4>Ответить или спросить · ${esc(tag)}</h4>
+      <button class="ask" id="ask" type="button" hidden>Написать про этот тикет</button>
+      <span class="ask-hint" id="ask-hint">Можно сначала выделить фразу: вопрос придёт вместе с ней. В окне комментария нажми «Send to Claude»: отвечу в этой же ветке и запишу твои слова под пункт в ${esc(it.doc)} проекта ${esc(projLabel(it.project))}.</span></div>
   </article>`;
   document.title = `${it.code || "Вопрос"} · Тикеты Данияра`;
+  wireAsk();
   window.scrollTo({ top: 0 });
 }
+
+// The comment box opens anchored to this ticket (or to the phrase selected in it), so a comment
+// sent to Claude says which ticket it is about.
+let comments = null, lastRange = null;
+document.addEventListener("selectionchange", () => {
+  const sel = document.getSelection();
+  const art = document.querySelector("#view article");
+  if (sel && sel.rangeCount && !sel.isCollapsed && art && art.contains(sel.getRangeAt(0).commonAncestorContainer))
+    lastRange = sel.getRangeAt(0).cloneRange();
+});
+function wireAsk() {
+  const btn = document.getElementById("ask");
+  if (!btn) return;
+  lastRange = null;
+  btn.hidden = !comments;
+  btn.onclick = async () => {
+    const art = document.querySelector("#view article");
+    const range = lastRange && art && art.contains(lastRange.commonAncestorContainer) && !lastRange.collapsed ? lastRange : null;
+    try {
+      await comments.openComposer(range ? { range } : { element: art });
+    } catch (e) {
+      btn.hidden = true;
+      document.getElementById("ask-hint").textContent = "Комментарии здесь недоступны: открой страницу в Claude и оставь комментарий через значок чата вверху, начав с номера тикета.";
+    }
+  };
+}
+(async () => {
+  try { comments = await window.claude?.use?.("comments"); } catch (e) { comments = null; }
+  wireAsk();
+})();
 
 function route() { renderList(); renderItem(); }
 
