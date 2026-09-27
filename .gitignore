@@ -3,3 +3,4 @@ __pycache__/
 tools/tickets-page/tickets.json
 tools/tickets-page/triage.json
 tools/tickets-page/docs.json
+tools/tickets-page/themes.json

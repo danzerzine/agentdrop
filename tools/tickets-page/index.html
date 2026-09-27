@@ -46,6 +46,12 @@ aside { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); align
 .group summary h3::after { content: "▾"; margin-left: auto; color: var(--ink-3); }
 .group:not([open]) summary h3::after { content: "▸"; }
 .group.g-blocker h3 { color: var(--owner); }
+.theme { margin: 6px 0 10px; }
+.theme h4 { margin: 8px 8px 2px; font-size: 13px; font-weight: 600; color: var(--ink); display: flex; gap: 6px; }
+.theme h4 span, .proj-t { color: var(--ink-3); font-weight: 500; }
+.proj-t { margin: 10px 8px 0; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.why-t { margin: 0 8px 4px; font-size: 12.5px; line-height: 1.4; color: var(--ink-2); }
+.start { font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-bg); border-radius: 999px; padding: 1px 6px; white-space: nowrap; }
 .row .note { font-size: 12.5px; color: var(--ink-3); line-height: 1.4; }
 .who-line { margin: 0; align-self: flex-start; padding: 6px 12px; border-radius: 8px; font-size: 14px; }
 .who-line b { font-weight: 600; }
@@ -132,7 +138,7 @@ const STATES = [
   ["later", "Отложено и справочно"], ["done", "Сделано"],
 ];
 const LABEL = Object.fromEntries(STATES);
-let data = { projects: [], items: [] }, project = "all", triage = {};
+let data = { projects: [], items: [] }, project = "all", triage = {}, themes = {};
 const WHO = {
   blocker: ["ты", "без этого стоит чужая работа"], owner: ["ты", "нужно твоё решение"], route: ["ты", "передать людям"],
   turn: ["агент проекта", "ты ответил, его ход"], running: ["агент проекта", "в работе"], next: ["агент проекта", "в очереди"],
@@ -194,20 +200,44 @@ function renderFilters() {
   el.querySelectorAll("button").forEach(b => b.onclick = () => { project = b.dataset.k; try { localStorage.setItem("proj", project); } catch (e) {} renderFilters(); renderList(); });
 }
 
+function rowHtml(i, st, cur, start) {
+  return `<a class="row${i.id === cur ? " on" : ""}" href="#${i.id}"><span class="code">${esc(i.code || "вопрос")}${i.priority && st !== "done" ? `<br>${esc(i.priority)}` : ""}</span>` +
+    `<span class="t">${start ? '<span class="start">начать с</span> ' : ""}${project === "all" ? `<span style="color:var(--ink-3)">${esc(projLabel(i.project))} · </span>` : ""}${esc(i.title)}</span>` +
+    (triage[i.id]?.note && st !== "later" ? `<span></span><span class="note">${esc(triage[i.id].note)}</span>` : "") + `</a>`;
+}
+function themeOf(i) {
+  const list = themes[i.project] || [];
+  const k = list.findIndex(t => t.ids.includes(i.code));
+  return k < 0 ? null : { n: k + 1, ...list[k] };
+}
 function renderList() {
   const q = document.getElementById("q").value.trim().toLowerCase();
   const cur = location.hash.slice(1);
   const pick = data.items.filter(i => (project === "all" || i.project === project) &&
     (!q || (i.code + " " + i.title).toLowerCase().includes(q)));
+  const prio = i => ({ P0: 0, P1: 1, P2: 2, P3: 3 }[i.priority] ?? 4);
   const html = STATES.map(([st, label]) => {
-    const prio = i => ({ P0: 0, P1: 1, P2: 2, P3: 3 }[i.priority] ?? 4);
     const rows = pick.filter(i => tierOf(i) === st).sort((x, y) => prio(x) - prio(y));
     if (!rows.length) return "";
     const open = !["later", "next", "done"].includes(st) || q;
-    return `<details class="group g-${st}"${open ? " open" : ""}><summary><h3>${label} <span>${rows.length}</span></h3></summary>` + rows.map(i =>
-      `<a class="row${i.id === cur ? " on" : ""}" href="#${i.id}"><span class="code">${esc(i.code || "вопрос")}${i.priority && st !== "done" ? `<br>${esc(i.priority)}` : ""}</span>` +
-      `<span class="t">${project === "all" ? `<span style="color:var(--ink-3)">${esc(projLabel(i.project))} · </span>` : ""}${esc(i.title)}</span>` +
-      (triage[i.id] && st !== "later" ? `<span></span><span class="note">${esc(triage[i.id].note)}</span>` : "") + `</a>`).join("") + "</details>";
+    let body;
+    if (st === "next" && !q && Object.keys(themes).length) {   // the queue, grouped by theme in the order of the pick
+      const projs = data.projects.map(p => p.key).filter(k => project === "all" || k === project);
+      body = projs.map(pk => {
+        const mine = rows.filter(i => i.project === pk);
+        if (!mine.length) return "";
+        const blocks = (themes[pk] || []).map((th, k) => {
+          const inTheme = th.ids.map(c => mine.find(i => i.code === c)).filter(Boolean);
+          if (!inTheme.length) return "";
+          return `<div class="theme"><h4>${k + 1}. ${esc(th.name)} <span>${inTheme.length}</span></h4><p class="why-t">${esc(th.why || "")}</p>` +
+            inTheme.map(i => rowHtml(i, st, cur, (th.start || []).includes(i.code))).join("") + "</div>";
+        });
+        const rest = mine.filter(i => !themeOf(i));
+        if (rest.length) blocks.push(`<div class="theme"><h4>Без темы <span>${rest.length}</span></h4>` + rest.map(i => rowHtml(i, st, cur)).join("") + "</div>");
+        return (project === "all" ? `<p class="proj-t">${esc(projLabel(pk))}</p>` : "") + blocks.join("");
+      }).join("");
+    } else body = rows.map(i => rowHtml(i, st, cur)).join("");
+    return `<details class="group g-${st}"${open ? " open" : ""}><summary><h3>${label} <span>${rows.length}</span></h3></summary>` + body + "</details>";
   }).join("");
   document.getElementById("list").innerHTML = html || '<p class="empty">Ничего не нашлось.</p>';
 }
@@ -229,6 +259,7 @@ function renderItem() {
   view.innerHTML = `<article id="t-${it.id}" data-item="${esc(tag)}" data-comment-target>
     <div class="meta"><span>${esc(projLabel(it.project))}</span>${it.code ? `<span class="code">${esc(it.code)}</span>` : ""}${it.priority ? `<span>${esc(it.priority)}</span>` : ""}<span class="pill s-${tierOf(it)}">${LABEL[tierOf(it)] || it.state}</span></div>
     <h1 id="h-${it.id}">${inline(it.title)}</h1>
+    ${themeOf(it) && tierOf(it) === "next" ? `<p class="why"><b>Тема ${themeOf(it).n}:</b> ${esc(themeOf(it).name)}. ${esc(themeOf(it).why || "")}</p>` : ""}
     <p class="who-line s-${tierOf(it)}"><b>На ком:</b> ${esc(whoOf(it)[0])} · ${linkCodes(esc(whoOf(it)[1]))}</p>
     ${triage[it.id] ? `<p class="triage t-${tierOf(it)}">${esc(triage[it.id].note)}</p>` : ""}
     ${it.why ? `<p class="why"><b>Зачем:</b> ${inline(it.why)}</p>` : ""}
@@ -307,6 +338,7 @@ async function start() {
     return;
   }
   try { const t = await fetch("triage.json", { cache: "no-store" }); if (t.ok) triage = await t.json(); } catch (e) {}
+  try { const t = await fetch("themes.json", { cache: "no-store" }); if (t.ok) themes = await t.json(); } catch (e) {}
   fetch("docs.json", { cache: "no-store" }).then(r => r.ok ? r.json() : null).then(d => { if (d) { docs = d; route(); } }).catch(() => {});
   if (!data.projects.some(p => p.key === project)) project = "all";
   const d = new Date(data.generated);
