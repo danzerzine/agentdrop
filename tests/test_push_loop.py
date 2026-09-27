@@ -234,6 +234,35 @@ class PushLoop(Project):
         self.assertEqual(self.run_ad("claim", "B7", "--force", session="bbbb2222").returncode, 0)
         self.assertEqual(self.status()["running"]["claims"][0]["session"], "bbbb2222")
 
+    def test_tickets_page_has_each_item_with_its_text_and_thread(self):
+        todo = self.root / "docs" / "TODO.md"
+        todo.write_text(TODO.replace("Repro on iOS 18.", "Repro on iOS 18.\n\n  > **Owner, 27.09 06:21:** still broken on 18.1"
+                                     "\n  > **Agent, 27.09 07:00:** looking"), encoding="utf-8")
+        self.assertEqual(self.run_ad("claim", "B9", session="aaaa1111").returncode, 0)
+        r = self.run_ad("tickets", str(self.root))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        items = {i["title"]: i for i in json.loads(r.stdout)["items"]}
+        self.assertEqual(list(items), ["Fix login on Safari", "Deploy script", "export to CSV", "Dark theme",
+                                       "Old reports cleanup", "Which chart library (Q-2)", "Keep the beta open?",
+                                       "Login page redesign", "Fixed the chart tooltip", "Older pass"])
+        b7 = items["Fix login on Safari"]
+        self.assertEqual((b7["code"], b7["kind"], b7["state"], b7["priority"], b7["section"]),
+                         ("B7", "ticket", "next", "P1", "Now"))
+        self.assertEqual(b7["why"], "«I can't log in from the iPad» (M12, 20.09)")
+        self.assertEqual(b7["body"], "Repro on iOS 18.")   # the title and the why are shown on their own
+        self.assertEqual(b7["thread"], [{"author": "Owner", "when": "27.09 06:21", "text": "still broken on 18.1"},
+                                        {"author": "Agent", "when": "27.09 07:00", "text": "looking"}])
+        self.assertEqual(items["Deploy script"]["state"], "owner")
+        self.assertEqual(items["export to CSV"]["state"], "running")
+        q2 = items["Which chart library (Q-2)"]
+        self.assertEqual((q2["kind"], q2["code"], q2["state"]), ("question", "Q-2", "owner"))
+        self.assertEqual(q2["pick"], "I recommend Recharts: we already use it.")
+        beta = items["Keep the beta open?"]
+        self.assertEqual((beta["state"], beta["body"]), ("turn", "Beta is public since 20.09."))
+        self.assertEqual(beta["thread"], [{"author": "Owner", "when": "21.09", "text": "yes, keep it."}])
+        done = items["Login page redesign"]   # closed tickets come from LOG, so a link to one opens something
+        self.assertEqual((done["code"], done["state"]), ("B6", "done"))
+
 
 class FakeTelegram:
     """Bot API stand-in: records sendMessage, serves queued getUpdates, checks the relay key."""
