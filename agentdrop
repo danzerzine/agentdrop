@@ -1284,8 +1284,13 @@ class MarkdownTasks:
     placement, `take_back` removes a placement again if it is still there untouched."""
 
     def __init__(self, root: Path, cfg: dict | None = None):
-        self.root = root
-        self.cfg = load_config() if cfg is None else cfg
+        self.root, self._cfg = root, cfg
+
+    @property
+    def cfg(self) -> dict:   # read on first use: `find_root` asks every parent folder for `present()`
+        if self._cfg is None:
+            self._cfg = load_config()
+        return self._cfg
 
     def present(self) -> bool:
         """The project keeps its tickets here."""
@@ -1301,14 +1306,14 @@ class MarkdownTasks:
     def tickets(self, full: bool = False) -> list[dict]:
         """The open tickets in file order, with the board's fields; `full` adds "body" (without
         the title and the why) and "thread" (the comments under it)."""
-        root, words, out, first = self.root, owner_words(self.cfg), [], {}
+        root, words, out, text_by_id = self.root, owner_words(self.cfg), [], {}
         for idx, (heads, text) in enumerate(md_items(doc(root, "TODO.md"))):
             section = next(((order, prio) for rx, order, prio in SECTION_ORDER
                             if any(rx.search(h) for h in heads[1:])), None)
             head = text.replace("**", "", 1) if text.startswith("**") else text
             m = ITEM_TICKET.match(head)
             if m:
-                first.setdefault(m.group(2), text)
+                text_by_id.setdefault(m.group(2), text)   # the first one, as ticket_text() finds it
             if not m or section is None:
                 continue
             first_para = text.split("\n\n", 1)[0]
@@ -1345,7 +1350,7 @@ class MarkdownTasks:
                 "last": clip(re.sub(r"^\s*>\s*", "", comments[-1][1]), 400) if comments else "",
             }
             if full:
-                t["body"], t["thread"] = self._ticket_page(first[t["id"]], t)
+                t["body"], t["thread"] = self._ticket_page(text_by_id[t["id"]], t)
                 t["doc"] = "TODO.md"
             out.append(t)
         return out
@@ -1815,7 +1820,7 @@ def cmd_claim(argv: list[str]) -> int:
     ru = src.russian()
     d = root / CLAIMS
     f = d / f"{tid}.json"
-    stale_h = float(src.cfg.get("stale_hours", STALE_HOURS))
+    stale_h = float(load_config().get("stale_hours", STALE_HOURS))
     if f.exists():
         try:
             other = json.loads(f.read_text(encoding="utf-8"))
