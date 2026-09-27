@@ -8,8 +8,12 @@
 #                                      when enough passes piled up since the last harvest
 # With a .git-docs folder (docs in a separate local repo) the checks run against it.
 # Project-specific allowed paths: .docs-allow, one ERE per line.
+# Project-specific checks: scripts/check_docs.local.sh, run after these ones with --staged
+# in pre-commit and no argument otherwise; a non-zero exit fails the guard with its output.
+# agentdrop refreshes this file but never touches the local one: put the project's checks there.
 set -euo pipefail
 mode=${1:-}
+here=$(cd "$(dirname "$0")" && pwd)
 
 # SessionStart: reminders for the agent, never a failure. Passes logged since the last
 # harvest ("## " entries above <!-- harvest --> in docs/LOG.md); in research mode, owner
@@ -81,7 +85,20 @@ unsigned=$(git diff "${diff_args[@]}" -U0 -- docs/DECISIONS.md 2>/dev/null | awk
     if (head != "" && !signed) print "  " head
   }' || true)
 
-[ -z "$stray" ] && [ -z "$unsigned" ] && exit 0
+local_out=""
+if [ -f "$here/check_docs.local.sh" ]; then
+  staged=""
+  [ "$mode" = --staged ] && staged=--staged
+  local_rc=0
+  local_out=$(bash "$here/check_docs.local.sh" $staged 2>&1) || local_rc=$?
+  if [ "$local_rc" -eq 0 ]; then
+    local_out=""
+  elif [ -z "$local_out" ]; then
+    local_out="scripts/check_docs.local.sh failed (exit $local_rc)"
+  fi
+fi
+
+[ -z "$stray" ] && [ -z "$unsigned" ] && [ -z "$local_out" ] && exit 0
 
 msg=""
 if [ -n "$stray" ]; then
@@ -95,6 +112,10 @@ if [ -n "$unsigned" ]; then
   msg+="New docs/DECISIONS.md entries without a 'Decided: who, where, quote' line:
 $unsigned
 If no human chose it, it is not a decision: put it in QUESTIONS.md as an agent default (rules: DECISIONS.md header)."
+fi
+if [ -n "$local_out" ]; then
+  [ -n "$msg" ] && msg+=$'\n'
+  msg+="$local_out"
 fi
 
 if [ "$mode" = --stop-hook ]; then

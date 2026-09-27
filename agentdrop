@@ -90,10 +90,14 @@ RESEARCH_ALLOW = r"^docs/(ASKS|HYPOTHESES|CLAIMS)\.md$"
 STOP_HOOK_CMD = '"$CLAUDE_PROJECT_DIR"/scripts/check_docs.sh --stop-hook'
 START_HOOK_CMD = '"$CLAUDE_PROJECT_DIR"/scripts/check_docs.sh --session-start'
 # Kit files agentdrop owns: refreshed in projects on every run (old copy backed up), unlike the
-# docs templates, which are only created. Project-specific tweaks go to .docs-allow and AGENTS.md.
+# docs templates, which are only created. A copy the project changed (it matches no version
+# agentdrop ever shipped or wrote, "known:" in KIT_LOCK) is kept and the run says how to merge.
+# Project-specific tweaks go to .docs-allow, AGENTS.md and the project's own extra checks,
+# PROJECT_CHECKS, which the guard runs and agentdrop never writes.
 OWNED = {"scripts/check_docs.sh", ".githooks/pre-commit", ".claude/skills/review-intake/SKILL.md",
          ".claude/skills/harvest/SKILL.md", ".claude/skills/grill/SKILL.md", "scripts/owner_asks.py", ".claude/agents/skeptic.md",
          ".claude/agents/acceptance-judge.md"}
+PROJECT_CHECKS = "scripts/check_docs.local.sh"
 
 # Where the project docs live relative to git: the owner's answer is kept in the code repo's
 # local config, so a re-run never moves them back.
@@ -102,10 +106,10 @@ DOCS_KEY = "agentdrop.docs"
 DOCS_GIT = ".git-docs"
 # leave the code repo in "separate" and "local" modes (LOCAL.md is never committed anywhere)
 DOCS_PATHS = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", "LOCAL.md", ".docs-allow", "docs/",
-              ".githooks/", "scripts/check_docs.sh", ".claude/")
+              ".githooks/", "scripts/check_docs.sh", PROJECT_CHECKS, ".claude/")
 # what the separate docs repo holds; the rest of .claude/ (worktrees, local settings) stays out
 DOCS_REPO_PATHS = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", ".docs-allow", "docs", ".githooks",
-                   "scripts/check_docs.sh", ".claude/CLAUDE.md", ".claude/settings.json", ".claude/skills")
+                   "scripts/check_docs.sh", PROJECT_CHECKS, ".claude/CLAUDE.md", ".claude/settings.json", ".claude/skills")
 RESEARCH_DOCS_PATHS = ("scripts/owner_asks.py",)             # added in research mode
 RESEARCH_REPO_PATHS = ("scripts/owner_asks.py", ".claude/agents")
 EXCLUDE_START = "# >>> agentdrop: project docs are not in this repo (agentdrop --docs)"
@@ -275,20 +279,79 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
 
 
+def owned_kit_file(key: str) -> bool:
+    """key is a path inside the kit; research-mode files sit under modes/research/."""
+    return key in OWNED or key.startswith("modes/research/") and key[len("modes/research/"):] in OWNED
+
+
+def load_lock() -> dict:
+    try:
+        return json.loads(read(KIT_LOCK)) if KIT_LOCK.exists() else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def remember(lock: dict, key: str, digest: str) -> None:
+    """Record a version of an owned kit file as agentdrop's own, so a project copy equal to it
+    counts as untouched."""
+    known = lock.setdefault("known:" + key, [])
+    if digest not in known:
+        known.append(digest)
+
+
+def shipped_versions(bundled: Path) -> dict[str, set[str]]:
+    """Every version of the owned kit files in the clone's git history, so a project set up by an
+    older agentdrop still counts as untouched. Empty outside a git clone."""
+    repo = bundled.parent
+    try:
+        log = subprocess.run(["git", "-C", str(repo), "log", "--format=", "--raw", "--no-abbrev",
+                              "--no-renames", "--", "kit"], capture_output=True, text=True)
+    except FileNotFoundError:
+        return {}
+    blobs: dict[str, str] = {}
+    for line in log.stdout.splitlines():
+        meta, _, path = line.partition("\t")
+        parts = meta.split()
+        key = path[len("kit/"):]
+        if len(parts) >= 4 and path.startswith("kit/") and owned_kit_file(key):
+            for blob in parts[2:4]:
+                if blob.strip("0"):
+                    blobs[blob] = key
+    if not blobs:
+        return {}
+    r = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch"], capture_output=True,
+                       input="".join(b + "\n" for b in blobs).encode())
+    out, pos, found = r.stdout, 0, {}
+    for blob, key in blobs.items():
+        header_end = out.find(b"\n", pos)
+        if header_end < 0:
+            break
+        header = out[pos:header_end].split()
+        pos = header_end + 1
+        if len(header) < 3 or header[1] != b"blob":
+            continue
+        size = int(header[2])
+        found.setdefault(key, set()).add(sha(out[pos:pos + size]))
+        pos += size + 1
+    return found
+
+
 def update_kit(bundled: Path) -> None:
     """Bring ~/.agentdrop/kit and COMMON.md up to the bundled version without losing edits.
 
     A file agentdrop installed and nobody touched since is replaced; a missing one is added;
     one the user edited stays, and the new version goes next to it (kit.new/, COMMON.new.md).
     """
-    try:
-        lock = json.loads(read(KIT_LOCK)) if KIT_LOCK.exists() else {}
-    except json.JSONDecodeError:
-        lock = {}
+    lock = load_lock()
     kept = []
+    for key, digests in shipped_versions(bundled).items():
+        for digest in sorted(digests):
+            remember(lock, key, digest)
 
     def place(key: str, new: bytes, dest: Path, side: Path, mode_from: Path | None = None) -> None:
         new_sha = sha(new)
+        if owned_kit_file(key):
+            remember(lock, key, new_sha)
         if dest.exists():
             cur = sha(dest.read_bytes())
             if cur == new_sha:
@@ -554,14 +617,25 @@ def uses_kit(root: Path) -> bool:
 
 
 def copy_kit(root: Path, dry: bool = False, src_root: Path = KIT) -> list[str]:
-    created = []
+    created, kept = [], []
+    lock = load_lock()
     for src in sorted(src_root.rglob("*")):
         rel = src.relative_to(src_root).as_posix()
         if src.is_dir() or rel in KIT_SKIP or rel.startswith("modes/") or src.name == ".DS_Store":
             continue
         dest = root / rel
+        key = src.relative_to(KIT).as_posix() if src.is_relative_to(KIT) else rel
+        new_sha = sha(src.read_bytes())
+        if rel in OWNED:
+            remember(lock, key, new_sha)
         if dest.exists():
-            if rel not in OWNED or sha(dest.read_bytes()) == sha(src.read_bytes()):
+            cur = sha(dest.read_bytes())
+            if rel not in OWNED or cur == new_sha:
+                continue
+            if cur not in lock.get("known:" + key, []):
+                # the project changed it: never overwrite its own checks or edits
+                print(f"! {rel:<40} — kept: this project changed it")
+                kept.append((rel, src))
                 continue
             if not dry:
                 backup(dest)
@@ -579,6 +653,18 @@ def copy_kit(root: Path, dry: bool = False, src_root: Path = KIT) -> list[str]:
                 shutil.copy2(src, dest)
         print(f"✓ {rel:<40} — {action}")
         created.append(rel)
+    if not dry:
+        write(KIT_LOCK, json.dumps(lock, indent=1, sort_keys=True) + "\n")
+    if kept:
+        print("  agentdrop did not refresh these files because the project edited them. To take the new version:")
+        if any(rel in ("scripts/check_docs.sh", ".githooks/pre-commit") for rel, _ in kept):
+            print(f"  1. Move the project's own checks into {PROJECT_CHECKS} (the guard runs it on every")
+            print("     commit and Stop hook, and agentdrop never touches it; see the README, \"Project checks\").")
+            print("  2. Then copy the new version over the old one:")
+        else:
+            print("  Merge the project's edits into the new version, then copy it over the old one:")
+        for rel, src in kept:
+            print(f"       cp {src} {rel}")
     return created
 
 

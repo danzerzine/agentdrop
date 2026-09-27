@@ -148,7 +148,7 @@ scripts/check_docs.sh      guard: markdown only where the map allows
 .githooks/pre-commit       runs the guard on staged files
 ```
 
-The docs templates are created once and are yours from then on. The files agentdrop owns (the guard, the git hook, the skills, the research scripts and agents) are refreshed on every `agentdrop .`, with the old copy backed up.
+The docs templates are created once and are yours from then on. The files agentdrop owns (the guard, the git hook, the skills, the research scripts and agents) are refreshed on every `agentdrop .`, with the old copy backed up. A copy the project edited is never overwritten: agentdrop keeps it and prints how to take the new version (see "Project checks" below).
 
 The managed block in `AGENTS.md` holds only the charter: where each kind of note goes, how to finish a pass, and which file wins when instructions conflict. A new entry in `DECISIONS.md` has to end with a `Decided: who, where, quote` line; the guard rejects it otherwise, so agent defaults land in `QUESTIONS.md` instead of posing as decisions. Your common rules stay in the global configs, so no session loads them twice. Anything project-specific goes above the block. agentdrop never rewrites that part.
 
@@ -224,6 +224,32 @@ The `review-intake` skill then works in two steps:
 
 `check_docs.sh` keeps new stray files from piling up. The pre-commit hook blocks a commit that adds markdown outside the map. In Claude Code, a Stop hook warns you without blocking the agent. If a project needs extra places for docs, list them as regexes in `.docs-allow`.
 
+## Project checks
+
+A project often wants checks of its own on every commit: banned words from its conventions, a plain-language linter, a data sanity script. Put them in `scripts/check_docs.local.sh`. The guard runs that file after its own checks: with `--staged` from the pre-commit hook, with no argument from the Claude Code Stop hook or a manual run. A non-zero exit fails the guard and shows the file's output. agentdrop never creates, refreshes or backs up this file, so it survives every `agentdrop .`. With `--docs separate` the file lives next to the guard in `.git-docs`, and it runs with `GIT_DIR` pointing there.
+
+```bash
+#!/usr/bin/env bash
+# scripts/check_docs.local.sh: this project's own checks
+set -e
+python3 scripts/lint_prose.py "$@"
+```
+
+Don't edit `scripts/check_docs.sh` or `.githooks/pre-commit` themselves. If a project already edited one of them (a translation counts too), `agentdrop .` leaves the file alone and says so:
+
+```
+! scripts/check_docs.sh                    — kept: this project changed it
+```
+
+agentdrop can tell an edit from an older copy of its own: it compares the file with every version it has shipped (the clone's git history, recorded at `agentdrop --install`) or written into a project (in `~/.agentdrop/kit.lock.json`). To move a project over:
+
+1. Diff the project's copy against the new one: `diff ~/.agentdrop/kit/scripts/check_docs.sh scripts/check_docs.sh`, and the same for `.githooks/pre-commit`.
+2. Move every extra check into `scripts/check_docs.local.sh`, and every extra command from the pre-commit hook too.
+3. Copy the kit versions over the project's: `cp ~/.agentdrop/kit/scripts/check_docs.sh scripts/check_docs.sh` and `cp ~/.agentdrop/kit/.githooks/pre-commit .githooks/pre-commit`.
+4. Run `scripts/check_docs.sh` to see the local checks fire, then commit all three files.
+
+From then on, `agentdrop .` refreshes the kit files again.
+
 ## Talk to the agent in your docs
 
 Comment right under a ticket or a question, as a quote: `> **Name, 24.09 12:30:** text`. The next session answers in the same thread and commits it with its pass. End a thread with `_Thread closed._` and the agent finishes the item by the project's rules: removes the ticket, logs the pass, records the decision.
@@ -231,7 +257,7 @@ Comment right under a ticket or a question, as a quote: `> **Name, 24.09 12:30:*
 ## Customize
 
 - **Rules:** `agentdrop edit`, then `agentdrop sync`.
-- **Charter and templates:** edit files in `~/.agentdrop/kit/`, then run `agentdrop .` in a project. Templates are copied only when missing; the charter block and the files agentdrop owns are refreshed every time.
+- **Charter and templates:** edit files in `~/.agentdrop/kit/`, then run `agentdrop .` in a project. Templates are copied only when missing; the charter block and the files agentdrop owns are refreshed every time, except a copy the project edited. A project's own checks go in `scripts/check_docs.local.sh`.
 - **Or let harvest do it:** most edits to your rules come from your own projects; see "The loop" above.
 - **Research mode:** its block and files live in `~/.agentdrop/kit/modes/research/`. Edit `CHARTER.md` there and rerun `agentdrop .` in research projects to refresh the block.
 

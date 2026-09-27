@@ -136,7 +136,13 @@ class Research(unittest.TestCase):
     def test_owned_files_are_refreshed_templates_are_not(self):
         self.run_agentdrop()
         guard = self.root / "scripts" / "check_docs.sh"
-        guard.write_text("#!/usr/bin/env bash\n# old guard\n")
+        first = subprocess.run(["git", "-C", str(REPO), "log", "--reverse", "--format=%H", "--",
+                                "kit/scripts/check_docs.sh"], capture_output=True, text=True).stdout.split()
+        if not first:
+            self.skipTest("no git history of the kit")
+        # a guard an older agentdrop wrote, known from the clone's history
+        guard.write_bytes(subprocess.run(["git", "-C", str(REPO), "show", f"{first[0]}:kit/scripts/check_docs.sh"],
+                                         capture_output=True, check=True).stdout)
         (self.root / "docs" / "STATE.md").write_text("# STATE\n\nmine\n")
         out = self.run_agentdrop()
         self.assertIn("scripts/check_docs.sh", out)

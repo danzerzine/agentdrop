@@ -127,7 +127,9 @@ class DocsMode(unittest.TestCase):
         out = self.run_agentdrop()
         self.assertIn("Docs mode: separate", out)
         self.assertEqual(self.git("config", "agentdrop.docs"), "separate")
-        self.assertNotIn("agentdrop", self.exclude())   # every path was already listed
+        # every path was already listed but the project checks file, which came later
+        block = self.exclude().split("# >>> agentdrop", 1)[1].splitlines()[1:-1]
+        self.assertEqual(block, ["/scripts/check_docs.local.sh"])
         self.assertEqual(self.code_status(), ["?? .gitattributes"])
 
     def test_dry_run_changes_nothing(self):
