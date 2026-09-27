@@ -11,6 +11,8 @@ Usage:
   agentdrop status [PATH]      The owner's board: waits for you, running, done, next (--json)
   agentdrop claim B41          Claim a ticket for this session (docs/.claims/, not in git)
   agentdrop release B41        Release it at the end of the pass
+  agentdrop store import       Copy this project's tickets and questions into the task store
+  agentdrop store check        Show where the task store and the project's markdown differ
 
 Project skeleton (docs/, charter, review-intake skill, docs guard) lives at:
   ~/.agentdrop/kit/   — CHARTER.md goes into AGENTS.md, other files are copied if missing
@@ -37,6 +39,7 @@ import os
 import platform
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -4042,9 +4045,266 @@ def cmd_limits(argv: list[str]) -> int:
     return 0 if v["can_start"] else 1
 
 
+# `agentdrop store`: the tasks of every project in one SQLite file on this machine. Projects still
+# live in markdown for now: `import` copies one into the store and `check` shows where the two
+# differ. Every change the store takes is written to an append-only journal of events.
+
+STORE_STATES = ("queued", "running", "waiting_you", "waiting_task", "accepting", "done", "deferred")
+STORE_FIELDS = ("kind", "title", "text", "source", "state", "priority", "theme", "mode", "waits",
+                "section", "position")
+STORE_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS projects (
+  name TEXT PRIMARY KEY,
+  root TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tasks (
+  project TEXT NOT NULL REFERENCES projects(name),
+  id TEXT NOT NULL,                      -- B12, or q1a2b3c for a question turned into a task
+  kind TEXT NOT NULL CHECK (kind IN ('ticket', 'question')),
+  title TEXT NOT NULL,
+  text TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '',       -- where it came from: the quoted why, or the log entry
+  state TEXT NOT NULL CHECK (state IN ({", ".join(f"'{s}'" for s in STORE_STATES)})),
+  priority TEXT NOT NULL DEFAULT '',     -- P0..P3
+  theme TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT '' CHECK (mode IN ('', 'auto', 'human')),   -- auto: may run unattended
+  waits TEXT NOT NULL DEFAULT '',        -- whom or what it waits for, in words
+  section TEXT NOT NULL DEFAULT '',
+  position INTEGER NOT NULL DEFAULT 0,   -- order within its kind, as in the project
+  created TEXT NOT NULL,
+  updated TEXT NOT NULL,
+  PRIMARY KEY (project, id)
+);
+CREATE TABLE IF NOT EXISTS links (       -- task runs after the other one is done
+  project TEXT NOT NULL,
+  task TEXT NOT NULL,
+  after TEXT NOT NULL,
+  PRIMARY KEY (project, task, after),
+  FOREIGN KEY (project, task) REFERENCES tasks(project, id)
+);
+CREATE TABLE IF NOT EXISTS comments (    -- a task's thread, in order
+  project TEXT NOT NULL,
+  task TEXT NOT NULL,
+  n INTEGER NOT NULL,
+  author TEXT NOT NULL,
+  at TEXT NOT NULL,                      -- as written: "26.09" or "26.09 14:05"
+  text TEXT NOT NULL,
+  PRIMARY KEY (project, task, n),
+  FOREIGN KEY (project, task) REFERENCES tasks(project, id)
+);
+CREATE TABLE IF NOT EXISTS events (      -- append-only: every change, when and by whom
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  author TEXT NOT NULL,
+  project TEXT NOT NULL,
+  task TEXT NOT NULL,
+  what TEXT NOT NULL,                    -- created, changed, links, comment, thread
+  detail TEXT NOT NULL DEFAULT '{{}}'
+);
+CREATE INDEX IF NOT EXISTS events_by_task ON events (project, task, id);
+CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
+  BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
+  BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
+"""
+
+
+def store_path() -> Path:
+    """The store: ~/.agentdrop/tasks.sqlite3, or AGENTDROP_STORE (tests point it elsewhere)."""
+    return Path(os.environ.get("AGENTDROP_STORE") or STATE / "tasks.sqlite3")
+
+
+def store_open() -> sqlite3.Connection:
+    path = store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(STORE_SCHEMA)
+    return conn
+
+
+def markdown_records(root: Path, cfg: dict) -> list[dict]:
+    """A project's tasks as the store keeps them, read from its markdown through `tasks_of`: open
+    tickets with their state, every question as a task «Решить: …», and tickets closed in the log."""
+    src = tasks_of(root, cfg)
+    ru = src.russian()
+    tickets = src.tickets(full=True)
+    claimed = {c.get("ticket") for c in read_claims(root)}
+    state = {t["id"]: "running" for t in tickets if t["id"] in claimed}
+    board = sort_tickets(tickets, claimed)
+    for key, st in (("turn", "queued"), ("deferred", "deferred"), ("owner", "waiting_you"),
+                    ("blocked", "waiting_you"), ("after", "waiting_task"), ("free", "queued")):
+        for t in board[key]:
+            state[t["id"]] = st
+    thread = lambda th: [{"author": c["author"], "at": c["when"], "text": c["text"]} for c in th]
+    out = []
+    for t in tickets:
+        out.append({"id": t["id"], "kind": "ticket", "title": t["title"], "text": t["body"], "source": t["why"],
+                    "state": state[t["id"]], "priority": t["priority"], "theme": t["theme"], "mode": t["mode"],
+                    "waits": t["waits"], "section": t["section"], "position": t["order"][1],
+                    "after": sorted(t["after"]), "thread": thread(t["thread"])})
+    # a question the owner answered last is the agent's move; one closed is done; the rest wait for the owner
+    q_state = {"turn": "queued", "deferred": "deferred", "closed": "done"}
+    for i, q in enumerate(src.question_items()):
+        body, th = split_thread(q["body"])
+        out.append({"id": "q" + sha((q["key"] or q["text"].split("\n", 1)[0]).encode())[:6], "kind": "question",
+                    "title": ("Решить: " if ru else "Decide: ") + (q["title"] or clip(q["text"], 80)).rstrip(". "),
+                    "text": body, "source": "", "state": q_state.get(q["group"], "waiting_you"),
+                    "priority": "", "theme": "", "mode": "", "waits": "", "section": q["path"], "position": i,
+                    "after": [], "thread": thread(th)})
+    open_ids = {t["id"] for t in tickets}
+    for i, d in enumerate(x for x in src.done() if x["id"] not in open_ids):
+        out.append({"id": d["id"], "kind": "ticket", "title": d["title"], "text": d["text"],
+                    "source": f"LOG.md {d['day']}", "state": "done", "priority": "", "theme": "", "mode": "",
+                    "waits": "", "section": "LOG", "position": i, "after": [], "thread": []})
+    seen = {}
+    for r in out:   # the same id twice in the files: the later one gets a suffix, so neither is lost
+        n = seen[r["id"]] = seen.get(r["id"], 0) + 1
+        if n > 1:
+            r["id"] = f"{r['id']}-{n}"
+    return out
+
+
+def store_records(conn: sqlite3.Connection, project: str) -> list[dict]:
+    """A project's tasks in the store, in the shape `markdown_records` gives."""
+    out = []
+    for row in conn.execute("SELECT * FROM tasks WHERE project = ? ORDER BY kind DESC, state = 'done', position",
+                            (project,)):
+        r = {"id": row["id"], **{f: row[f] for f in STORE_FIELDS}}
+        r["after"] = [x[0] for x in conn.execute(
+            "SELECT after FROM links WHERE project = ? AND task = ? ORDER BY after", (project, row["id"]))]
+        r["thread"] = [dict(x) for x in conn.execute(
+            "SELECT author, at, text FROM comments WHERE project = ? AND task = ? ORDER BY n", (project, row["id"]))]
+        out.append(r)
+    return out
+
+
+def store_import(conn: sqlite3.Connection, project: str, root: Path, records: list[dict],
+                 author: str = "import") -> dict:
+    """Write the records into the store: new tasks are created, changed fields, links and threads
+    updated, each with an event; a task the same as before is left alone, so importing twice adds
+    nothing. Tasks the store has but the records don't are only counted ("gone")."""
+    now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    n = {"new": 0, "changed": 0, "same": 0, "comments": 0, "events": 0}
+
+    def event(task: str, what: str, detail: dict) -> None:
+        conn.execute("INSERT INTO events (at, author, project, task, what, detail) VALUES (?, ?, ?, ?, ?, ?)",
+                     (now, author, project, task, what, json.dumps(detail, ensure_ascii=False)))
+        n["events"] += 1
+
+    def add_comments(task: str, start: int, comments: list[dict]) -> None:
+        conn.executemany("INSERT INTO comments (project, task, n, author, at, text) VALUES (?, ?, ?, ?, ?, ?)",
+                         [(project, task, start + i, c["author"], c["at"], c["text"]) for i, c in enumerate(comments)])
+        n["comments"] += len(comments)
+
+    with conn:
+        conn.execute("INSERT INTO projects (name, root) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET root = excluded.root",
+                     (project, str(root)))
+        have = {r["id"]: r for r in store_records(conn, project)}
+        for r in records:
+            old, tid = have.get(r["id"]), r["id"]
+            if old is None:
+                conn.execute(f"INSERT INTO tasks (project, id, {', '.join(STORE_FIELDS)}, created, updated) "
+                             f"VALUES (?, ?, {', '.join('?' * len(STORE_FIELDS))}, ?, ?)",
+                             (project, tid, *(r[f] for f in STORE_FIELDS), now, now))
+                conn.executemany("INSERT INTO links (project, task, after) VALUES (?, ?, ?)",
+                                 [(project, tid, x) for x in r["after"]])
+                add_comments(tid, 0, r["thread"])
+                event(tid, "created", {**{f: r[f] for f in STORE_FIELDS}, "after": r["after"],
+                                       "comments": len(r["thread"])})
+                n["new"] += 1
+                continue
+            changed = {f: [old[f], r[f]] for f in STORE_FIELDS if old[f] != r[f]}
+            if changed:
+                conn.execute(f"UPDATE tasks SET {', '.join(f'{f} = ?' for f in changed)} WHERE project = ? AND id = ?",
+                             (*(r[f] for f in changed), project, tid))
+                event(tid, "changed", changed)
+            if old["after"] != r["after"]:
+                conn.execute("DELETE FROM links WHERE project = ? AND task = ?", (project, tid))
+                conn.executemany("INSERT INTO links (project, task, after) VALUES (?, ?, ?)",
+                                 [(project, tid, x) for x in r["after"]])
+                event(tid, "links", {"after": [old["after"], r["after"]]})
+            if old["thread"] != r["thread"]:
+                if r["thread"][:len(old["thread"])] == old["thread"]:   # new answers under the old ones
+                    new = r["thread"][len(old["thread"]):]
+                    add_comments(tid, len(old["thread"]), new)
+                    for c in new:
+                        event(tid, "comment", c)
+                else:   # the thread was edited: keep what the files say now
+                    conn.execute("DELETE FROM comments WHERE project = ? AND task = ?", (project, tid))
+                    add_comments(tid, 0, r["thread"])
+                    event(tid, "thread", {"before": old["thread"], "after": r["thread"]})
+            if changed or old["after"] != r["after"] or old["thread"] != r["thread"]:
+                conn.execute("UPDATE tasks SET updated = ? WHERE project = ? AND id = ?", (now, project, tid))
+                n["changed"] += 1
+            else:
+                n["same"] += 1
+    n["gone"] = sorted(set(have) - {r["id"] for r in records})
+    return n
+
+
+def store_diff(md: list[dict], st: list[dict]) -> list[str]:
+    """Where the store and the markdown disagree, one line each; empty when they give the same."""
+    a, b = {r["id"]: r for r in md}, {r["id"]: r for r in st}
+    out = [f"{i}: only in markdown ({clip(a[i]['title'], 60)})" for i in a if i not in b]
+    out += [f"{i}: only in the store ({clip(b[i]['title'], 60)})" for i in b if i not in a]
+    for i in (i for i in a if i in b):
+        for f in (*STORE_FIELDS, "after", "thread"):
+            if a[i][f] != b[i][f]:
+                show = lambda v: clip(json.dumps(v, ensure_ascii=False), 80)
+                out.append(f"{i} {f}: markdown {show(a[i][f])}, store {show(b[i][f])}")
+    return out
+
+
+def store_counts(records: list[dict]) -> str:
+    n = lambda k, word: f"{k} {word}{'s' * (k != 1)}"
+    return (f"{n(sum(r['kind'] == 'ticket' for r in records), 'ticket')} "
+            f"({sum(r['kind'] == 'ticket' and r['state'] == 'done' for r in records)} done), "
+            f"{n(sum(r['kind'] == 'question' for r in records), 'question')} as tasks, "
+            f"{n(sum(len(r['thread']) for r in records), 'comment')}, "
+            f"{n(sum(len(r['after']) for r in records), '«after» link')}")
+
+
+def cmd_store(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="agentdrop store",
+                                description=f"The task store ({store_path()}, AGENTDROP_STORE to use another). "
+                                            "Projects still live in markdown; this copies them in and compares.")
+    sub = p.add_subparsers(dest="action", required=True)
+    for name, text in (("import", "Copy a project's tickets and questions from its markdown into the store "
+                                  "(again: only what changed, never twice)"),
+                       ("check", "Compare the store with the project's markdown; exit 1 when they differ")):
+        sp = sub.add_parser(name, help=text, description=text)
+        sp.add_argument("path", nargs="?", default=".", help="Project directory (default: the current one)")
+    a = p.parse_args(argv)
+    root = find_root(Path(a.path))
+    if not tasks_of(root).present():
+        print(f"agentdrop store: no docs/TODO.md in {root} or above", file=sys.stderr)
+        return 2
+    project, records = root.name, markdown_records(root, load_config())
+    conn = store_open()
+    try:
+        if a.action == "import":
+            n = store_import(conn, project, root, records)
+            print(f"{project}: {store_counts(records)}.")
+            print(f"store {store_path()}: {n['new']} new, {n['changed']} changed, {n['same']} unchanged, "
+                  f"{n['comments']} comments added, {n['events']} events")
+            if n["gone"]:
+                print(f"in the store but no longer in the markdown: {', '.join(n['gone'])}")
+            return 0
+        diffs = store_diff(records, store_records(conn, project))
+        for line in diffs:
+            print(line)
+        print(f"{project}: {len(diffs)} differences between the store and the markdown" if diffs
+              else f"{project}: the store and the markdown match: {store_counts(records)}")
+        return 1 if diffs else 0
+    finally:
+        conn.close()
+
+
 COMMANDS = {"status": cmd_status, "claim": cmd_claim, "release": cmd_release, "brief": cmd_brief,
             "replies": cmd_replies, "accept": cmd_accept,
-            "dispatch": cmd_dispatch, "pack": cmd_pack, "tickets": cmd_tickets, "limits": cmd_limits}
+            "dispatch": cmd_dispatch, "pack": cmd_pack, "tickets": cmd_tickets, "limits": cmd_limits, "store": cmd_store}
 
 
 def main() -> None:
