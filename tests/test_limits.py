@@ -59,7 +59,7 @@ class Limits(unittest.TestCase):
         self.assertAlmostEqual(v["today"]["share"], 0.30, places=2)   # 60% free over two days
 
     def test_five_hour_window_over_70_means_no(self):
-        self.log(0, 0.71, 0.40)
+        self.log(1, 0.71, 0.40)
         code, v = self.limits()
         self.assertEqual((code, v["reason"]), (1, "five_hour"))
         self.log(0, 0.70, 0.40, name="page-{}-b")   # exactly 70% is still allowed

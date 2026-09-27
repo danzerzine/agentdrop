@@ -3978,14 +3978,14 @@ def limit_readings(roots: list[Path], since: float) -> list[dict]:
                     continue
                 try:
                     w = json.loads(line)["rate_limit_info"]["unifiedWindows"]
-                    out.append({"at": started,
+                    out.append({"at": started, "written": st.st_mtime,
                                 "five_hour": float(w["five_hour"]["utilization"]),
                                 "five_hour_resets": int(w["five_hour"]["resetsAt"]),
                                 "seven_day": float(w["seven_day"]["utilization"]),
                                 "seven_day_resets": int(w["seven_day"]["resetsAt"])})
                 except (ValueError, KeyError, TypeError):
                     continue
-    return sorted(out, key=lambda r: r["at"])
+    return sorted(out, key=lambda r: (r["at"], r["written"]))   # runs started the same minute: last written wins
 
 
 def limits_verdict(readings: list[dict], now: float) -> dict:
