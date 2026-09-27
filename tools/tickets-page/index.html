@@ -200,11 +200,12 @@ function renderList() {
   const pick = data.items.filter(i => (project === "all" || i.project === project) &&
     (!q || (i.code + " " + i.title).toLowerCase().includes(q)));
   const html = STATES.map(([st, label]) => {
-    const rows = pick.filter(i => tierOf(i) === st);
+    const prio = i => ({ P0: 0, P1: 1, P2: 2, P3: 3 }[i.priority] ?? 4);
+    const rows = pick.filter(i => tierOf(i) === st).sort((x, y) => prio(x) - prio(y));
     if (!rows.length) return "";
     const open = !["later", "next", "done"].includes(st) || q;
     return `<details class="group g-${st}"${open ? " open" : ""}><summary><h3>${label} <span>${rows.length}</span></h3></summary>` + rows.map(i =>
-      `<a class="row${i.id === cur ? " on" : ""}" href="#${i.id}"><span class="code">${esc(i.code || "вопрос")}</span>` +
+      `<a class="row${i.id === cur ? " on" : ""}" href="#${i.id}"><span class="code">${esc(i.code || "вопрос")}${i.priority && st !== "done" ? `<br>${esc(i.priority)}` : ""}</span>` +
       `<span class="t">${project === "all" ? `<span style="color:var(--ink-3)">${esc(projLabel(i.project))} · </span>` : ""}${esc(i.title)}</span>` +
       (triage[i.id] && st !== "later" ? `<span></span><span class="note">${esc(triage[i.id].note)}</span>` : "") + `</a>`).join("") + "</details>";
   }).join("");
