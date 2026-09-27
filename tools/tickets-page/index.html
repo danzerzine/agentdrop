@@ -164,14 +164,15 @@ function renderItem() {
     const me = /данияр|владел/i.test(m.author);
     return `<div class="msg${me ? " me" : ""}"><div class="who"><b>${esc(m.author || "—")}</b>${m.when ? ", " + esc(m.when) : ""}</div>${md(m.text)}</div>`;
   }).join("");
-  view.innerHTML = `<article>
+  const tag = `${projLabel(it.project)} ${it.code || "вопрос"}`;
+  view.innerHTML = `<article id="t-${it.id}" data-item="${esc(tag)}">
     <div class="meta"><span>${esc(projLabel(it.project))}</span>${it.code ? `<span class="code">${esc(it.code)}</span>` : ""}${it.priority ? `<span>${esc(it.priority)}</span>` : ""}<span class="pill s-${it.state}">${LABEL[it.state] || it.state}</span></div>
-    <h1>${inline(it.title)}</h1>
+    <h1 id="h-${it.id}">${inline(it.title)}</h1>
     ${it.why ? `<p class="why"><b>Зачем:</b> ${inline(it.why)}</p>` : ""}
     <div class="body">${md(it.body)}${it.pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(it.pick.replace(/^Предложение[^:]*:\s*/i, ""))}</p>` : ""}</div>
     ${thread ? `<section class="thread"><h4>Ветка</h4>${thread}</section>` : ""}
-    <div class="howto"><h4>Как ответить</h4>
-      <span>Выдели фразу или абзац и оставь комментарий. Нажми «Send to Claude»: отвечу в этой же ветке и запишу твои слова под пункт в ${esc(it.doc)} проекта ${esc(projLabel(it.project))}.</span></div>
+    <div class="howto"><h4>Как ответить · ${esc(tag)}</h4>
+      <span>${esc(tag)}: выдели фразу или абзац и оставь комментарий. Нажми «Send to Claude»: отвечу в этой же ветке и запишу твои слова под пункт в ${esc(it.doc)} проекта ${esc(projLabel(it.project))}.</span></div>
   </article>`;
   document.title = `${it.code || "Вопрос"} · Тикеты Данияра`;
   window.scrollTo({ top: 0 });
