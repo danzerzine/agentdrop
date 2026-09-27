@@ -232,12 +232,12 @@ class Brief(Project):
         self.assertEqual(r.returncode, 0, r.stderr)
         texts = [m["text"] for m in self.tg.sent]
         self.assertEqual(len(texts), 3)   # head, the chart question, the ticket blocked on the owner
-        self.assertTrue(texts[0].startswith("<b>proj · brief</b>"))
-        self.assertIn("Waiting for you: 2 (2 below, one message each)", texts[0])
-        self.assertIn("27.09 — B6 login page redesign\n  New login page, tests 40 green.", texts[0])
-        self.assertIn("<b>Which chart library (Q-2)</b>", texts[1])
+        self.assertTrue(texts[0].startswith("<b>proj · BRIEF</b>"))
+        self.assertIn("<b>Waiting for you: 2</b>\n2 below, one message each", texts[0])
+        self.assertIn("<b>Done: 2</b>\n<blockquote expandable>• 27.09 — B6 login page redesign\n", texts[0])
+        self.assertIn("<b>proj · DECISION NEEDED, 1/2</b>\n\n<b>Which chart library</b>\n<i>Q-2</i>", texts[1])
         self.assertIn("I recommend Recharts", texts[1])
-        self.assertIn("<b>Deploy script</b> (B8, P0)", texts[2])
+        self.assertIn("<b>Deploy script</b>\n<i>B8, P0</i>", texts[2])
         self.assertIn("goes under the item in <code>TODO.md</code>", texts[2])
         self.assertEqual(self.tg.bad_key, 0)
 
@@ -249,7 +249,7 @@ class Brief(Project):
     def test_reply_lands_under_its_item_and_is_acknowledged(self):
         self.run_ad("brief", "--send")
         q2 = self.by_text("Q-2")["message_id"]
-        b8 = self.by_text("(B8, P0)")["message_id"]
+        b8 = self.by_text("B8, P0")["message_id"]
         head = self.tg.sent[0]["message_id"]
         self.tg.answer("Recharts.\nKeep it simple.", reply_to=q2)
         self.tg.answer("OK, take the new server", reply_to=b8)
@@ -273,12 +273,32 @@ class Brief(Project):
         self.assertIn("Which chart library (Q-2)", s["waiting"]["your_turn"])
 
         acks = self.tg.sent[sent_before:]
-        self.assertEqual(len(acks), 3)   # two saved, one "not tied to an item"; the stranger gets nothing
+        self.assertEqual(len(acks), 3)   # two under items, one as a new item; the stranger gets nothing
         self.assertEqual(acks[0]["reply_parameters"]["message_id"], 900)
-        self.assertIn("isn't tied to an item", acks[2]["text"])
+        self.assertIn("Saved in proj as a new item in QUESTIONS.md", acks[2]["text"])
+        self.assertIn("- **Answer to the brief, ", questions)
+        self.assertIn(":** what about this?", questions)
 
         self.run_ad("status")   # the same updates are never written twice
         self.assertEqual(questions, (self.root / "docs" / "QUESTIONS.md").read_text(encoding="utf-8"))
+
+    def test_reply_to_an_ack_continues_the_thread_and_hints_are_rare(self):
+        self.run_ad("brief", "--send")
+        self.tg.answer("Recharts", reply_to=self.by_text("Q-2")["message_id"])
+        self.run_ad("replies")
+        ack = self.by_text("Saved under")["message_id"]
+        self.tg.answer("and keep ECharts in mind", reply_to=ack)
+        self.tg.answer("loose thought one")
+        self.tg.answer("loose thought two")
+        before = len(self.tg.sent)
+        r = self.run_ad("replies")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = (self.root / "docs" / "QUESTIONS.md").read_text(encoding="utf-8")
+        self.assertIn(":** Recharts\n  > **Owner, ", text)
+        self.assertIn(":** and keep ECharts in mind\n- **Keep the beta open?**", text)
+        hints = [m for m in self.tg.sent[before:] if "which project" in m["text"]]
+        self.assertEqual(len(hints), 1)   # one hint, not one per loose message
+        self.assertNotIn("loose thought", text)
 
     def test_answer_to_a_closed_item_becomes_a_new_question(self):
         self.run_ad("brief", "--send")
@@ -291,14 +311,14 @@ class Brief(Project):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("is gone from proj", r.stdout)
         text = path.read_text(encoding="utf-8")
-        self.assertIn("- **Answer from Telegram about «Which chart library (Q-2)»** (QUESTIONS.md)\n\n"
+        self.assertIn("- **Answer from Telegram about «Which chart library (Q-2)» (QUESTIONS.md)**\n\n"
                       "  > **Owner, ", text)
         self.assertLess(text.index("ECharts after all"), text.index("## For others"))
 
     def test_print_without_send_touches_nothing(self):
         r = self.run_ad("brief")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("proj · decision needed", r.stdout)
+        self.assertIn("proj · DECISION NEEDED", r.stdout)
         self.assertEqual(self.tg.sent, [])
         self.assertFalse((self.home / ".agentdrop" / "telegram.json").exists())
 
