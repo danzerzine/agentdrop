@@ -1701,7 +1701,8 @@ BRIEF_ITEMS = 5                      # item messages per brief; the rest wait fo
 RESEND_HOURS = 24                    # an unanswered, unchanged item comes again after this
 QUIET_HOURS = (23, 9)                # messages arrive without sound
 KEEP_DAYS = 45
-HINT_HOURS = 2                       # "reply to an item" hints only for fresh messages
+HINT_HOURS = 2                       # at most one "which project?" hint per this many hours
+ROUTER = "claude -p --model claude-haiku-4-5-20251001"   # reads a chat message, says where it belongs
 
 BRIEF = {   # the owner asked for emoji: they mark where a message and a block begin in a chat without bubbles
     "kind_brief": ("📋 {p} · BRIEF", "📋 {p} · СВОДКА"),
@@ -1719,13 +1720,13 @@ BRIEF = {   # the owner asked for emoji: they mark where a message and a block b
     "last": ("💬 Last in the thread", "💬 Последнее в ветке"),
     "reply_hint": ("↩️ Reply to this message: your answer goes under the item in {doc}.",
                    "↩️ Ответь реплаем: запишу под пункт в {doc}."),
-    "ok_hint": ("👍 on this message is your OK. Anything else: reply, it goes under the item in {doc}.",
-                "👍 на это сообщение — твой OK. Если иначе — ответь реплаем, запишу под пункт в {doc}."),
+    "ok_hint": ("A button below or a 👍 on this message. Anything to add: reply, it goes under the item in {doc}.",
+                "Кнопка ниже или 👍 на сообщение. Есть что добавить — ответь реплаем, запишу под пункт в {doc}."),
     "head_hint": ("↩️ A reply to this brief goes to QUESTIONS.md as a new item.",
                   "↩️ Ответ реплаем на сводку запишу новым пунктом в QUESTIONS.md."),
     "noted": ("✅ Saved in {project} as a new item in QUESTIONS.md.",
               "✅ Записал в {project} новым пунктом в QUESTIONS.md."),
-    "brief_item": ("Answer to the brief, {when}", "Ответ на сводку, {when}"),
+    "brief_item": ("From Telegram, {when}", "Из Telegram, {when}"),
     "saved": ("✅ Saved under «{title}» in {project}, {doc}.", "✅ Записал под «{title}» в {project}, {doc}."),
     "moved": ("⚠️ «{title}» is gone from {project}, {doc} (closed?). Saved as a new item in QUESTIONS.md.",
               "⚠️ «{title}» в {project}, {doc} больше нет (закрыт?). Записал новым пунктом в QUESTIONS.md."),
@@ -1736,6 +1737,21 @@ BRIEF = {   # the owner asked for emoji: they mark where a message and a block b
     "text_only": ("⚠️ Only text answers for now.", "⚠️ Пока понимаю только текст."),
     "new_item": ("Answer from Telegram about «{title}»", "Ответ из Telegram про «{title}»"),
     "reaction_ok": ("OK ({e} in Telegram)", "OK ({e} в Telegram)"),
+    "button_ok": ("OK (button in Telegram)", "OK (кнопка в Telegram)"),
+    "button_ok_label": ("👍 OK", "👍 OK"),
+    "button_no_label": ("✏️ Not OK", "✏️ Не OK"),
+    "ok_done": ("✅ OK saved", "✅ OK записан"),
+    "not_ok_prompt": ("✏️ What's wrong with «{title}»? Answer this message; it goes under the item.",
+                      "✏️ Что не так с «{title}»? Ответь на это сообщение, запишу под пункт."),
+    "not_ok_placeholder": ("What's wrong…", "Что не так…"),
+    "feedback": ("🤖 That's about the bot: saved in agentdrop's notes ({path}).",
+                 "🤖 Это про самого бота: записал в заметки agentdrop ({path})."),
+    "about_item": ("From Telegram, about «{title}», {when}", "Из Telegram, к «{title}», {when}"),
+    "mv_item": ("↪️ No, under the item", "↪️ Нет, под пункт"),
+    "mv_project": ("↪️ New question in {project}", "↪️ Новым вопросом в {project}"),
+    "mv_agentdrop": ("↪️ It's about the bot", "↪️ Это про бота"),
+    "moved_to": ("moved", "перенёс"),
+    "left_copy": ("the old copy was already edited, left it there", "старую копию уже правили, оставил её"),
     "reaction_no": ("No ({e} in Telegram)", "Нет ({e} в Telegram)"),
 }
 OK_REACTIONS = {"👍", "👌", "🆗", "✅", "🔥", "❤", "❤️", "💯", "🤝", "👏"}
@@ -1744,6 +1760,10 @@ OK_ASK_RE = re.compile(r"(?i)(?<!\w)(?:OK|ок|одобр|соглас|approv|si
 
 
 class TgError(Exception):
+    pass
+
+
+class TgBusy(TgError):
     pass
 
 
@@ -1801,13 +1821,23 @@ def tg_plain(text: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", "", text))
 
 
-def tg_send(env: dict, text: str, reply_to: int | None = None) -> int:
+def tg_try(env: dict, method: str, payload: dict) -> None:
+    """A call whose failure changes nothing for the owner (a stale button toast, an unchanged edit)."""
+    try:
+        tg_call(env, method, payload)
+    except TgError:
+        pass
+
+
+def tg_send(env: dict, text: str, reply_to: int | None = None, markup: dict | None = None) -> int:
     hour = dt.datetime.now().hour
     payload = {"chat_id": env["TG_CHAT_ID"], "text": text, "parse_mode": "HTML",
                "link_preview_options": {"is_disabled": True},
                "disable_notification": hour >= QUIET_HOURS[0] or hour < QUIET_HOURS[1]}
     if reply_to:
         payload["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
+    if markup:
+        payload["reply_markup"] = markup
     try:
         return tg_call(env, "sendMessage", payload)["message_id"]
     except TgError as e:
@@ -1826,6 +1856,7 @@ def tg_state() -> dict:
     st.setdefault("offset", 0)
     st.setdefault("messages", {})
     st.setdefault("items", {})
+    st.setdefault("placed", {})
     return st
 
 
@@ -1833,6 +1864,7 @@ def save_tg_state(st: dict) -> None:
     cutoff = (dt.datetime.now().astimezone() - dt.timedelta(days=KEEP_DAYS)).isoformat()
     st["messages"] = {k: v for k, v in st["messages"].items() if v.get("at", "") >= cutoff}
     st["items"] = {k: v for k, v in st["items"].items() if v.get("at", "") >= cutoff}
+    st["placed"] = {k: v for k, v in st["placed"].items() if v.get("at", "") >= cutoff}
     STATE.mkdir(parents=True, exist_ok=True)
     tmp = TG_STATE.with_suffix(".tmp")
     tmp.write_text(json.dumps(st, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
@@ -1840,12 +1872,16 @@ def save_tg_state(st: dict) -> None:
 
 
 class tg_lock:
-    """A lock file, so two sessions running `status` at once don't both take the same answer."""
+    """A lock file, so two sessions running `status` at once don't both take the same answer.
+    Without `wait` it gives up at once: the listener service may be holding the bot."""
+
+    def __init__(self, wait: bool = True):
+        self.tries = 50 if wait else 1
 
     def __enter__(self):
         import time
         STATE.mkdir(parents=True, exist_ok=True)
-        for _ in range(50):
+        for _ in range(self.tries):
             try:
                 os.close(os.open(TG_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
                 return self
@@ -1856,8 +1892,9 @@ class tg_lock:
                         continue
                 except OSError:
                     continue
-                time.sleep(0.2)
-        raise TgError("another agentdrop holds the Telegram lock")
+                if self.tries > 1:
+                    time.sleep(0.2)
+        raise TgBusy("another agentdrop holds the Telegram lock")
 
     def __exit__(self, *exc):
         try:
@@ -1922,82 +1959,250 @@ def open_slot(lines: list[str], words: list[str]) -> int:
     return end
 
 
-def add_thread_comment(ref: dict, author: str, when: str, text: str) -> tuple[str, dict]:
-    """Write the owner's answer under the item. Returns how ("saved"; "moved" when the item is gone;
-    "noted" for an answer to a head message) and where the next answer in that thread should go."""
+def insert_block(path: Path, lines: list[str], at: int, block: list[str]) -> list[str]:
+    """Insert `block` into the doc at line `at`, return exactly the lines added (for a later move)."""
+    lines[at:at] = block
+    write(path, "\n".join(lines))
+    return block
+
+
+def add_thread_comment(ref: dict, author: str, when: str, text: str) -> dict:
+    """Write the owner's words under the item, or as a new item on top of the owner's open questions
+    (ref kind "brief", or the item is gone). Returns the placement: how, the file, the exact lines
+    added, and where the next answer in this thread goes."""
     root = Path(ref["root"])
     path = root / "docs" / ref["doc"]
     lines = read(path).split("\n") if path.is_file() else []
-    span = item_span(lines, ref) if ref["kind"] != "brief" else None
+    span = item_span(lines, ref) if ref["kind"] not in ("brief", "project") else None
     if span:
         _, b = span
         new = quote_lines(author, when, text, "  ")
-        lines[b:b] = new if lines[b - 1].lstrip().startswith(">") else ["", *new]
-        write(path, "\n".join(lines))
-        return "saved", ref
+        added = insert_block(path, lines, b, new if lines[b - 1].lstrip().startswith(">") else ["", *new])
+        return {"how": "saved", "path": str(path), "lines": added, "next": ref}
     qpath = root / "docs" / "QUESTIONS.md"
     qlines = read(qpath).split("\n") if qpath.is_file() else ["# QUESTIONS", ""]
     ru = bool(ref.get("ru"))
     end = open_slot(qlines, owner_words(load_config()))
-    if ref["kind"] == "brief":
-        title, how = BRIEF["brief_item"][ru].format(when=when), "noted"
+    if ref["kind"] in ("brief", "project"):
+        title = (BRIEF["about_item"][ru].format(title=clip(ref["title"], 60), when=when)
+                 if ref["kind"] == "project" and ref.get("item_title") else BRIEF["brief_item"][ru].format(when=when))
+        how = "noted"
     else:
         title, how = BRIEF["new_item"][ru].format(title=ref["title"]) + f" ({ref['doc']})", "moved"
     item = [f"- **{title}**", "", *quote_lines(author, when, text, "  "), ""]
     if end > 0 and qlines[end - 1].strip():
         item.insert(0, "")
-    qlines[end:end] = item
-    write(qpath, "\n".join(qlines))
-    return how, {**ref, "kind": "question", "doc": "QUESTIONS.md", "key": f"**{title}**", "code": "",
-                 "title": title}
+    added = insert_block(qpath, qlines, end, item)
+    return {"how": how, "path": str(qpath), "lines": added,
+            "next": {**ref, "kind": "question", "doc": "QUESTIONS.md", "key": f"**{title}**", "code": "",
+                     "title": title}}
 
 
-def pull_replies(env: dict, st: dict, cfg: dict, timeout: float = 20) -> list[str]:
+def feedback_path() -> Path:
+    """Owner's words about agentdrop itself: docs/FEEDBACK.md in the agentdrop source repo."""
+    src = read(STATE / "source").strip() if (STATE / "source").is_file() else ""
+    return Path(src) / "docs" / "FEEDBACK.md" if src and Path(src).is_dir() else STATE / "FEEDBACK.md"
+
+
+def add_feedback(ref: dict | None, author: str, when: str, text: str) -> dict:
+    path = feedback_path()
+    lines = read(path).split("\n") if path.is_file() else [
+        "# FEEDBACK — what the owner said about agentdrop itself", "",
+        "Written by the Telegram router, newest on top. Harvest into the spec or tickets, then delete.", ""]
+    at = next((i for i, l in enumerate(lines) if l.startswith("- ")), len(lines))
+    where = f"{ref['project']}, «{clip(ref['title'], 80)}»" if ref else "Telegram"
+    block = [f"- **{when}, {where}**", "", *quote_lines(author, when, text, "  "), ""]
+    added = insert_block(path, lines, at, block)
+    return {"how": "feedback", "path": str(path), "lines": added, "next": None}
+
+
+def remove_block(placed: dict) -> bool:
+    """Take back the lines a placement added, if they are still there untouched."""
+    path = Path(placed["path"])
+    if not path.is_file():
+        return False
+    lines, block = read(path).split("\n"), placed["lines"]
+    for i in range(len(lines) - len(block) + 1):
+        if lines[i:i + len(block)] == block:
+            del lines[i:i + len(block)]
+            write(path, "\n".join(lines))
+            return True
+    return False
+
+
+def run_router(cfg: dict, prompt: str) -> dict:
+    import shlex
+    cmd = cfg.get("router", ROUTER)
+    if cmd.lower() in ("off", "none", ""):
+        return {}
+    try:
+        r = subprocess.run(shlex.split(os.path.expanduser(cmd)), input=prompt, capture_output=True, text=True,
+                           timeout=90)
+        m = re.search(r"\{.*\}", r.stdout, re.S)
+        return json.loads(m.group(0)) if r.returncode == 0 and m else {}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {}
+
+
+def route(cfg: dict, text: str, ref: dict | None, projects: dict[str, dict]) -> tuple[str, str]:
+    """Where the owner's chat message belongs: "item", "project" (a new question there), "agentdrop"
+    (about the bot and the messages), or "unclear". An LLM reads it; Python only acts on the label."""
+    opts = []
+    if ref and ref["kind"] not in ("brief",):
+        opts.append(f'- "item": an answer or comment about this item of {ref["project"]}: «{ref["title"]}»')
+    if ref:
+        opts.append(f'- "project": for project {ref["project"]}, but not about that item: a new task, idea or question')
+    else:
+        opts += [f'- "project:{p}": for project {p}' for p in projects]
+        opts.append('- "unclear": can\'t tell which project')
+    opts.append('- "agentdrop": about the bot itself: its messages, their format, buttons, summaries, '
+                'or how the owner wants to be asked')
+    prompt = ("The owner of several software projects chats with a Telegram bot that sends him their questions and "
+              "summaries. Decide where his message belongs.\n\nOptions:\n" + "\n".join(opts) +
+              f"\n\nHis message:\n«{text}»\n\nAnswer with JSON only: "
+              '{"route": "<option>", "why": "<at most 10 words, in the language of his message>"}')
+    got = run_router(cfg, prompt)
+    label, why = str(got.get("route", "")), clip(str(got.get("why", "")), 100)
+    valid = {o.split('"')[1] for o in opts}
+    if label not in valid:
+        label, why = ("item" if ref and ref["kind"] != "brief" else "project" if ref else "unclear"), ""
+    return label, why
+
+
+def place(st: dict, cfg: dict, dest: str, ref: dict | None, author: str, when: str, text: str) -> dict:
+    if dest == "agentdrop":
+        return add_feedback(ref, author, when, text)
+    if dest == "project":
+        return add_thread_comment({**ref, "kind": "project", "item_title": ref["kind"] != "brief"}, author, when, text)
+    return add_thread_comment(ref, author, when, text)
+
+
+def ack_for(placed: dict, ref: dict | None, ru: bool, why: str) -> tuple[str, dict | None]:
+    """The bot's confirmation, and buttons to move the words if the router got it wrong."""
+    B = lambda k, **kw: BRIEF[k][ru].format(**kw)
+    if placed["how"] == "feedback":
+        text = B("feedback", path=Path(placed["path"]).name)
+    else:
+        text = B(placed["how"], title=clip(ref["title"], 80), project=ref["project"],
+                 doc=Path(placed["path"]).name)
+    if why:
+        text += f"\n<i>{tg_html(why)}</i>"
+    here = {"saved": "item", "moved": "project", "noted": "project", "feedback": "agentdrop"}[placed["how"]]
+    buttons = []
+    if ref and ref["kind"] not in ("brief",) and here != "item":
+        buttons.append({"text": B("mv_item"), "callback_data": "mv:item"})
+    if ref and here != "project":
+        buttons.append({"text": B("mv_project", project=ref["project"]), "callback_data": "mv:project"})
+    if here != "agentdrop":
+        buttons.append({"text": B("mv_agentdrop"), "callback_data": "mv:agentdrop"})
+    return text, ({"inline_keyboard": [[b] for b in buttons]} if buttons else None)
+
+
+def recent_projects(st: dict) -> dict[str, dict]:
+    out = {}
+    for v in sorted(st["messages"].values(), key=lambda v: v.get("at", "")):
+        out[v["project"]] = {"root": v["root"], "project": v["project"], "ru": v.get("ru"), "doc": "QUESTIONS.md",
+                             "kind": "brief", "key": "", "title": v["project"]}
+    return out
+
+
+def take_message(env: dict, st: dict, cfg: dict, m: dict) -> list[str]:
+    now = dt.datetime.now().astimezone().isoformat()
+    rt = m.get("reply_to_message") or {}
+    ref = st["messages"].get(str(rt.get("message_id"))) if rt else None
+    text = (m.get("text") or m.get("caption") or "").strip()
+    ru = bool(ref.get("ru")) if ref else owner_ru(cfg)
+    B = lambda k, **kw: BRIEF[k][ru].format(**kw)
+    if not text or text.startswith("/") or (ref and not Path(ref["root"]).is_dir()):
+        if text.startswith("/") or (not ref and not text):
+            return []
+        reason = B("text_only") if not text else B("no_project", project=ref["project"], root=ref["root"])
+        tg_send(env, reason, reply_to=m.get("message_id"))
+        return [f"· Telegram: {reason}"]
+    if ref and ref.get("force"):
+        dest, why = ref["force"], ""
+    else:
+        projects = recent_projects(st)
+        dest, why = route(cfg, text, ref, projects)
+        if dest.startswith("project:"):
+            ref, dest = projects[dest.split(":", 1)[1]], "project"
+    if dest == "unclear":
+        if dt.datetime.now().timestamp() - st.get("hint_at", 0) < HINT_HOURS * 3600:
+            return [f"· Telegram: «{clip(text, 60)}» — not tied to any project, left as is"]
+        st["hint_at"] = dt.datetime.now().timestamp()
+        tg_send(env, B("not_item"), reply_to=m.get("message_id"))
+        return [f"· Telegram: «{clip(text, 60)}» → {B('not_item')}"]
+    when = dt.datetime.fromtimestamp(m.get("date", 0)).strftime("%d.%m %H:%M")
+    author = owner_name(cfg, ru)
+    placed = place(st, cfg, dest, ref, author, when, text)
+    if placed["next"]:   # the owner's own message now stands for the thread: a reply to it continues it
+        st["messages"][str(m.get("message_id"))] = {**placed["next"], "at": now}
+    save_tg_state(st)    # before the ack: a failed ack must never write the answer twice
+    ack, kb = ack_for(placed, ref, ru, why)
+    mid = tg_send(env, ack, reply_to=m.get("message_id"), markup=kb)
+    st["placed"][str(mid)] = {**placed, "ref": ref, "text": text, "when": when, "author": author, "ru": ru,
+                              "src": m.get("message_id"), "at": now}
+    if placed["next"]:
+        st["messages"][str(mid)] = {**placed["next"], "at": now}
+    return [f"· Telegram: {tg_plain(ack)}"]
+
+
+def take_callback(env: dict, st: dict, cfg: dict, q: dict) -> list[str]:
+    """Buttons: OK / not OK under an item, and "move it" under the bot's confirmations."""
+    m = q.get("message") or {}
+    mid, data = str(m.get("message_id")), q.get("data", "")
+    if str(m.get("chat", {}).get("id")) != str(env["TG_CHAT_ID"]):
+        return []
+    now = dt.datetime.now().astimezone().isoformat()
+    toast, notes = "", []
+    ref = st["messages"].get(mid)
+    ru = bool(ref.get("ru")) if ref else owner_ru(cfg)
+    B = lambda k, **kw: BRIEF[k][ru].format(**kw)
+    if data == "ok" and ref and Path(ref["root"]).is_dir():
+        when = dt.datetime.now().strftime("%d.%m %H:%M")
+        placed = add_thread_comment(ref, owner_name(cfg, ru), when, B("button_ok"))
+        toast = B(placed["how"], title=clip(ref["title"], 60), project=ref["project"], doc=Path(placed["path"]).name)
+        tg_try(env, "editMessageReplyMarkup", {"chat_id": env["TG_CHAT_ID"], "message_id": int(mid), "reply_markup": {
+            "inline_keyboard": [[{"text": B("ok_done"), "callback_data": "noop"}]]}})
+        notes.append(f"· Telegram: {B('button_ok')} → {toast}")
+    elif data == "no" and ref:
+        pid = tg_send(env, B("not_ok_prompt", title=tg_html(clip(ref["title"], 80))), reply_to=int(mid),
+                      markup={"force_reply": True, "input_field_placeholder": B("not_ok_placeholder")})
+        st["messages"][str(pid)] = {**ref, "force": "item", "at": now}
+    elif data.startswith("mv:") and mid in st["placed"]:
+        p = st["placed"][mid]
+        dest = data[3:]
+        removed = remove_block(p)
+        placed = place(st, cfg, dest, p["ref"], p["author"], p["when"], p["text"])
+        if placed["next"]:
+            st["messages"][str(p["src"])] = {**placed["next"], "at": now}
+            st["messages"][mid] = {**placed["next"], "at": now}
+        ack, kb = ack_for(placed, p["ref"], p["ru"], "" if removed else B("left_copy"))
+        st["placed"][mid] = {**p, **placed}
+        tg_try(env, "editMessageText", {"chat_id": env["TG_CHAT_ID"], "message_id": int(mid), "text": ack,
+                                        "parse_mode": "HTML", "reply_markup": kb or {"inline_keyboard": []}})
+        toast = tg_plain(ack).split("\n")[0]
+        notes.append(f"· Telegram: {B('moved_to')} → {toast}")
+    save_tg_state(st)
+    tg_try(env, "answerCallbackQuery", {"callback_query_id": q.get("id"), "text": clip(toast, 190)})
+    return notes
+
+
+def pull_replies(env: dict, st: dict, cfg: dict, timeout: float = 20, wait: int = 0) -> list[str]:
     notes = []
-    ups = tg_call(env, "getUpdates", {"offset": st["offset"], "timeout": 0,
-                                      "allowed_updates": ["message", "message_reaction"]}, timeout=timeout)
+    ups = tg_call(env, "getUpdates", {"offset": st["offset"], "timeout": wait,
+                                      "allowed_updates": ["message", "message_reaction", "callback_query"]},
+                  timeout=timeout + wait)
     for u in ups:
         st["offset"] = u["update_id"] + 1
+        save_tg_state(st)   # an update that breaks something is never taken twice
         if u.get("message_reaction"):
             notes += reaction_answer(env, st, cfg, u["message_reaction"])
-            save_tg_state(st)
-            continue
-        m = u.get("message") or {}
-        if str(m.get("chat", {}).get("id")) != str(env["TG_CHAT_ID"]):
-            save_tg_state(st)
-            continue
-        rt = m.get("reply_to_message") or {}
-        ref = st["messages"].get(str(rt.get("message_id"))) if rt else None
-        text = (m.get("text") or m.get("caption") or "").strip()
-        ru = bool(ref.get("ru")) if ref else owner_ru(cfg)
-        B = lambda k, **kw: BRIEF[k][ru].format(**kw)
-        if ref is None or not text or not Path(ref["root"]).is_dir():
-            save_tg_state(st)
-            now = dt.datetime.now().timestamp()
-            if ref is None:
-                # one hint per HINT_HOURS, and none for commands or messages from before agentdrop read the bot
-                if (not text or text.startswith("/") or now - m.get("date", 0) > HINT_HOURS * 3600
-                        or now - st.get("hint_at", 0) < HINT_HOURS * 3600):
-                    notes.append(f"· Telegram: «{clip(text, 60)}» — not tied to any item, left as is")
-                    continue
-                st["hint_at"] = now
-                save_tg_state(st)
-            reason = (B("not_item") if ref is None else B("text_only") if not text
-                      else B("no_project", project=ref["project"], root=ref["root"]))
-            tg_send(env, reason, reply_to=m.get("message_id"))
-            notes.append(f"· Telegram: «{clip(text, 60)}» → {reason}")
-            continue
-        when = dt.datetime.fromtimestamp(m.get("date", 0)).strftime("%d.%m %H:%M")
-        how, where = add_thread_comment(ref, owner_name(cfg, ru), when, text)
-        # the owner's own message now stands for the thread: a reply to it continues it
-        st["messages"][str(m.get("message_id"))] = {**where, "at": dt.datetime.now().astimezone().isoformat()}
-        save_tg_state(st)   # before the ack: a failed ack must never write the answer twice
-        ack = B(how, title=clip(ref["title"], 80), project=ref["project"], doc=ref["doc"])
-        mid = tg_send(env, ack, reply_to=m.get("message_id"))
-        st["messages"][str(mid)] = {**where, "at": dt.datetime.now().astimezone().isoformat()}
+        elif u.get("callback_query"):
+            notes += take_callback(env, st, cfg, u["callback_query"])
+        elif str((u.get("message") or {}).get("chat", {}).get("id")) == str(env["TG_CHAT_ID"]):
+            notes += take_message(env, st, cfg, u["message"])
         save_tg_state(st)
-        notes.append("· Telegram: " + ack)
-    save_tg_state(st)
     return notes
 
 
@@ -2014,22 +2219,26 @@ def reaction_answer(env: dict, st: dict, cfg: dict, r: dict) -> list[str]:
     ru = bool(ref.get("ru"))
     text = BRIEF["reaction_no" if e in NO_REACTIONS else "reaction_ok"][ru].format(e=e)
     when = dt.datetime.fromtimestamp(r.get("date", 0)).strftime("%d.%m %H:%M")
-    how, where = add_thread_comment(ref, owner_name(cfg, ru), when, text)
+    placed = add_thread_comment(ref, owner_name(cfg, ru), when, text)
     save_tg_state(st)
-    ack = BRIEF[how][ru].format(title=clip(ref["title"], 80), project=ref["project"], doc=ref["doc"])
+    ack = BRIEF[placed["how"]][ru].format(title=clip(ref["title"], 80), project=ref["project"],
+                                          doc=Path(placed["path"]).name)
     mid = tg_send(env, f"{text}. {ack}", reply_to=r.get("message_id"))
-    st["messages"][str(mid)] = {**where, "at": dt.datetime.now().astimezone().isoformat()}
+    st["messages"][str(mid)] = {**placed["next"], "at": dt.datetime.now().astimezone().isoformat()}
     return [f"· Telegram: {text} → {ack}"]
 
 
-def sync_replies(timeout: float = 20) -> list[str]:
-    """Pull the owner's answers into the docs; quiet no-op when Telegram isn't set up."""
+def sync_replies(timeout: float = 20, wait: bool = False) -> list[str]:
+    """Pull the owner's answers into the docs; quiet no-op when Telegram isn't set up, and when the
+    listener service (`agentdrop replies --watch`) holds the bot: it has already taken them."""
     env = tg_env()
     if not env or os.environ.get("AGENTDROP_OFFLINE"):
         return []
     try:
-        with tg_lock():
+        with tg_lock(wait=wait):
             return pull_replies(env, tg_state(), load_config(), timeout)
+    except TgBusy:
+        return []
     except TgError as e:
         return [f"! Telegram: {e}"]
 
@@ -2129,7 +2338,7 @@ def plan_brief(root: Path, s: dict, st: dict, cfg: dict, everything: bool = Fals
             earlier += 1
             continue
         code = re.match(r"\*\*([A-ZА-ЯЁ]{1,3}-\d+)\.", key) if kind == "question" else None
-        fresh.append({"kind": kind, "it": it, "ident": ident, "hash": digest,
+        fresh.append({"kind": kind, "it": it, "ident": ident, "hash": digest, "ok": wants_ok(kind, it),
                       "ref": {"root": str(root), "project": s["label"], "doc": doc_name, "kind": kind,
                               "key": key, "code": code.group(1) if code else "", "title": it["title"],
                               "ru": s["ru"]}})
@@ -2151,7 +2360,9 @@ def deliver(msgs: list[dict], st: dict, env: dict, cfg: dict) -> str:
     now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     for m in msgs:
         if env:
-            mid = tg_send(env, m["text"])
+            mid = tg_send(env, m["text"], markup={"inline_keyboard": [[
+                {"text": BRIEF["button_ok_label"][m["ref"]["ru"]], "callback_data": "ok"},
+                {"text": BRIEF["button_no_label"][m["ref"]["ru"]], "callback_data": "no"}]]} if m.get("ok") else None)
             if m.get("ref"):
                 st["messages"][str(mid)] = {**m["ref"], "at": now}
         else:
@@ -2186,7 +2397,7 @@ def cmd_brief(argv: list[str]) -> int:
             print(f"· agentdrop brief: nowhere to send, nothing sent. Put TG_BOT_TOKEN and TG_CHAT_ID in {TG_ENV}, "
                   f"or `notify = <command>` in {CONFIG}", file=sys.stderr)
             return 0
-        for note in sync_replies():   # answers first, so the brief doesn't ask what's already answered
+        for note in sync_replies(wait=True):   # answers first, so the brief doesn't ask what's already answered
             print(note, file=sys.stderr)
     s = collect_status(root)
     try:
@@ -2213,14 +2424,87 @@ def cmd_brief(argv: list[str]) -> int:
     return 0
 
 
+SERVICE = "com.agentdrop.telegram"
+SERVICE_PLIST = HOME / "Library" / "LaunchAgents" / f"{SERVICE}.plist"
+SERVICE_LOG = STATE / "telegram.log"
+
+
+def watch_replies() -> int:
+    """The listener: long-polls the bot so buttons and replies get an answer within seconds."""
+    import time
+    print(f"{dt.datetime.now():%d.%m %H:%M:%S} listening", flush=True)
+    while True:
+        env = tg_env()
+        if not env:
+            time.sleep(60)
+            continue
+        try:
+            with tg_lock(wait=False):
+                notes = pull_replies(env, tg_state(), load_config(), timeout=20, wait=25)
+        except TgBusy:
+            notes = []
+            time.sleep(3)
+        except TgError as e:
+            notes = [f"! Telegram: {e}"]
+            time.sleep(15)
+        for n in notes:
+            print(f"{dt.datetime.now():%d.%m %H:%M:%S} {n}", flush=True)
+
+
+def service(action: str) -> int:
+    """macOS: the listener as a launchd agent, started at login and restarted if it dies."""
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    target = f"gui/{uid}/{SERVICE}"
+    if platform.system() != "Darwin":
+        print(f"agentdrop replies: run `agentdrop replies --watch` under your system's service manager "
+              f"(log: {SERVICE_LOG})", file=sys.stderr)
+        return 2
+    if action in ("off", "on"):
+        subprocess.run(["launchctl", "bootout", target], capture_output=True)
+    if action == "off":
+        SERVICE_PLIST.unlink(missing_ok=True)
+        print("✓ listener stopped")
+        return 0
+    if action == "on":
+        import plistlib
+        exe = Path(shutil.which("agentdrop") or sys.argv[0]).resolve()
+        path = ":".join([str(HOME / ".local" / "bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])
+        SERVICE_PLIST.parent.mkdir(parents=True, exist_ok=True)
+        SERVICE_PLIST.write_bytes(plistlib.dumps({
+            "Label": SERVICE, "ProgramArguments": [sys.executable, str(exe), "replies", "--watch"],
+            "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 30,
+            "EnvironmentVariables": {"PATH": path, "HOME": str(HOME), "PYTHONUNBUFFERED": "1"},
+            "StandardOutPath": str(SERVICE_LOG), "StandardErrorPath": str(SERVICE_LOG)}))
+        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(SERVICE_PLIST)], capture_output=True,
+                           text=True)
+        if r.returncode != 0:
+            print(f"agentdrop replies: launchctl: {r.stderr.strip()}", file=sys.stderr)
+            return 1
+        print(f"✓ listener on ({exe}); log: {SERVICE_LOG}")
+        return 0
+    r = subprocess.run(["launchctl", "print", target], capture_output=True, text=True)
+    state = re.search(r"^\s*state = (.+)$", r.stdout, re.M)
+    print(f"listener: {state.group(1) if state else 'not installed'}; log: {SERVICE_LOG}")
+    return 0
+
+
 def cmd_replies(argv: list[str]) -> int:
-    argparse.ArgumentParser(prog="agentdrop replies",
-                            description="Write the owner's Telegram answers under their items in the docs. "
-                                        "`status` and `brief --send` do this too.").parse_args(argv)
+    p = argparse.ArgumentParser(prog="agentdrop replies",
+                                description="Take the owner's Telegram messages, buttons and reactions into the "
+                                            "project docs. `status` and `brief --send` do this too, unless the "
+                                            "listener already has.")
+    p.add_argument("--watch", action="store_true", help="Keep listening (what the service runs)")
+    p.add_argument("--service", choices=("on", "off", "status"),
+                   help="macOS: run the listener in the background, from login on")
+    a = p.parse_args(argv)
+    if a.service:
+        return service(a.service)
     if not tg_env():
         print(f"agentdrop replies: Telegram isn't set up ({TG_ENV})", file=sys.stderr)
         return 2
-    notes = sync_replies()
+    if a.watch:
+        return watch_replies()
+    notes = sync_replies(wait=True)
     print("\n".join(notes) or ("· новых ответов нет" if owner_ru(load_config()) else "· no new answers"))
     return 1 if any(n.startswith("! ") for n in notes) else 0
 

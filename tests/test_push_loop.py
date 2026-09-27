@@ -174,7 +174,7 @@ class FakeTelegram:
     """Bot API stand-in: records sendMessage, serves queued getUpdates, checks the relay key."""
 
     def __init__(self):
-        self.sent, self.updates, self.next_id, self.bad_key = [], [], 100, 0
+        self.sent, self.updates, self.calls, self.next_id, self.bad_key = [], [], [], 100, 0
         fake = self
 
         class H(BaseHTTPRequestHandler):
@@ -194,7 +194,8 @@ class FakeTelegram:
                 if method == "getUpdates":
                     ups = [u for u in fake.updates if u["update_id"] >= body.get("offset", 0)]
                     return self.reply(200, {"ok": True, "result": ups})
-                self.reply(404, {"ok": False, "description": "no method"})
+                fake.calls.append((method, body))
+                self.reply(200, {"ok": True, "result": True})
 
             def reply(self, code, data):
                 raw = json.dumps(data).encode()
@@ -213,6 +214,10 @@ class FakeTelegram:
             "chat": {"id": chat}, "message_id": message_id, "date": int(time.time()), "user": {"id": chat},
             "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": emoji}]}})
 
+    def press(self, message_id, data, chat=42):
+        self.updates.append({"update_id": 500 + len(self.updates), "callback_query": {
+            "id": f"q{len(self.updates)}", "data": data, "message": {"message_id": message_id, "chat": {"id": chat}}}})
+
     def answer(self, text, reply_to=None, chat=42):
         m = {"message_id": 900 + len(self.updates), "date": int(time.time()), "chat": {"id": chat}, "text": text}
         if reply_to:
@@ -226,6 +231,20 @@ class Brief(Project):
         self.tg = FakeTelegram()
         self.addCleanup(self.tg.server.shutdown)
         (self.home / ".agentdrop").mkdir()
+        # the router stand-in: "bot" → agentdrop, "new task" → a new question, else the item
+        router = self.home / "router.py"
+        router.write_text(
+            "import json, re, sys\n"
+            "p = sys.stdin.read()\n"
+            "msg = p.split('His message:', 1)[1]\n"
+            "opts = re.findall(r'^- \"([^\"]+)\"', p, re.M)\n"
+            "r = 'unclear' if 'loose' in msg else 'agentdrop' if 'bot' in msg else next((o for o in opts if o.startswith('project')), '') "
+            "if 'new task' in msg else ('item' if 'item' in opts else opts[0])\n"
+            "print('```json\\n' + json.dumps({'route': r, 'why': 'test'}) + '\\n```')\n", encoding="utf-8")
+        self.source = self.home / "agentdrop-src"
+        (self.source / "docs").mkdir(parents=True)
+        (self.home / ".agentdrop" / "source").write_text(str(self.source), encoding="utf-8")
+        (self.home / ".agentdrop" / "config").write_text(f"router = {sys.executable} {router}\n", encoding="utf-8")
         (self.home / ".agentdrop" / "telegram.env").write_text(
             f"TG_BOT_TOKEN=T0K:x\nTG_CHAT_ID=42\nTG_RELAY_URL={self.tg.url}\nTG_RELAY_KEY=k\n", encoding="utf-8")
 
@@ -245,7 +264,9 @@ class Brief(Project):
         self.assertIn("<b>👍 proj · YOUR OK, 1/2</b>\n\n<b>Which chart library</b>\n<i>Q-2</i>", texts[1])
         self.assertIn("<blockquote>Two options: Recharts or ECharts.</blockquote>", texts[1])
         self.assertIn("<b>💡 Proposal:</b> I recommend Recharts: we already use it.", texts[1])
-        self.assertIn("👍 on this message is your OK", texts[1])
+        self.assertIn("A button below or a 👍 on this message", texts[1])
+        self.assertEqual(self.tg.sent[1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"], "ok")
+        self.assertNotIn("reply_markup", self.tg.sent[0])
         self.assertIn("<b>Deploy script</b>\n<i>B8, P0</i>", texts[2])
         self.assertIn("goes under the item in <code>TODO.md</code>", texts[2])
         self.assertEqual(self.tg.bad_key, 0)
@@ -285,7 +306,7 @@ class Brief(Project):
         self.assertEqual(len(acks), 3)   # two under items, one as a new item; the stranger gets nothing
         self.assertEqual(acks[0]["reply_parameters"]["message_id"], 900)
         self.assertIn("Saved in proj as a new item in QUESTIONS.md", acks[2]["text"])
-        self.assertIn("- **Answer to the brief, ", questions)
+        self.assertIn("- **From Telegram, ", questions)
         self.assertIn(":** what about this?", questions)
 
         self.run_ad("status")   # the same updates are never written twice
@@ -309,6 +330,12 @@ class Brief(Project):
         self.assertEqual(len(hints), 1)   # one hint, not one per loose message
         self.assertNotIn("loose thought", text)
 
+        self.tg.answer("new task: export to PDF")   # no reply: the router picks the project
+        self.run_ad("replies")
+        text = (self.root / "docs" / "QUESTIONS.md").read_text(encoding="utf-8")
+        self.assertIn("- **From Telegram, ", text)
+        self.assertIn(":** new task: export to PDF", text)
+
     def test_thumbs_up_is_the_owners_ok(self):
         self.run_ad("brief", "--send")
         self.tg.react(self.by_text("B8, P0")["message_id"], "👍")
@@ -330,10 +357,50 @@ class Brief(Project):
         self.tg.answer("start with what was done overnight", reply_to=self.tg.sent[0]["message_id"])
         self.run_ad("replies")
         text = path.read_text(encoding="utf-8")
-        self.assertIn("### Open\n\n- **Answer to the brief, ", text)
+        self.assertIn("### Open\n\n- **From Telegram, ", text)
         self.assertIn(":** start with what was done overnight\n\n- **Q-2.", text)
         self.assertEqual(len(self.status()["waiting"]["questions"]), 1)   # the agent's turn, not lost under Closed
-        self.assertIn("Answer to the brief", self.status()["waiting"]["your_turn"][0])
+        self.assertIn("From Telegram", self.status()["waiting"]["your_turn"][0])
+
+    def test_words_about_the_bot_go_to_agentdrop_and_a_button_moves_them_back(self):
+        self.run_ad("brief", "--send")
+        todo = (self.root / "docs" / "TODO.md").read_text(encoding="utf-8")
+        self.tg.answer("the bot should add OK buttons", reply_to=self.by_text("B8, P0")["message_id"])
+        self.run_ad("replies")
+        feedback = (self.source / "docs" / "FEEDBACK.md").read_text(encoding="utf-8")
+        self.assertIn("- **", feedback)
+        self.assertIn("proj, «Deploy script»**\n\n  > **Owner, ", feedback)
+        self.assertEqual(todo, (self.root / "docs" / "TODO.md").read_text(encoding="utf-8"))
+        ack = self.tg.sent[-1]
+        self.assertIn("That's about the bot", ack["text"])
+        moves = [b[0]["callback_data"] for b in ack["reply_markup"]["inline_keyboard"]]
+        self.assertEqual(moves, ["mv:item", "mv:project"])
+
+        self.tg.press(ack["message_id"], "mv:item")
+        self.run_ad("replies")
+        self.assertNotIn("OK buttons", (self.source / "docs" / "FEEDBACK.md").read_text(encoding="utf-8"))
+        self.assertIn(":** the bot should add OK buttons\n- P2: B9",
+                      (self.root / "docs" / "TODO.md").read_text(encoding="utf-8"))
+        edits = [b for m, b in self.tg.calls if m == "editMessageText"]
+        self.assertIn("Saved under «Deploy script»", edits[-1]["text"])
+
+    def test_ok_and_not_ok_buttons(self):
+        self.run_ad("brief", "--send")
+        b8 = self.by_text("B8, P0")["message_id"]
+        q2 = self.by_text("Q-2")["message_id"]
+        self.tg.press(b8, "ok")
+        self.tg.press(q2, "no")
+        self.run_ad("replies")
+        self.assertIn(":** OK (button in Telegram)\n- P2: B9", (self.root / "docs" / "TODO.md").read_text(encoding="utf-8"))
+        marks = [b for m, b in self.tg.calls if m == "editMessageReplyMarkup"]
+        self.assertEqual(marks[0]["reply_markup"]["inline_keyboard"][0][0]["text"], "✅ OK saved")
+        prompt = self.tg.sent[-1]
+        self.assertTrue(prompt["reply_markup"]["force_reply"])
+        self.tg.answer("the bot says ECharts is lighter", reply_to=prompt["message_id"])   # forced: no router
+        self.run_ad("replies")
+        self.assertIn(":** the bot says ECharts is lighter", (self.root / "docs" / "QUESTIONS.md").read_text(encoding="utf-8"))
+        self.assertFalse((self.source / "docs" / "FEEDBACK.md").exists())
+        self.assertEqual(len([m for m, _ in self.tg.calls if m == "answerCallbackQuery"]), 2)
 
     def test_answer_to_a_closed_item_becomes_a_new_question(self):
         self.run_ad("brief", "--send")
