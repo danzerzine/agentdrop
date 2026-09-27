@@ -3563,7 +3563,8 @@ def pack_prompt(s: dict, tickets: list[dict], budget: float, name: str) -> str:
               f"Exit 3: leave the ticket to {name} and go on.", "",
               f"Budget: ${budget:g} for the whole session. Do bulk work (labelling, crawls, checking many items) with "
               "scripts, local models or cheaper subagents; spend the strongest model only on spot checks of "
-              "disputed cases.", "",
+              "disputed cases. Tell every subagent not to start subagents of its own: nested agents burn the "
+              "budget unseen.", "",
               "Never deploy, never send anything to anyone (mail, chats, Telegram), never push, never publish "
               "anything outside. Commit only your own files, no AI attribution. The project's rules in AGENTS.md "
               "hold throughout.", "",
