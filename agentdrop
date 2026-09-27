@@ -1129,6 +1129,7 @@ LABELS = {
     "unclaimed": ("{n} sessions active in the last {m} min without a claim",
                   "сессий без захваченного тикета, активных за {m} мин: {n}"),
     "open_rest": ("open tickets left: {counts}", "ещё открытых тикетов: {counts}"),
+    "blocked": ("waiting for other people: {items}", "ждут других людей: {items}"),
     "branch": ("branch {b}", "ветка {b}"),
     "dirty": ("{n} files changed", "изменено файлов: {n}"),
     "ahead": ("{n} commits not pushed", "не запушено коммитов: {n}"),
@@ -1482,8 +1483,10 @@ def collect_status(root: Path) -> dict:
 
     q = parse_questions(root, cfg)
     owner_tickets = [t for t in tickets if t["waits_owner"] and t["id"] not in claimed]
-    free = [t for t in tickets if t["id"] not in claimed and not t["waits_owner"]]
-    free.sort(key=lambda t: (t["priority"], bool(t["waits"]), t["order"]))
+    # a ticket blocked on someone else (a client's answer) is nobody's next step: counted, not listed
+    blocked = [t for t in tickets if t["id"] not in claimed and t["waits"] and not t["waits_owner"]]
+    free = [t for t in tickets if t["id"] not in claimed and not t["waits"]]
+    free.sort(key=lambda t: (t["priority"], t["order"]))
 
     entries = log_entries(root)
     seen = seen_state().get(str(root))
@@ -1502,7 +1505,7 @@ def collect_status(root: Path) -> dict:
                     "asks": parse_asks(root)},
         "running": {"claims": claims, "unclaimed_active_sessions": active, "active_minutes": ACTIVE_MINUTES},
         "done": {"since_seen": bool(seen), "seen_at": seen.get("at") if seen else None, "entries": done},
-        "next": {"tickets": free[:SHOW["next"]], "rest": free[SHOW["next"]:]},
+        "next": {"tickets": free[:SHOW["next"]], "rest": free[SHOW["next"]:], "blocked": blocked},
         "git": git_summary(root),
     }
 
@@ -1595,6 +1598,8 @@ def render_status(s: dict) -> str:
         for t in n["rest"]:
             counts[t["priority"]] = counts.get(t["priority"], 0) + 1
         out.append("· " + L("open_rest", counts=", ".join(f"{p} {counts[p]}" for p in sorted(counts))))
+    if n.get("blocked"):
+        out.append("· " + L("blocked", items="; ".join(f"{clip(t['title'], 60)} ({t['id']})" for t in n["blocked"])))
     return "\n".join(out)
 
 
@@ -1734,6 +1739,7 @@ BRIEF = {   # the owner asked for emoji: they mark where a message and a block b
     "running": ("⚙️ Running", "⚙️ Идёт"),
     "done": ("✅ Done: {n}", "✅ Сделано: {n}"),
     "next": ("➡️ Next", "➡️ Дальше"),
+    "blocked": ("⏸ Waiting for others", "⏸ Ждут других"),
     "pick": ("💡 Proposal", "💡 Предложение"),
     "last": ("💬 Last in the thread", "💬 Последнее в ветке"),
     "reply_hint": ("↩️ Reply to this message: your answer goes under the item in {doc}.",
@@ -2168,6 +2174,9 @@ def board_message(s: dict) -> str:
     if nxt:
         out.append(f"<b>{B('next')}</b>\n" + "\n".join(
             f"{k}. {tg_html(t['title'])} <i>({t['id']}, {t['priority']})</i>" for k, t in enumerate(nxt, 1)))
+    if s["next"].get("blocked"):
+        out.append(f"<b>{B('blocked')}</b>\n" + "\n".join(
+            f"• {tg_html(clip(t['title'], 80))} <i>({t['id']})</i>" for t in s["next"]["blocked"][:5]))
     return "\n\n".join(out)
 
 

@@ -115,6 +115,15 @@ class PushLoop(Project):
         self.assertEqual(b7["why"], "«I can't log in from the iPad» (M12, 20.09)")
         self.assertEqual(s["next"]["tickets"][2]["priority"], "P2")   # no priority: from its section
 
+    def test_tickets_blocked_on_others_are_not_next(self):
+        todo = self.root / "docs" / "TODO.md"
+        todo.write_text(TODO.replace("## Next\n", "## Next\n\n- **B12 (P0). Plan for the client.** Sent 26.09. Waiting for the client's answer.\n"),
+                        encoding="utf-8")
+        s = self.status()
+        self.assertNotIn("B12", [t["id"] for t in s["next"]["tickets"]])
+        self.assertEqual([t["id"] for t in s["next"]["blocked"]], ["B12"])
+        self.assertIn("waiting for other people: Plan for the client (B12)", self.run_ad("status").stdout)
+
     def test_waiting_for_owner(self):
         w = self.status()["waiting"]
         titles = [q["title"] for q in w["questions"]]
