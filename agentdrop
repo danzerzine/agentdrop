@@ -1190,16 +1190,9 @@ def by_owner(text: str, words: list[str]) -> bool:
 def find_root(start: Path) -> Path:
     p = start.resolve()
     for cand in (p, *p.parents):
-        if (cand / "docs" / "TODO.md").is_file():
+        if tasks_of(cand).present():
             return cand
     return p
-
-
-def is_russian(root: Path) -> bool:
-    sample = doc(root, "TODO.md")[:3000] or doc(root, "../AGENTS.md")[:3000]
-    cyr = len(re.findall(r"[а-яё]", sample, re.I))
-    lat = len(re.findall(r"[a-z]", sample, re.I))
-    return cyr > lat
 
 
 def clip(text: str, n: int = 220) -> str:
@@ -1261,96 +1254,229 @@ def item_images(root: Path, text: str) -> list[str]:
     return out[:10]
 
 
-def parse_todo(root: Path, cfg: dict) -> list[dict]:
-    words, out = owner_words(cfg), []
-    for idx, (heads, text) in enumerate(md_items(doc(root, "TODO.md"))):
-        section = next(((order, prio) for rx, order, prio in SECTION_ORDER
-                        if any(rx.search(h) for h in heads[1:])), None)
-        head = text.replace("**", "", 1) if text.startswith("**") else text
-        m = ITEM_TICKET.match(head)
-        if not m or section is None:
-            continue
-        first = text.split("\n\n", 1)[0]
-        title, body = bold_title(first)
-        if title:   # **B85 (P0). Title.** body
-            title = ITEM_TICKET.sub("", title, count=1)
-        else:       # B134 P1 — Title. Зачем: «…»
-            rest = first[m.end():]
-            cut = re.search(r"\s(?:Зачем|Why):", rest)
-            title, body = (rest[:cut.start()], rest[cut.start():]) if cut else (rest, "")
-            sent = re.match(r"(.{20,}?[.!?])\s", title, re.S)
-            if sent:
-                title, body = sent.group(1), title[sent.end():] + body
-        title = re.sub(r"(?i)\s*(?:После|After):\s*B\d+(?:\s*(?:,|и|and)\s*B\d+)*[^.]*\.?", "", title)   # a field, not the title
-        why = WHY_RE.search(first)
-        waits = WAITS_RE.search(text)
-        after = [x for g in AFTER_RE.findall(first) for x in re.findall(r"B\d+", g) if x != m.group(2)]
-        comments = [(c.group(1).strip(), line) for line in text.splitlines() if (c := COMMENT_RE.match(line))]
-        out.append({
-            "id": m.group(2), "priority": m.group(1) or m.group(3) or section[1],
-            "section": heads[-1] if heads else "", "order": (section[0], idx),
-            "title": clip(title.rstrip(". "), 160),
-            "why": clip(why.group(1), 200) if why else "",
-            "context": "" if why else clip(body, 200),
-            "waits": clip(waits.group(0), 110) if waits else "",
-            "waits_owner": bool(waits and by_owner(waits.group(0), words)),
-            "detail": clip(body.strip(), 700),
-            "images": item_images(root, text),
-            # the owner wrote last under the ticket: the agent's move, whatever the ticket says it waits for
-            "owner_last": bool(comments and by_owner(comments[-1][0], words)),
-            "deferred": bool(DEFERRED_RE.search(text.split("\n\n", 1)[0])),
-            "after": list(dict.fromkeys(after)),
-            "mode": "auto" if AUTONOMOUS_RE.search(first) else "human" if HUMAN_RE.search(first) else "",
-            "last": clip(re.sub(r"^\s*>\s*", "", comments[-1][1]), 400) if comments else "",
-        })
-    return out
+def split_thread(text: str) -> tuple[str, list[dict]]:
+    """An item's text without its title line split into the body and the `> **Name, when:** …` thread."""
+    body, thread = [], []
+    for line in text.splitlines():
+        st = line.strip()
+        m = COMMENT_RE.match(line)
+        if m:
+            head = re.match(r"^\s*>\s*\*\*([^*]+?):\*\*\s*(.*)", line)
+            who, _, when = (head.group(1) if head else m.group(1)).partition(",")
+            thread.append({"author": who.strip(), "when": when.strip(), "text": head.group(2) if head else ""})
+        elif st.startswith(">") and thread:
+            thread[-1]["text"] += "\n" + st.lstrip("> ").rstrip()
+        elif st in ("_Thread closed._", "_Ветка закрыта._"):
+            thread.append({"author": "", "when": "", "text": st.strip("_")})
+        else:
+            body.append(line[2:] if line.startswith("  ") else line)
+    return "\n".join(body).strip(), thread
 
 
-def parse_questions(root: Path, cfg: dict) -> dict:
-    words = owner_words(cfg)
-    res = {"waiting": [], "your_turn": [], "revertible": 0, "people": 0, "deferred": 0}
-    text_all = doc(root, "QUESTIONS.md")
-    sections = [h for h in re.findall(r"(?m)^## (.+)$", text_all)
-                if not re.search(r"(?i)закрыт|closed|resolved", h)]
-    # the owner's section: the one that names them, else the first one (the kit puts it first)
-    owner_section = next((h for h in sections if by_owner(h, words)), sections[0] if sections else "")
-    for heads, text in md_items(text_all):
-        path = " / ".join(heads[1:])
-        if not path or re.search(r"(?i)закрыт|closed|resolved", path) or CLOSED_RE.search(text):
-            continue
-        to_owner = len(heads) > 1 and heads[1].strip() == owner_section.strip()
-        if not to_owner:
-            res["people"] += 1
-            continue
-        key, body = bold_title(text)
-        title = key
-        if REVERT_RE.search(path) or REVERT_RE.search(body[:300]):
-            res["revertible"] += 1
-            continue
-        if DEFERRED_RE.search(re.split(r"\n\s*>", body, maxsplit=1)[0][:400]):
-            res["deferred"] += 1
-            continue
-        code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)\.\s*", title)
-        if code:
-            title = f"{title[code.end():].rstrip('. ')} ({code.group(1)})"
-        comments = [(m.group(1).strip(), line) for line in text.splitlines() if (m := COMMENT_RE.match(line))]
-        authors = [a for a, _ in comments]
-        if authors and by_owner(authors[-1], words):
-            res["your_turn"].append(clip(title.rstrip(". "), 90))
-            continue
-        para = re.split(r"\n\s*\n|\n\s*>", body, maxsplit=1)[0]
-        reco = RECO_RE.search(body)
-        res["waiting"].append({
-            "title": clip(title.rstrip(". "), 160),
-            "context": clip(para, 220),
-            "pick": clip(reco.group(0), 200) if reco else "",
-            "thread": len(authors),
-            "doc": "QUESTIONS.md", "key": f"**{key}**" if key else text.split("\n", 1)[0][:80],
-            "detail": clip(re.split(r"\n\s*>", body, maxsplit=1)[0], 700),
-            "last": clip(re.sub(r"^\s*>\s*", "", comments[-1][1]), 400) if comments else "",
-            "images": item_images(root, text),
-        })
-    return res
+class MarkdownTasks:
+    """A project's tickets and the questions waiting for the owner, kept in docs/TODO.md and
+    docs/QUESTIONS.md. Every command reads and writes them through this object (see `tasks_of`),
+    so another store can take the place of markdown without touching the commands.
+
+    Reads parse the files afresh on every call and return new records the caller may change.
+    `full=True` adds each item's body and thread, for the tickets page. Writes go to the files
+    at once: `comment` puts the owner's words under an item or as a new question and returns the
+    placement, `take_back` removes a placement again if it is still there untouched."""
+
+    def __init__(self, root: Path, cfg: dict | None = None):
+        self.root = root
+        self.cfg = load_config() if cfg is None else cfg
+
+    def present(self) -> bool:
+        """The project keeps its tickets here."""
+        return (self.root / "docs" / "TODO.md").is_file()
+
+    def russian(self) -> bool:
+        """The tickets are written in Russian (else the project's AGENTS.md is)."""
+        sample = doc(self.root, "TODO.md")[:3000] or doc(self.root, "../AGENTS.md")[:3000]
+        cyr = len(re.findall(r"[а-яё]", sample, re.I))
+        lat = len(re.findall(r"[a-z]", sample, re.I))
+        return cyr > lat
+
+    def tickets(self, full: bool = False) -> list[dict]:
+        """The open tickets in file order, with the board's fields; `full` adds "body" (without
+        the title and the why) and "thread" (the comments under it)."""
+        root, words, out, first = self.root, owner_words(self.cfg), [], {}
+        for idx, (heads, text) in enumerate(md_items(doc(root, "TODO.md"))):
+            section = next(((order, prio) for rx, order, prio in SECTION_ORDER
+                            if any(rx.search(h) for h in heads[1:])), None)
+            head = text.replace("**", "", 1) if text.startswith("**") else text
+            m = ITEM_TICKET.match(head)
+            if m:
+                first.setdefault(m.group(2), text)
+            if not m or section is None:
+                continue
+            first_para = text.split("\n\n", 1)[0]
+            title, body = bold_title(first_para)
+            if title:   # **B85 (P0). Title.** body
+                title = ITEM_TICKET.sub("", title, count=1)
+            else:       # B134 P1 — Title. Зачем: «…»
+                rest = first_para[m.end():]
+                cut = re.search(r"\s(?:Зачем|Why):", rest)
+                title, body = (rest[:cut.start()], rest[cut.start():]) if cut else (rest, "")
+                sent = re.match(r"(.{20,}?[.!?])\s", title, re.S)
+                if sent:
+                    title, body = sent.group(1), title[sent.end():] + body
+            title = re.sub(r"(?i)\s*(?:После|After):\s*B\d+(?:\s*(?:,|и|and)\s*B\d+)*[^.]*\.?", "", title)   # a field, not the title
+            why = WHY_RE.search(first_para)
+            waits = WAITS_RE.search(text)
+            after = [x for g in AFTER_RE.findall(first_para) for x in re.findall(r"B\d+", g) if x != m.group(2)]
+            comments = [(c.group(1).strip(), line) for line in text.splitlines() if (c := COMMENT_RE.match(line))]
+            t = {
+                "id": m.group(2), "priority": m.group(1) or m.group(3) or section[1],
+                "section": heads[-1] if heads else "", "order": (section[0], idx),
+                "title": clip(title.rstrip(". "), 160),
+                "why": clip(why.group(1), 200) if why else "",
+                "context": "" if why else clip(body, 200),
+                "waits": clip(waits.group(0), 110) if waits else "",
+                "waits_owner": bool(waits and by_owner(waits.group(0), words)),
+                "detail": clip(body.strip(), 700),
+                "images": item_images(root, text),
+                # the owner wrote last under the ticket: the agent's move, whatever the ticket says it waits for
+                "owner_last": bool(comments and by_owner(comments[-1][0], words)),
+                "deferred": bool(DEFERRED_RE.search(text.split("\n\n", 1)[0])),
+                "after": list(dict.fromkeys(after)),
+                "mode": "auto" if AUTONOMOUS_RE.search(first_para) else "human" if HUMAN_RE.search(first_para) else "",
+                "last": clip(re.sub(r"^\s*>\s*", "", comments[-1][1]), 400) if comments else "",
+            }
+            if full:
+                t["body"], t["thread"] = self._ticket_page(first[t["id"]], t)
+                t["doc"] = "TODO.md"
+            out.append(t)
+        return out
+
+    @staticmethod
+    def _ticket_page(text: str, t: dict) -> tuple[str, list[dict]]:
+        m = re.match(r"\*\*(.+?)\*\*\s*", text, re.S)   # **B85 (P0). Title.** body
+        rest = text[m.end():] if m else ITEM_TICKET.sub("", text, count=1)
+        title_plain = t["title"].replace("…", "")
+        if not m and rest.startswith(title_plain):   # B134 P1 — Title. Зачем: «…» body
+            rest = rest[len(title_plain):].lstrip(". ")
+        why = WHY_RE.search(rest)
+        if why and t["why"]:   # the why is shown on its own
+            rest = (rest[:why.start()] + rest[why.end():]).lstrip(". ").replace("\n\n\n", "\n\n")
+        return split_thread(rest)
+
+    def ticket_text(self, tid: str) -> str:
+        """A ticket in full as it stands, its thread included, in any section; "" when it's gone."""
+        for _, text in md_items(doc(self.root, "TODO.md")):
+            m = ITEM_TICKET.match(text.replace("**", "", 1) if text.startswith("**") else text)
+            if m and m.group(2) == tid:
+                return text
+        return ""
+
+    def questions(self, full: bool = False) -> dict:
+        """The owner's open questions: "waiting" for their answer, "your_turn" (titles the owner
+        answered last), and counts of the "revertible", "people" (for others) and "deferred" ones.
+        `full` adds "items": the waiting ones, then those the owner answered, each with its key,
+        state ("owner" or "turn"), title, pick, images, body and thread."""
+        root, words = self.root, owner_words(self.cfg)
+        res = {"waiting": [], "your_turn": [], "revertible": 0, "people": 0, "deferred": 0}
+        text_all = doc(root, "QUESTIONS.md")
+        sections = [h for h in re.findall(r"(?m)^## (.+)$", text_all)
+                    if not re.search(r"(?i)закрыт|closed|resolved", h)]
+        # the owner's section: the one that names them, else the first one (the kit puts it first)
+        owner_section = next((h for h in sections if by_owner(h, words)), sections[0] if sections else "")
+        for heads, text in md_items(text_all):
+            path = " / ".join(heads[1:])
+            if not path or re.search(r"(?i)закрыт|closed|resolved", path) or CLOSED_RE.search(text):
+                continue
+            to_owner = len(heads) > 1 and heads[1].strip() == owner_section.strip()
+            if not to_owner:
+                res["people"] += 1
+                continue
+            key, body = bold_title(text)
+            title = key
+            if REVERT_RE.search(path) or REVERT_RE.search(body[:300]):
+                res["revertible"] += 1
+                continue
+            if DEFERRED_RE.search(re.split(r"\n\s*>", body, maxsplit=1)[0][:400]):
+                res["deferred"] += 1
+                continue
+            code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)\.\s*", title)
+            if code:
+                title = f"{title[code.end():].rstrip('. ')} ({code.group(1)})"
+            comments = [(m.group(1).strip(), line) for line in text.splitlines() if (m := COMMENT_RE.match(line))]
+            authors = [a for a, _ in comments]
+            if authors and by_owner(authors[-1], words):
+                res["your_turn"].append(clip(title.rstrip(". "), 90))
+                continue
+            para = re.split(r"\n\s*\n|\n\s*>", body, maxsplit=1)[0]
+            reco = RECO_RE.search(body)
+            res["waiting"].append({
+                "title": clip(title.rstrip(". "), 160),
+                "context": clip(para, 220),
+                "pick": clip(reco.group(0), 200) if reco else "",
+                "thread": len(authors),
+                "doc": "QUESTIONS.md", "key": f"**{key}**" if key else text.split("\n", 1)[0][:80],
+                "detail": clip(re.split(r"\n\s*>", body, maxsplit=1)[0], 700),
+                "last": clip(re.sub(r"^\s*>\s*", "", comments[-1][1]), 400) if comments else "",
+                "images": item_images(root, text),
+            })
+        if full:
+            res["items"] = self._question_pages(text_all, res)
+        return res
+
+    def _question_pages(self, text_all: str, res: dict) -> list[dict]:
+        turn = set(res["your_turn"])
+        all_q = {bold_title(text)[0]: text for _, text in md_items(text_all)}
+        wanted = [(x["key"].strip("*"), "owner", x) for x in res["waiting"]]
+        for key, text in all_q.items():
+            code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)\.\s*", key or "")
+            title = f"{key[code.end():].rstrip('. ')} ({code.group(1)})" if code else (key or "").rstrip(". ")
+            if clip(title, 90) in turn:
+                wanted.append((key, "turn", {"title": title, "images": item_images(self.root, text)}))
+        items = []
+        for key, state, x in wanted:
+            body, thread = split_thread(bold_title(all_q.get(key, ""))[1])
+            items.append({"key": key, "state": state, "title": x["title"], "pick": x.get("pick", ""),
+                          "images": x.get("images", []), "body": body, "thread": thread, "doc": "QUESTIONS.md"})
+        return items
+
+    def comment(self, ref: dict, author: str, when: str, text: str) -> dict:
+        """Write the owner's words under the item, or as a new item on top of the owner's open questions
+        (ref kind "brief" or "project", or the item is gone). Returns the placement: how, the file, the
+        exact lines added, and where the next answer in this thread goes."""
+        root = self.root
+        path = root / "docs" / ref["doc"]
+        lines = read(path).split("\n") if path.is_file() else []
+        span = item_span(lines, ref) if ref["kind"] not in ("brief", "project") else None
+        if span:
+            _, b = span
+            new = quote_lines(author, when, text, "  ")
+            added = insert_block(path, lines, b, new if lines[b - 1].lstrip().startswith(">") else ["", *new])
+            return {"how": "saved", "path": str(path), "lines": added, "next": ref}
+        qpath = root / "docs" / "QUESTIONS.md"
+        qlines = read(qpath).split("\n") if qpath.is_file() else ["# QUESTIONS", ""]
+        ru = bool(ref.get("ru"))
+        end = open_slot(qlines, owner_words(self.cfg))
+        if ref["kind"] in ("brief", "project"):
+            title = (BRIEF["about_item"][ru].format(title=clip(ref["title"], 60), when=when)
+                     if ref["kind"] == "project" and ref.get("item_title") else BRIEF["brief_item"][ru].format(when=when))
+            how = "noted"
+        else:
+            title, how = BRIEF["new_item"][ru].format(title=ref["title"]) + f" ({ref['doc']})", "moved"
+        item = [f"- **{title}**", "", *quote_lines(author, when, text, "  "), ""]
+        if end > 0 and qlines[end - 1].strip():
+            item.insert(0, "")
+        added = insert_block(qpath, qlines, end, item)
+        return {"how": how, "path": str(qpath), "lines": added,
+                "next": {**ref, "kind": "question", "doc": "QUESTIONS.md", "key": f"**{title}**", "code": "",
+                         "title": title}}
+
+    def take_back(self, placed: dict) -> bool:
+        """Remove what `comment` added, if it is still there untouched."""
+        return remove_block(placed)
+
+
+def tasks_of(root: Path, cfg: dict | None = None) -> MarkdownTasks:
+    """Where a project's tickets and questions live. Markdown for every project for now."""
+    return MarkdownTasks(root, cfg)
 
 
 def parse_asks(root: Path) -> dict | None:
@@ -1478,9 +1604,10 @@ def git_summary(root: Path) -> dict:
 
 def collect_status(root: Path) -> dict:
     cfg = load_config()
-    ru = is_russian(root)
+    src = tasks_of(root, cfg)
+    ru = src.russian()
     stale_h = float(cfg.get("stale_hours", STALE_HOURS))
-    tickets = parse_todo(root, cfg)
+    tickets = src.tickets()
     by_id = {t["id"]: t for t in tickets}
 
     claims = []
@@ -1501,7 +1628,7 @@ def collect_status(root: Path) -> dict:
         cutoff = dt.datetime.now().timestamp() - ACTIVE_MINUTES * 60
         active = sum(1 for f in cdir.glob("*.jsonl") if f.stat().st_mtime > cutoff and f.stem not in claimed_sessions)
 
-    q = parse_questions(root, cfg)
+    q = src.questions()
     turn = [t for t in tickets if t["owner_last"] and t["id"] not in claimed]
     deferred = [t for t in tickets if t["deferred"] and t["id"] not in claimed and not t["owner_last"]]
     open_ = [t for t in tickets if t["id"] not in claimed and not t["owner_last"] and not t["deferred"]]
@@ -1655,7 +1782,7 @@ def cmd_status(argv: list[str]) -> int:
                    help="Remember the LOG entries shown, so the next status lists only newer ones")
     a = p.parse_args(argv)
     root = find_root(Path(a.path))
-    if not (root / "docs" / "TODO.md").is_file():
+    if not tasks_of(root).present():
         print(f"agentdrop status: no docs/TODO.md in {root} or above", file=sys.stderr)
         return 2
     for note in sync_replies(timeout=6):   # the owner's Telegram answers land before anyone reads the docs
@@ -1684,10 +1811,11 @@ def ticket_id(raw: str) -> str:
 def cmd_claim(argv: list[str]) -> int:
     a = claim_parser("claim", "Claim a ticket for this session at the start of a pass.").parse_args(argv)
     root, tid, sid = find_root(Path(a.root)), ticket_id(a.ticket), session_id(a.session)
-    ru = is_russian(root)
+    src = tasks_of(root)
+    ru = src.russian()
     d = root / CLAIMS
     f = d / f"{tid}.json"
-    stale_h = float(load_config().get("stale_hours", STALE_HOURS))
+    stale_h = float(src.cfg.get("stale_hours", STALE_HOURS))
     if f.exists():
         try:
             other = json.loads(f.read_text(encoding="utf-8"))
@@ -1705,7 +1833,7 @@ def cmd_claim(argv: list[str]) -> int:
                    f"last activity {age(idle, False)} ago{note}. Take another ticket or ask the owner."),
                   file=sys.stderr)
             return 1
-    ticket = next((t for t in parse_todo(root, load_config()) if t["id"] == tid), None)
+    ticket = next((t for t in src.tickets() if t["id"] == tid), None)
     if ticket is None:
         print(f"! {tid} нет в docs/TODO.md — захватываю всё равно" if ru
               else f"! {tid} is not in docs/TODO.md — claiming anyway", file=sys.stderr)
@@ -1726,7 +1854,7 @@ def cmd_claim(argv: list[str]) -> int:
 def cmd_release(argv: list[str]) -> int:
     a = claim_parser("release", "Release a ticket at the end of a pass.").parse_args(argv)
     root, tid, sid = find_root(Path(a.root)), ticket_id(a.ticket), session_id(a.session)
-    ru = is_russian(root)
+    ru = tasks_of(root).russian()
     f = root / CLAIMS / f"{tid}.json"
     if not f.exists():
         print(f"· {tid} не был захвачен" if ru else f"· {tid} was not claimed")
@@ -2063,38 +2191,6 @@ def insert_block(path: Path, lines: list[str], at: int, block: list[str]) -> lis
     return block
 
 
-def add_thread_comment(ref: dict, author: str, when: str, text: str) -> dict:
-    """Write the owner's words under the item, or as a new item on top of the owner's open questions
-    (ref kind "brief", or the item is gone). Returns the placement: how, the file, the exact lines
-    added, and where the next answer in this thread goes."""
-    root = Path(ref["root"])
-    path = root / "docs" / ref["doc"]
-    lines = read(path).split("\n") if path.is_file() else []
-    span = item_span(lines, ref) if ref["kind"] not in ("brief", "project") else None
-    if span:
-        _, b = span
-        new = quote_lines(author, when, text, "  ")
-        added = insert_block(path, lines, b, new if lines[b - 1].lstrip().startswith(">") else ["", *new])
-        return {"how": "saved", "path": str(path), "lines": added, "next": ref}
-    qpath = root / "docs" / "QUESTIONS.md"
-    qlines = read(qpath).split("\n") if qpath.is_file() else ["# QUESTIONS", ""]
-    ru = bool(ref.get("ru"))
-    end = open_slot(qlines, owner_words(load_config()))
-    if ref["kind"] in ("brief", "project"):
-        title = (BRIEF["about_item"][ru].format(title=clip(ref["title"], 60), when=when)
-                 if ref["kind"] == "project" and ref.get("item_title") else BRIEF["brief_item"][ru].format(when=when))
-        how = "noted"
-    else:
-        title, how = BRIEF["new_item"][ru].format(title=ref["title"]) + f" ({ref['doc']})", "moved"
-    item = [f"- **{title}**", "", *quote_lines(author, when, text, "  "), ""]
-    if end > 0 and qlines[end - 1].strip():
-        item.insert(0, "")
-    added = insert_block(qpath, qlines, end, item)
-    return {"how": how, "path": str(qpath), "lines": added,
-            "next": {**ref, "kind": "question", "doc": "QUESTIONS.md", "key": f"**{title}**", "code": "",
-                     "title": title}}
-
-
 def feedback_path() -> Path:
     """Owner's words about agentdrop itself: docs/FEEDBACK.md in the agentdrop source repo."""
     src = read(STATE / "source").strip() if (STATE / "source").is_file() else ""
@@ -2220,7 +2316,7 @@ def answer_status(env: dict, st: dict, cfg: dict, names: list[str], projects: di
     notes = []
     for name in names or list(projects):
         root = Path(projects[name]["root"])
-        if not (root / "docs" / "TODO.md").is_file():
+        if not tasks_of(root, cfg).present():
             continue
         s = {**collect_status(root), "label": project_label(root, cfg)}
         mid = tg_send(env, board_message(s), reply_to=reply_to)
@@ -2233,8 +2329,8 @@ def place(st: dict, cfg: dict, dest: str, ref: dict | None, author: str, when: s
     if dest == "agentdrop":
         return add_feedback(ref, author, when, text)
     if dest == "project":
-        return add_thread_comment({**ref, "kind": "project", "item_title": ref["kind"] != "brief"}, author, when, text)
-    return add_thread_comment(ref, author, when, text)
+        ref = {**ref, "kind": "project", "item_title": ref["kind"] != "brief"}
+    return tasks_of(Path(ref["root"]), cfg).comment(ref, author, when, text)
 
 
 def ack_for(placed: dict, ref: dict | None, ru: bool, why: str) -> tuple[str, dict | None]:
@@ -2330,7 +2426,7 @@ def take_callback(env: dict, st: dict, cfg: dict, q: dict) -> list[str]:
     B = lambda k, **kw: BRIEF[k][ru].format(**kw)
     if data == "ok" and ref and Path(ref["root"]).is_dir():
         when = dt.datetime.now().strftime("%d.%m %H:%M")
-        placed = add_thread_comment(ref, owner_name(cfg, ru), when, B("button_ok"))
+        placed = tasks_of(Path(ref["root"]), cfg).comment(ref, owner_name(cfg, ru), when, B("button_ok"))
         toast = B(placed["how"], title=clip(ref["title"], 60), project=ref["project"], doc=Path(placed["path"]).name)
         tg_try(env, "editMessageReplyMarkup", {"chat_id": env["TG_CHAT_ID"], "message_id": int(mid), "reply_markup": {
             "inline_keyboard": [[{"text": B("ok_done"), "callback_data": "noop"}]]}})
@@ -2342,7 +2438,7 @@ def take_callback(env: dict, st: dict, cfg: dict, q: dict) -> list[str]:
     elif data.startswith("mv:") and mid in st["placed"]:
         p = st["placed"][mid]
         dest = data[3:]
-        removed = remove_block(p)
+        removed = remove_block(p) if p["how"] == "feedback" else tasks_of(Path(p["ref"]["root"]), cfg).take_back(p)
         placed = place(st, cfg, dest, p["ref"], p["author"], p["when"], p["text"])
         if placed["next"]:
             st["messages"][str(p["src"])] = {**placed["next"], "at": now}
@@ -2396,7 +2492,7 @@ def reaction_answer(env: dict, st: dict, cfg: dict, r: dict) -> list[str]:
     ru = bool(ref.get("ru"))
     text = BRIEF["reaction_no" if e in NO_REACTIONS else "reaction_ok"][ru].format(e=e)
     when = dt.datetime.fromtimestamp(r.get("date", 0)).strftime("%d.%m %H:%M")
-    placed = add_thread_comment(ref, owner_name(cfg, ru), when, text)
+    placed = tasks_of(Path(ref["root"]), cfg).comment(ref, owner_name(cfg, ru), when, text)
     save_tg_state(st)
     ack = BRIEF[placed["how"]][ru].format(title=clip(ref["title"], 80), project=ref["project"],
                                           doc=Path(placed["path"]).name)
@@ -2572,7 +2668,7 @@ def cmd_brief(argv: list[str]) -> int:
     p.add_argument("--json", action="store_true", help="Machine-readable output")
     a = p.parse_args(argv)
     root = find_root(Path(a.path))
-    if not (root / "docs" / "TODO.md").is_file():
+    if not tasks_of(root).present():
         print(f"agentdrop brief: no docs/TODO.md in {root} or above", file=sys.stderr)
         return 2
     cfg, env = load_config(), tg_env()
@@ -2744,15 +2840,6 @@ ACCEPT = {
     "hint_owner": ("↩️ Reply with what to do: it goes under the ticket in TODO.md, the agent reads it.",
                    "↩️ Ответь реплаем, что делать: запишу под тикет в TODO.md, агент прочтёт."),
 }
-
-
-def ticket_text(root: Path, tid: str) -> str:
-    """The whole TODO item of a ticket, with its thread; empty when it's gone."""
-    for _, text in md_items(doc(root, "TODO.md")):
-        m = ITEM_TICKET.match(text.replace("**", "", 1) if text.startswith("**") else text)
-        if m and m.group(2) == tid:
-            return text
-    return ""
 
 
 def fingerprint(root: Path) -> str:
@@ -3041,7 +3128,9 @@ def cmd_accept(argv: list[str]) -> int:
     p.add_argument("-v", "--verbose", action="store_true", help="Print every step of the judge, not only a status line")
     a = p.parse_args(argv)
     root, tid = find_root(Path(a.root)), ticket_id(a.ticket)
-    ru, cfg = is_russian(root), load_config()
+    cfg = load_config()
+    src = tasks_of(root, cfg)
+    ru = src.russian()
     if git(root, "rev-parse", "--is-inside-work-tree").returncode != 0:
         print("agentdrop accept: needs a git repository", file=sys.stderr)
         return 2
@@ -3072,9 +3161,9 @@ def cmd_accept(argv: list[str]) -> int:
     if run["steps"]:
         save_run(runf, run)
 
-    text = ticket_text(root, tid)
+    text = src.ticket_text(tid)
     if text:
-        t = next((x for x in parse_todo(root, cfg) if x["id"] == tid), None)
+        t = next((x for x in src.tickets() if x["id"] == tid), None)
         run["ticket_info"] = {"title": t["title"] if t else "", "why": t["why"] if t else "", "text": text}
     elif not run.get("ticket_info"):
         print((f"agentdrop accept: {tid} нет в docs/TODO.md — судье не с чем сверять. Приёмка идёт до того, "
@@ -3250,7 +3339,7 @@ def dispatch_projects(cfg: dict) -> list[Path]:
     out = []
     for p in raw:
         root = Path(os.path.expanduser(p))
-        if (root / "docs" / "TODO.md").is_file() and root not in out:
+        if tasks_of(root, cfg).present() and root not in out:
             out.append(root)
     return out
 
@@ -3366,14 +3455,14 @@ def dispatch_state() -> dict:
 
 
 def dispatch_one(root: Path, cfg: dict, dry: bool, log, pending: list, verbose: bool = False) -> None:
-    s = collect_status(root)
+    s, src = collect_status(root), tasks_of(root, cfg)
     why = busy(root, s)
     if why:
         log(f"{root.name}: someone is working there ({why}), only the brief")
         return
     turn = len(s["waiting"]["your_turn"])
     if dry:
-        auto = [t["id"] for t in s["next"]["tickets"] + s["next"]["rest"] if AUTONOMOUS_RE.search(ticket_text(root, t["id"]))]
+        auto = [t["id"] for t in s["next"]["tickets"] + s["next"]["rest"] if AUTONOMOUS_RE.search(src.ticket_text(t["id"]))]
         log(f"{root.name}: would tidy ({turn} answered by the owner, {len(s['next']['tickets'])} next)"
             + (f", then do {auto[0]}" if auto else ""))
         return
@@ -3400,7 +3489,7 @@ def dispatch_one(root: Path, cfg: dict, dry: bool, log, pending: list, verbose: 
         + (f", ${r['cost_usd']}" if "cost_usd" in r else "") + f" — {clip(r.get('notes', ''), 200)}")
     s = collect_status(root)
     auto = next((t for t in s["next"]["tickets"] + s["next"]["rest"]
-                 if AUTONOMOUS_RE.search(ticket_text(root, t["id"]))), None)
+                 if AUTONOMOUS_RE.search(src.ticket_text(t["id"]))), None)
     if auto and not busy(root, s):
         log(f"{root.name}: {auto['id']} [autonomous] — {auto['title']}")
         r = run_worker(root, cfg, f"auto-{auto['id']}", autonomous_prompt(auto),
@@ -3412,7 +3501,7 @@ def dispatch_one(root: Path, cfg: dict, dry: bool, log, pending: list, verbose: 
 def tidy_messages(root: Path, cfg: dict, report: list[dict]) -> list[dict]:
     """The tidy pass's report as the owner wants it: one short message of what was done, then each
     reading of their words that could be wrong as its own message, so one reply corrects it."""
-    ru, label = is_russian(root), project_label(root, cfg)
+    ru, label = tasks_of(root, cfg).russian(), project_label(root, cfg)
     T = lambda k, **kw: TIDY_MSG[k][ru].format(**kw)
     done = [e for e in report if not e.get("check")]
     checks = [e for e in report if e.get("check")]
@@ -3652,7 +3741,7 @@ def cmd_pack(argv: list[str]) -> int:
         return 0
     s = collect_status(root)
     if a.only:
-        by_id = {t["id"]: t for t in parse_todo(root, cfg)}
+        by_id = {t["id"]: t for t in tasks_of(root, cfg).tickets()}
         want = [ticket_id(x) for x in a.only.split(",") if x.strip()]
         missing = [x for x in want if x not in by_id]
         if missing:
@@ -3706,25 +3795,6 @@ def cmd_pack(argv: list[str]) -> int:
 # `agentdrop tickets`: every ticket and every question for the owner across projects, with full
 # text and thread, as JSON for a page where the owner opens one item and answers it.
 
-def split_thread(text: str) -> tuple[str, list[dict]]:
-    """An item's text without its title line split into the body and the `> **Name, when:** …` thread."""
-    body, thread = [], []
-    for line in text.splitlines():
-        st = line.strip()
-        m = COMMENT_RE.match(line)
-        if m:
-            head = re.match(r"^\s*>\s*\*\*([^*]+?):\*\*\s*(.*)", line)
-            who, _, when = (head.group(1) if head else m.group(1)).partition(",")
-            thread.append({"author": who.strip(), "when": when.strip(), "text": head.group(2) if head else ""})
-        elif st.startswith(">") and thread:
-            thread[-1]["text"] += "\n" + st.lstrip("> ").rstrip()
-        elif st in ("_Thread closed._", "_Ветка закрыта._"):
-            thread.append({"author": "", "when": "", "text": st.strip("_")})
-        else:
-            body.append(line[2:] if line.startswith("  ") else line)
-    return "\n".join(body).strip(), thread
-
-
 def collect_items(root: Path, cfg: dict) -> tuple[dict, list[dict]]:
     s = collect_status(root)
     label = project_label(root, cfg)
@@ -3739,41 +3809,21 @@ def collect_items(root: Path, cfg: dict) -> tuple[dict, list[dict]]:
             state.setdefault(t["id"], key)
     for c in s["running"]["claims"]:
         state.setdefault(c.get("ticket", ""), "running")
+    src = tasks_of(root, cfg)
     items = []
-    for t in parse_todo(root, cfg):
-        text = ticket_text(root, t["id"])
-        m = re.match(r"\*\*(.+?)\*\*\s*", text, re.S)   # **B85 (P0). Title.** body
-        rest = text[m.end():] if m else ITEM_TICKET.sub("", text, count=1)
-        title_plain = t["title"].replace("…", "")
-        if not m and rest.startswith(title_plain):   # B134 P1 — Title. Зачем: «…» body
-            rest = rest[len(title_plain):].lstrip(". ")
-        why = WHY_RE.search(rest)
-        if why and t["why"]:   # the why is shown on its own
-            rest = (rest[:why.start()] + rest[why.end():]).lstrip(". ").replace("\n\n\n", "\n\n")
-        body, thread = split_thread(rest)
+    for t in src.tickets(full=True):
         items.append({"id": f"{prefix}-{t['id']}", "project": prefix, "code": t["id"], "kind": "ticket",
                       "title": t["title"], "priority": t["priority"], "section": t["section"],
                       "state": state.get(t["id"], "next"), "why": t["why"], "waits": t["waits"],
-                      "body": body, "thread": thread,
-                      "images": t["images"], "doc": "TODO.md"})
-    q = parse_questions(root, cfg)
-    turn = set(q["your_turn"])
-    all_q = {bold_title(text)[0]: text for _, text in md_items(doc(root, "QUESTIONS.md"))}
-    wanted = [(x["key"].strip("*"), "owner", x) for x in q["waiting"]]
-    for key, text in all_q.items():
-        code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)\.\s*", key or "")
-        title = f"{key[code.end():].rstrip('. ')} ({code.group(1)})" if code else (key or "").rstrip(". ")
-        if clip(title, 90) in turn:
-            wanted.append((key, "turn", {"title": title, "images": item_images(root, text)}))
-    for key, st, x in wanted:
-        text = all_q.get(key, "")
-        body, thread = split_thread(bold_title(text)[1])
-        code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)", key)
-        items.append({"id": f"{prefix}-q{sha(key.encode())[:6]}", "project": prefix,
+                      "body": t["body"], "thread": t["thread"],
+                      "images": t["images"], "doc": t["doc"]})
+    for x in src.questions(full=True)["items"]:
+        code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)", x["key"])
+        items.append({"id": f"{prefix}-q{sha(x['key'].encode())[:6]}", "project": prefix,
                       "code": code.group(1) if code else "", "kind": "question", "title": x["title"],
-                      "priority": "", "section": "QUESTIONS", "state": st, "why": "", "waits": "",
-                      "pick": x.get("pick", ""), "body": body, "thread": thread,
-                      "images": x.get("images", []), "doc": "QUESTIONS.md"})
+                      "priority": "", "section": "QUESTIONS", "state": x["state"], "why": "", "waits": "",
+                      "pick": x["pick"], "body": x["body"], "thread": x["thread"],
+                      "images": x["images"], "doc": x["doc"]})
     have = {i["code"] for i in items}
     for head, body in re.findall(r"(?m)^## (.+)\n((?:(?!## ).*\n?)*)", doc(root, "LOG.md")):
         m = re.match(r"(\d{1,2}\.\d{2})\s*[—-]\s*(.*)", head.strip())
