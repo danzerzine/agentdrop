@@ -1703,35 +1703,44 @@ QUIET_HOURS = (23, 9)                # messages arrive without sound
 KEEP_DAYS = 45
 HINT_HOURS = 2                       # "reply to an item" hints only for fresh messages
 
-BRIEF = {
-    "kind_brief": ("brief", "сводка"),
-    "kind_decision": ("decision needed", "нужно решение"),
-    "waiting": ("Waiting for you: {n}", "Ждут тебя: {n}"),
+BRIEF = {   # the owner asked for emoji: they mark where a message and a block begin in a chat without bubbles
+    "kind_brief": ("📋 {p} · BRIEF", "📋 {p} · СВОДКА"),
+    "kind_decision": ("❓ {p} · DECISION NEEDED{pos}", "❓ {p} · НУЖНО РЕШЕНИЕ{pos}"),
+    "kind_ok": ("👍 {p} · YOUR OK{pos}", "👍 {p} · НУЖЕН ТВОЙ OK{pos}"),
+    "waiting": ("⏳ Waiting for you: {n}", "⏳ Ждут тебя: {n}"),
     "below": ("{n} below, one message each", "{n} ниже, каждый отдельным сообщением"),
     "earlier": ("{n} sent earlier, answer those", "{n} уже присылал, отвечай на те"),
     "later": ("{n} more in the next brief", "ещё {n} в следующей сводке"),
     "your_turn": ("you answered {n}, the agent's turn", "на {n} ты ответил, ход агента"),
-    "running": ("Running", "Идёт"),
-    "done": ("Done: {n}", "Сделано: {n}"),
-    "next": ("Next", "Дальше"),
-    "pick": ("Proposal", "Предложение"),
-    "last": ("Last in the thread", "Последнее в ветке"),
-    "reply_hint": ("Reply to this message: your answer goes under the item in {doc}.",
-                   "Ответь реплаем: запишу под пункт в {doc}."),
-    "head_hint": ("A reply to this brief goes to QUESTIONS.md as a new item.",
-                  "Ответ реплаем на сводку запишу новым пунктом в QUESTIONS.md."),
-    "noted": ("Saved in {project} as a new item in QUESTIONS.md.", "Записал в {project} новым пунктом в QUESTIONS.md."),
+    "running": ("⚙️ Running", "⚙️ Идёт"),
+    "done": ("✅ Done: {n}", "✅ Сделано: {n}"),
+    "next": ("➡️ Next", "➡️ Дальше"),
+    "pick": ("💡 Proposal", "💡 Предложение"),
+    "last": ("💬 Last in the thread", "💬 Последнее в ветке"),
+    "reply_hint": ("↩️ Reply to this message: your answer goes under the item in {doc}.",
+                   "↩️ Ответь реплаем: запишу под пункт в {doc}."),
+    "ok_hint": ("👍 on this message is your OK. Anything else: reply, it goes under the item in {doc}.",
+                "👍 на это сообщение — твой OK. Если иначе — ответь реплаем, запишу под пункт в {doc}."),
+    "head_hint": ("↩️ A reply to this brief goes to QUESTIONS.md as a new item.",
+                  "↩️ Ответ реплаем на сводку запишу новым пунктом в QUESTIONS.md."),
+    "noted": ("✅ Saved in {project} as a new item in QUESTIONS.md.",
+              "✅ Записал в {project} новым пунктом в QUESTIONS.md."),
     "brief_item": ("Answer to the brief, {when}", "Ответ на сводку, {when}"),
-    "saved": ("Saved under «{title}» in {project}, {doc}.", "Записал под «{title}» в {project}, {doc}."),
-    "moved": ("«{title}» is gone from {project}, {doc} (closed?). Saved as a new item in QUESTIONS.md.",
-              "«{title}» в {project}, {doc} больше нет (закрыт?). Записал новым пунктом в QUESTIONS.md."),
-    "no_project": ("Project {project} isn't on this machine ({root}); the answer is not saved.",
-                   "Проекта {project} нет на этой машине ({root}); ответ не записан."),
-    "not_item": ("I can't tell which project this is about. Reply to a brief or an item message, and I'll file it there.",
-                 "Не понял, к какому проекту это. Ответь реплаем на сводку или на пункт, и я запишу туда."),
-    "text_only": ("Only text answers for now.", "Пока понимаю только текст."),
+    "saved": ("✅ Saved under «{title}» in {project}, {doc}.", "✅ Записал под «{title}» в {project}, {doc}."),
+    "moved": ("⚠️ «{title}» is gone from {project}, {doc} (closed?). Saved as a new item in QUESTIONS.md.",
+              "⚠️ «{title}» в {project}, {doc} больше нет (закрыт?). Записал новым пунктом в QUESTIONS.md."),
+    "no_project": ("⚠️ Project {project} isn't on this machine ({root}); the answer is not saved.",
+                   "⚠️ Проекта {project} нет на этой машине ({root}); ответ не записан."),
+    "not_item": ("🤷 I can't tell which project this is about. Reply to a brief or an item message, and I'll file it there.",
+                 "🤷 Не понял, к какому проекту это. Ответь реплаем на сводку или на пункт, и я запишу туда."),
+    "text_only": ("⚠️ Only text answers for now.", "⚠️ Пока понимаю только текст."),
     "new_item": ("Answer from Telegram about «{title}»", "Ответ из Telegram про «{title}»"),
+    "reaction_ok": ("OK ({e} in Telegram)", "OK ({e} в Telegram)"),
+    "reaction_no": ("No ({e} in Telegram)", "Нет ({e} в Telegram)"),
 }
+OK_REACTIONS = {"👍", "👌", "🆗", "✅", "🔥", "❤", "❤️", "💯", "🤝", "👏"}
+NO_REACTIONS = {"👎"}
+OK_ASK_RE = re.compile(r"(?i)(?<!\w)(?:OK|ок|одобр|соглас|approv|sign-?off)")
 
 
 class TgError(Exception):
@@ -1889,6 +1898,30 @@ def quote_lines(author: str, when: str, text: str, indent: str) -> list[str]:
     return out
 
 
+def open_slot(lines: list[str], words: list[str]) -> int:
+    """Where a new question for the owner goes: on top of the open list in the owner's section
+    (newest first), never under "closed" or "revertible" subsections."""
+    skip = re.compile(r"(?i)закрыт|closed|resolved|можно отменить|revert")
+    heads = [(i, len(m.group(1))) for i, l in enumerate(lines) if (m := re.match(r"^(#{2,4})\s", l))]
+    top = [i for i, lv in heads if lv == 2 and not skip.search(lines[i])]
+    start = next((i for i in top if by_owner(lines[i], words)), top[0] if top else None)
+    if start is None:
+        return len(lines)
+    stop = next((i for i, lv in heads if i > start and lv == 2), len(lines))
+    subs = [i for i, lv in heads if start < i < stop]
+    sub = next((i for i in subs if not skip.search(lines[i])), None if subs else start)
+    if sub is None:   # only closed or revertible subsections: go before the first of them
+        return subs[0]
+    sub_end = next((i for i in subs if i > sub), stop)
+    first = next((i for i in range(sub + 1, sub_end) if lines[i].startswith("- ")), None)
+    if first is not None:
+        return first
+    end = sub_end
+    while end > sub + 1 and not lines[end - 1].strip():
+        end -= 1
+    return end
+
+
 def add_thread_comment(ref: dict, author: str, when: str, text: str) -> tuple[str, dict]:
     """Write the owner's answer under the item. Returns how ("saved"; "moved" when the item is gone;
     "noted" for an answer to a head message) and where the next answer in that thread should go."""
@@ -1904,20 +1937,16 @@ def add_thread_comment(ref: dict, author: str, when: str, text: str) -> tuple[st
         return "saved", ref
     qpath = root / "docs" / "QUESTIONS.md"
     qlines = read(qpath).split("\n") if qpath.is_file() else ["# QUESTIONS", ""]
-    heads = [i for i, l in enumerate(qlines) if l.startswith("## ")]
-    open_heads = [i for i in heads if not re.search(r"(?i)закрыт|closed|resolved", qlines[i])]
     ru = bool(ref.get("ru"))
-    words = owner_words(load_config())
-    start = next((i for i in open_heads if by_owner(qlines[i], words)), open_heads[0] if open_heads else None)
-    end = next((i for i in heads if start is not None and i > start), len(qlines))
-    while end > 0 and not qlines[end - 1].strip():
-        end -= 1
+    end = open_slot(qlines, owner_words(load_config()))
     if ref["kind"] == "brief":
         title, how = BRIEF["brief_item"][ru].format(when=when), "noted"
     else:
         title, how = BRIEF["new_item"][ru].format(title=ref["title"]) + f" ({ref['doc']})", "moved"
-    item = ["", f"- **{title}**", "", *quote_lines(author, when, text, "  ")]
-    qlines[end:end] = item + ([""] if end < len(qlines) and qlines[end].strip() else [])
+    item = [f"- **{title}**", "", *quote_lines(author, when, text, "  "), ""]
+    if end > 0 and qlines[end - 1].strip():
+        item.insert(0, "")
+    qlines[end:end] = item
     write(qpath, "\n".join(qlines))
     return how, {**ref, "kind": "question", "doc": "QUESTIONS.md", "key": f"**{title}**", "code": "",
                  "title": title}
@@ -1925,10 +1954,14 @@ def add_thread_comment(ref: dict, author: str, when: str, text: str) -> tuple[st
 
 def pull_replies(env: dict, st: dict, cfg: dict, timeout: float = 20) -> list[str]:
     notes = []
-    ups = tg_call(env, "getUpdates", {"offset": st["offset"], "timeout": 0, "allowed_updates": ["message"]},
-                  timeout=timeout)
+    ups = tg_call(env, "getUpdates", {"offset": st["offset"], "timeout": 0,
+                                      "allowed_updates": ["message", "message_reaction"]}, timeout=timeout)
     for u in ups:
         st["offset"] = u["update_id"] + 1
+        if u.get("message_reaction"):
+            notes += reaction_answer(env, st, cfg, u["message_reaction"])
+            save_tg_state(st)
+            continue
         m = u.get("message") or {}
         if str(m.get("chat", {}).get("id")) != str(env["TG_CHAT_ID"]):
             save_tg_state(st)
@@ -1968,6 +2001,27 @@ def pull_replies(env: dict, st: dict, cfg: dict, timeout: float = 20) -> list[st
     return notes
 
 
+def reaction_answer(env: dict, st: dict, cfg: dict, r: dict) -> list[str]:
+    """A 👍 on an item's message is the owner's OK, a 👎 a no; both go under the item like a reply."""
+    ref = st["messages"].get(str(r.get("message_id")))
+    if str(r.get("chat", {}).get("id")) != str(env["TG_CHAT_ID"]) or not ref or ref["kind"] == "brief":
+        return []
+    old = {x.get("emoji") for x in r.get("old_reaction", [])}
+    new = [x.get("emoji") for x in r.get("new_reaction", []) if x.get("emoji") not in old]
+    e = next((x for x in new if x in OK_REACTIONS | NO_REACTIONS), None)
+    if not e or not Path(ref["root"]).is_dir():
+        return []
+    ru = bool(ref.get("ru"))
+    text = BRIEF["reaction_no" if e in NO_REACTIONS else "reaction_ok"][ru].format(e=e)
+    when = dt.datetime.fromtimestamp(r.get("date", 0)).strftime("%d.%m %H:%M")
+    how, where = add_thread_comment(ref, owner_name(cfg, ru), when, text)
+    save_tg_state(st)
+    ack = BRIEF[how][ru].format(title=clip(ref["title"], 80), project=ref["project"], doc=ref["doc"])
+    mid = tg_send(env, f"{text}. {ack}", reply_to=r.get("message_id"))
+    st["messages"][str(mid)] = {**where, "at": dt.datetime.now().astimezone().isoformat()}
+    return [f"· Telegram: {text} → {ack}"]
+
+
 def sync_replies(timeout: float = 20) -> list[str]:
     """Pull the owner's answers into the docs; quiet no-op when Telegram isn't set up."""
     env = tg_env()
@@ -1992,29 +2046,45 @@ def split_title(title: str) -> tuple[str, str]:
     return (m.group(1), m.group(2)) if m else (title, "")
 
 
+def wants_ok(kind: str, it: dict) -> bool:
+    """An item the owner can settle with a 👍: a question with the agent's proposal, or a ticket
+    that waits for the owner's OK."""
+    return bool(it["pick"]) if kind == "question" else bool(OK_ASK_RE.search(it["waits"]))
+
+
 def item_message(s: dict, kind: str, it: dict, pos: str = "") -> str:
     ru = s["ru"]
     B = lambda k, **kw: BRIEF[k][ru].format(**kw)
+    ok = wants_ok(kind, it)
     title, sub = split_title(it["title"]) if kind == "question" else (it["title"], f"{it['id']}, {it['priority']}")
-    parts = [f"<b>{tg_html(s['label'])} · {B('kind_decision').upper()}{pos}</b>",
+    parts = [f"<b>{tg_html(B('kind_ok' if ok else 'kind_decision', p=s['label'], pos=pos))}</b>",
              f"<b>{tg_html(title)}</b>" + (f"\n<i>{tg_html(sub)}</i>" if sub else "")]
     body = it.get("detail") or it.get("waits") or ""
+    if ok and kind == "question" and it["pick"] in body:   # the proposal gets its own line, not twice
+        body = re.sub(r"\s{2,}", " ", body.replace(it["pick"], "")).strip()
     if kind == "ticket" and it["why"]:
         parts.append(f"<b>{LABELS['why'][ru].capitalize()}:</b> {tg_html(it['why'])}")
     if body:
         parts.append(f"<blockquote>{tg_html(body)}</blockquote>")
-    if kind == "question" and it["pick"] and it["pick"][:60] not in body:
+    if kind == "question" and it["pick"] and (ok or it["pick"][:60] not in body):
         parts.append(f"<b>{B('pick')}:</b> {tg_html(it['pick'])}")
     if it.get("last"):
         parts.append(f"<b>{B('last')}:</b>\n<blockquote>{tg_html(it['last'])}</blockquote>")
-    parts.append(f"<i>{tg_html(B('reply_hint', doc=it.get('doc', 'TODO.md')))}</i>")
+    parts.append(f"<i>{tg_html(B('ok_hint' if ok else 'reply_hint', doc=it.get('doc', 'TODO.md')))}</i>")
     return "\n\n".join(parts)
 
 
 def head_message(s: dict, new: int, earlier: int, later: int) -> str:
     ru = s["ru"]
     B = lambda k, **kw: BRIEF[k][ru].format(**kw)
-    out = [f"<b>{tg_html(s['label'])} · {B('kind_brief').upper()}</b>"]
+    out = [f"<b>{tg_html(B('kind_brief', p=s['label']))}</b>"]
+    # the owner reads what was done while they were away first, then what waits for them
+    done = s["done"]["entries"]
+    if done:
+        rows = [f"• {tg_html(clip(e['heading'], 110))}" for e in done[:8]]
+        if len(done) > 8:
+            rows.append(f"… {LABELS['more'][ru].format(n=len(done) - 8)}")
+        out.append(f"<b>{B('done', n=len(done))}</b>\n<blockquote expandable>" + "\n".join(rows) + "</blockquote>")
     w = s["waiting"]
     total = len(w["questions"]) + len(w["tickets"])
     if total or w["your_turn"]:
@@ -2031,12 +2101,6 @@ def head_message(s: dict, new: int, earlier: int, later: int) -> str:
             state = LABELS["stale"][ru].format(a=idle) if c["stale"] else LABELS["active"][ru].format(a=idle)
             rows.append(f"• {tg_html(c['title'] or c.get('ticket', ''))} ({c.get('ticket')})\n  <i>{state}</i>")
         out.append(f"<b>{B('running')}</b>\n" + "\n".join(rows))
-    done = s["done"]["entries"]
-    if done:
-        rows = [f"• {tg_html(clip(e['heading'], 110))}" for e in done[:8]]
-        if len(done) > 8:
-            rows.append(f"… {LABELS['more'][ru].format(n=len(done) - 8)}")
-        out.append(f"<b>{B('done', n=len(done))}</b>\n<blockquote expandable>" + "\n".join(rows) + "</blockquote>")
     nxt = s["next"]["tickets"][:3]
     if nxt:
         out.append(f"<b>{B('next')}</b>\n" + "\n".join(
@@ -2078,7 +2142,7 @@ def plan_brief(root: Path, s: dict, st: dict, cfg: dict, everything: bool = Fals
         return []
     head = {"kind": "head", "text": head_message(s, len(fresh), earlier, later),
             "ref": {"root": str(root), "project": s["label"], "doc": "QUESTIONS.md", "kind": "brief", "key": "",
-                    "title": BRIEF["kind_brief"][s["ru"]], "ru": s["ru"]}}
+                    "title": BRIEF["kind_brief"][s["ru"]].format(p=s["label"]), "ru": s["ru"]}}
     return [head, *fresh]
 
 

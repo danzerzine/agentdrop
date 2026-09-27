@@ -208,6 +208,11 @@ class FakeTelegram:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.server.server_port}"
 
+    def react(self, message_id, emoji, chat=42):
+        self.updates.append({"update_id": 500 + len(self.updates), "message_reaction": {
+            "chat": {"id": chat}, "message_id": message_id, "date": int(time.time()), "user": {"id": chat},
+            "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": emoji}]}})
+
     def answer(self, text, reply_to=None, chat=42):
         m = {"message_id": 900 + len(self.updates), "date": int(time.time()), "chat": {"id": chat}, "text": text}
         if reply_to:
@@ -232,11 +237,15 @@ class Brief(Project):
         self.assertEqual(r.returncode, 0, r.stderr)
         texts = [m["text"] for m in self.tg.sent]
         self.assertEqual(len(texts), 3)   # head, the chart question, the ticket blocked on the owner
-        self.assertTrue(texts[0].startswith("<b>proj · BRIEF</b>"))
-        self.assertIn("<b>Waiting for you: 2</b>\n2 below, one message each", texts[0])
-        self.assertIn("<b>Done: 2</b>\n<blockquote expandable>• 27.09 — B6 login page redesign\n", texts[0])
-        self.assertIn("<b>proj · DECISION NEEDED, 1/2</b>\n\n<b>Which chart library</b>\n<i>Q-2</i>", texts[1])
-        self.assertIn("I recommend Recharts", texts[1])
+        self.assertTrue(texts[0].startswith("<b>📋 proj · BRIEF</b>"))
+        self.assertIn("<b>⏳ Waiting for you: 2</b>\n2 below, one message each", texts[0])
+        self.assertIn("<b>✅ Done: 2</b>\n<blockquote expandable>• 27.09 — B6 login page redesign\n", texts[0])
+        self.assertLess(texts[0].index("Done: 2"), texts[0].index("Waiting for you"))   # the owner's order
+        # a question with the agent's proposal and a ticket waiting for an OK: both settle with a 👍
+        self.assertIn("<b>👍 proj · YOUR OK, 1/2</b>\n\n<b>Which chart library</b>\n<i>Q-2</i>", texts[1])
+        self.assertIn("<blockquote>Two options: Recharts or ECharts.</blockquote>", texts[1])
+        self.assertIn("<b>💡 Proposal:</b> I recommend Recharts: we already use it.", texts[1])
+        self.assertIn("👍 on this message is your OK", texts[1])
         self.assertIn("<b>Deploy script</b>\n<i>B8, P0</i>", texts[2])
         self.assertIn("goes under the item in <code>TODO.md</code>", texts[2])
         self.assertEqual(self.tg.bad_key, 0)
@@ -300,6 +309,32 @@ class Brief(Project):
         self.assertEqual(len(hints), 1)   # one hint, not one per loose message
         self.assertNotIn("loose thought", text)
 
+    def test_thumbs_up_is_the_owners_ok(self):
+        self.run_ad("brief", "--send")
+        self.tg.react(self.by_text("B8, P0")["message_id"], "👍")
+        self.tg.react(self.by_text("Q-2")["message_id"], "😁")   # not an answer
+        self.tg.react(self.tg.sent[0]["message_id"], "👍")       # the head: nothing to OK
+        r = self.run_ad("replies")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        todo = (self.root / "docs" / "TODO.md").read_text(encoding="utf-8")
+        self.assertIn("Waiting for the owner's OK on the server.\n\n  > **Owner, ", todo)
+        self.assertIn(":** OK (👍 in Telegram)\n- P2: B9", todo)
+        self.assertEqual(QUESTIONS, (self.root / "docs" / "QUESTIONS.md").read_text(encoding="utf-8"))
+        self.assertIn("OK (👍 in Telegram). ✅ Saved under «Deploy script»", self.tg.sent[-1]["text"])
+
+    def test_reply_to_the_brief_goes_on_top_of_the_open_list(self):
+        path = self.root / "docs" / "QUESTIONS.md"
+        path.write_text("# Q\n\n## For the owner\n\n### Open\n\n- **Q-2. Which chart library.** Recharts?\n\n"
+                        "### Closed\n\n- **Old.** Done.\n\n## For others\n", encoding="utf-8")
+        self.run_ad("brief", "--send")
+        self.tg.answer("start with what was done overnight", reply_to=self.tg.sent[0]["message_id"])
+        self.run_ad("replies")
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("### Open\n\n- **Answer to the brief, ", text)
+        self.assertIn(":** start with what was done overnight\n\n- **Q-2.", text)
+        self.assertEqual(len(self.status()["waiting"]["questions"]), 1)   # the agent's turn, not lost under Closed
+        self.assertIn("Answer to the brief", self.status()["waiting"]["your_turn"][0])
+
     def test_answer_to_a_closed_item_becomes_a_new_question(self):
         self.run_ad("brief", "--send")
         q2 = self.by_text("Q-2")["message_id"]
@@ -318,7 +353,7 @@ class Brief(Project):
     def test_print_without_send_touches_nothing(self):
         r = self.run_ad("brief")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("proj · DECISION NEEDED", r.stdout)
+        self.assertIn("proj · YOUR OK", r.stdout)
         self.assertEqual(self.tg.sent, [])
         self.assertFalse((self.home / ".agentdrop" / "telegram.json").exists())
 
