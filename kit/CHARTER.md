@@ -6,6 +6,8 @@
 
 **Claims:** before editing, run `agentdrop status` (what waits for the owner, what other sessions hold, what's next) and claim your ticket: `agentdrop claim B<n>`. If another session holds it, take another ticket or ask the owner; never work on a claimed ticket silently. A pass without a ticket (docs, review intake) claims nothing but still checks status for sessions editing the same docs. Release at the end of the pass, also when you stop halfway: `agentdrop release B<n>`.
 
+**Tasks in the store:** `agentdrop task where` says where this project's tasks live. If it says the store, the store replaces `docs/TODO.md` and `docs/QUESTIONS.md` wherever this charter names them: never read or edit those two files. `agentdrop task take [B<n>]` claims one task (no number: the next one) and prints its text, thread, links and the files it names; if it is refused, another session has it. Then `agentdrop task comment B<n> "…"` for notes, `task ask B<n> "…"` for a question to the owner (the task then waits for them), `task state B<n> waiting_others "<whom>: …"` when it waits for other people, `task new "…"` to file a task, and `task handin B<n>` when the work is committed, then `agentdrop accept B<n>`, which marks it done on a pass.
+
 | File | What goes there |
 |---|---|
 | `docs/CONTEXT.md` | product, people, data sources, glossary, code map; changes rarely |
