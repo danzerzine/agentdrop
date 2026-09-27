@@ -1275,6 +1275,7 @@ def parse_todo(root: Path, cfg: dict) -> list[dict]:
                 title, body = sent.group(1), title[sent.end():] + body
         why = WHY_RE.search(first)
         waits = WAITS_RE.search(text)
+        comments = [(c.group(1).strip(), line) for line in text.splitlines() if (c := COMMENT_RE.match(line))]
         out.append({
             "id": m.group(2), "priority": m.group(1) or m.group(3) or section[1],
             "section": heads[-1] if heads else "", "order": (section[0], idx),
@@ -1285,6 +1286,9 @@ def parse_todo(root: Path, cfg: dict) -> list[dict]:
             "waits_owner": bool(waits and by_owner(waits.group(0), words)),
             "detail": clip(body.strip(), 700),
             "images": item_images(root, text),
+            # the owner wrote last under the ticket: the agent's move, whatever the ticket says it waits for
+            "owner_last": bool(comments and by_owner(comments[-1][0], words)),
+            "last": clip(re.sub(r"^\s*>\s*", "", comments[-1][1]), 400) if comments else "",
         })
     return out
 
@@ -1482,10 +1486,12 @@ def collect_status(root: Path) -> dict:
         active = sum(1 for f in cdir.glob("*.jsonl") if f.stat().st_mtime > cutoff and f.stem not in claimed_sessions)
 
     q = parse_questions(root, cfg)
-    owner_tickets = [t for t in tickets if t["waits_owner"] and t["id"] not in claimed]
+    turn = [t for t in tickets if t["owner_last"] and t["id"] not in claimed]
+    open_ = [t for t in tickets if t["id"] not in claimed and not t["owner_last"]]
+    owner_tickets = [t for t in open_ if t["waits_owner"]]
     # a ticket blocked on someone else (a client's answer) is nobody's next step: counted, not listed
-    blocked = [t for t in tickets if t["id"] not in claimed and t["waits"] and not t["waits_owner"]]
-    free = [t for t in tickets if t["id"] not in claimed and not t["waits"]]
+    blocked = [t for t in open_ if t["waits"] and not t["waits_owner"]]
+    free = [t for t in open_ if not t["waits"]]
     free.sort(key=lambda t: (t["priority"], t["order"]))
 
     entries = log_entries(root)
@@ -1500,7 +1506,8 @@ def collect_status(root: Path) -> dict:
     return {
         "project": root.name, "root": str(root), "ru": ru,
         "generated": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-        "waiting": {"questions": q["waiting"], "tickets": owner_tickets, "your_turn": q["your_turn"],
+        "waiting": {"questions": q["waiting"], "tickets": owner_tickets, "your_turn": q["your_turn"] + [f"{t['title']} ({t['id']})" for t in turn],
+                    "turn_tickets": turn,
                     "revertible": q["revertible"], "people": q["people"],
                     "asks": parse_asks(root)},
         "running": {"claims": claims, "unclaimed_active_sessions": active, "active_minutes": ACTIVE_MINUTES},
@@ -2574,7 +2581,6 @@ def cmd_brief(argv: list[str]) -> int:
 
 
 SERVICE = "com.agentdrop.telegram"
-SERVICE_PLIST = HOME / "Library" / "LaunchAgents" / f"{SERVICE}.plist"
 SERVICE_LOG = STATE / "telegram.log"
 
 
@@ -2610,41 +2616,45 @@ def watch_replies() -> int:
             print(f"{dt.datetime.now():%d.%m %H:%M:%S} {n}", flush=True)
 
 
-def service(action: str) -> int:
-    """macOS: the listener as a launchd agent, started at login and restarted if it dies."""
+def launchd(label: str, args: list[str], action: str, log: Path, extra: dict, what: str) -> int:
+    """macOS: an agentdrop command as a launchd agent (on / off / status)."""
     uid = os.getuid() if hasattr(os, "getuid") else 0
-    target = f"gui/{uid}/{SERVICE}"
+    target, plist = f"gui/{uid}/{label}", HOME / "Library" / "LaunchAgents" / f"{label}.plist"
     if platform.system() != "Darwin":
-        print(f"agentdrop replies: run `agentdrop replies --watch` under your system's service manager "
-              f"(log: {SERVICE_LOG})", file=sys.stderr)
+        print(f"agentdrop: run `agentdrop {' '.join(args)}` under your system's service manager (log: {log})",
+              file=sys.stderr)
         return 2
     if action in ("off", "on"):
         subprocess.run(["launchctl", "bootout", target], capture_output=True)
     if action == "off":
-        SERVICE_PLIST.unlink(missing_ok=True)
-        print("✓ listener stopped")
+        plist.unlink(missing_ok=True)
+        print(f"✓ {what} stopped")
         return 0
     if action == "on":
         import plistlib
         exe = Path(shutil.which("agentdrop") or sys.argv[0]).resolve()
         path = ":".join([str(HOME / ".local" / "bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])
-        SERVICE_PLIST.parent.mkdir(parents=True, exist_ok=True)
-        SERVICE_PLIST.write_bytes(plistlib.dumps({
-            "Label": SERVICE, "ProgramArguments": [sys.executable, str(exe), "replies", "--watch"],
-            "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 30,
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_bytes(plistlib.dumps({
+            "Label": label, "ProgramArguments": [sys.executable, str(exe), *args],
             "EnvironmentVariables": {"PATH": path, "HOME": str(HOME), "PYTHONUNBUFFERED": "1"},
-            "StandardOutPath": str(SERVICE_LOG), "StandardErrorPath": str(SERVICE_LOG)}))
-        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(SERVICE_PLIST)], capture_output=True,
-                           text=True)
+            "StandardOutPath": str(log), "StandardErrorPath": str(log), **extra}))
+        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], capture_output=True, text=True)
         if r.returncode != 0:
-            print(f"agentdrop replies: launchctl: {r.stderr.strip()}", file=sys.stderr)
+            print(f"agentdrop: launchctl: {r.stderr.strip()}", file=sys.stderr)
             return 1
-        print(f"✓ listener on ({exe}); log: {SERVICE_LOG}")
+        print(f"✓ {what} on ({exe}); log: {log}")
         return 0
     r = subprocess.run(["launchctl", "print", target], capture_output=True, text=True)
     state = re.search(r"^\s*state = (.+)$", r.stdout, re.M)
-    print(f"listener: {state.group(1) if state else 'not installed'}; log: {SERVICE_LOG}")
+    print(f"{what}: {state.group(1) if state else 'not installed'}; log: {log}")
     return 0
+
+
+def service(action: str) -> int:
+    """The listener as a launchd agent, started at login and restarted if it dies."""
+    return launchd(SERVICE, ["replies", "--watch"], action, SERVICE_LOG,
+                   {"RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 30}, "listener")
 
 
 def cmd_replies(argv: list[str]) -> int:
@@ -3067,8 +3077,261 @@ def cmd_accept(argv: list[str]) -> int:
     return 3
 
 
+# ---------------------------------------------------------------------------
+# Push loop, pass 4: `agentdrop dispatch`, the morning run across the owner's projects.
+# For each project nobody is working in: a headless tidy pass acts on the owner's answers and
+# closes tickets that are done or out of date (docs only), then one ticket marked [autonomous]
+# goes worker → `agentdrop accept`, then the brief. Python picks what runs; the model does it.
+
+DISPATCH_TIME = (9, 5)               # launchd starts it then (or on wake, if the Mac slept through)
+DAY_CAP = 6                          # messages a day from the dispatcher, across projects
+TIDY_NEXT = 8                        # "Next" tickets the tidy pass checks against git and the code
+WORKER = "claude -p --permission-mode auto --no-session-persistence"
+DISPATCH_STATE = STATE / "dispatch.json"
+DISPATCH_LOG = STATE / "dispatch.log"
+DISPATCH_SERVICE = "com.agentdrop.dispatch"
+AUTONOMOUS_RE = re.compile(r"(?i)\[(?:autonomous|автономно)\]")
+TIDY_SCHEMA = {
+    "type": "object", "required": ["closed", "changed", "notes"],
+    "properties": {"closed": {"type": "array", "items": {"type": "string"}},
+                   "changed": {"type": "array", "items": {"type": "string"}},
+                   "notes": {"type": "string"}},
+}
+HANDS_OFF = ("Nobody is watching this run. Never deploy, never send anything to anyone (mail, chats, Telegram), "
+             "never spend money, never touch servers or production data. Commit only the files you changed, "
+             "no AI attribution, and don't push unless the project's AGENTS.md says pushing is part of a commit. "
+             "Don't run `agentdrop brief`: the dispatcher sends it after you.")
+
+
+def dispatch_projects(cfg: dict) -> list[Path]:
+    """`projects = ~/a, ~/b` in the config; else every project whose board was ever looked at."""
+    raw = [p.strip() for p in cfg.get("projects", "").split(",") if p.strip()] or list(seen_state())
+    out = []
+    for p in raw:
+        root = Path(os.path.expanduser(p))
+        if (root / "docs" / "TODO.md").is_file() and root not in out:
+            out.append(root)
+    return out
+
+
+def tidy_prompt(s: dict) -> str:
+    turn, nxt = s["waiting"]["turn_tickets"], s["next"]["tickets"] + s["next"]["rest"]
+    lines = [f"Morning tidy of the project in this directory ({s['project']}), started by agentdrop's dispatcher.",
+             "Read AGENTS.md, docs/STATE.md and docs/TODO.md first and follow the project's charter. "
+             "This pass changes only the project's docs: no code, no product work.", "", HANDS_OFF, ""]
+    if turn or s["waiting"]["your_turn"]:
+        lines += ["1. The owner wrote last under these items; it is the agent's move:"]
+        lines += [f"- {t['title']} ({t['id']}, docs/TODO.md). The owner's last words: «{t['last']}»" for t in turn]
+        lines += [f"- {q} (docs/QUESTIONS.md)" for q in s["waiting"]["your_turn"][:len(s["waiting"]["your_turn"]) - len(turn)]]
+        lines += ["For each, do what the answer settles within the docs: close a ticket that is done (LOG line, "
+                  "remove it from TODO), record a choice the owner made the way the charter says (with their quote), "
+                  "mark what now waits for someone and for whom, and answer under the owner's comment in the thread "
+                  "format saying what you did or what happens next. If the answer asks for code or product work, "
+                  "keep the ticket, reply what will be done, and don't do the work now.", ""]
+    lines += [f"{2 if s['waiting']['your_turn'] else 1}. Check that these tickets from «Next» are still true, each against `git log`, "
+              "the code and LOG:"]
+    lines += [f"- {t['id']}: {t['title']}" for t in nxt[:TIDY_NEXT]]
+    lines += ["Done already: close it. Text out of date: fix the text, keep what is still open. Blocked on other "
+              "people: add a phrase «Ждёт <кого>: …» (or «Waiting for <whom>: …» in English docs). "
+              "When you can't tell from the evidence, leave it as it is: never guess a ticket closed.", "",
+              "At the end: one commit with the docs you changed. Answer with JSON only: "
+              '{"closed": ["B12", ...], "changed": ["B28: text updated, …", ...], '
+              '"notes": "one or two sentences for the owner, in the language of the docs"}']
+    return "\n".join(lines)
+
+
+def autonomous_prompt(t: dict) -> str:
+    tid = t["id"]
+    return "\n".join([
+        f"Do ticket {tid} («{t['title']}») in the project in this directory, started by agentdrop's dispatcher. "
+        "The owner marked it [autonomous]: you may do it without asking.",
+        "Read AGENTS.md, docs/STATE.md and the ticket in docs/TODO.md first and follow the project's charter.",
+        "", HANDS_OFF, "",
+        f"1. `agentdrop claim {tid} --session dispatcher`. If it is refused, stop.",
+        "2. Do the work and commit it.",
+        f"3. `agentdrop accept {tid}`. Exit 1: fix what it printed and run it again. Exit 3: stop, the ticket "
+        "went to the owner. Exit 0: accepted.",
+        f"4. Finish as the charter says: LOG entry (say that deploying waits for the owner, if the project deploys), "
+        f"STATE if the picture changed, remove the ticket from TODO, commit, `agentdrop release {tid} --session "
+        "dispatcher`. Release it also when you stop halfway.",
+        "Answer in one or two sentences: what happened and the exit code of the last `agentdrop accept`.",
+    ])
+
+
+def run_worker(root: Path, cfg: dict, kind: str, prompt: str, minutes: float, schema: dict | None = None) -> dict:
+    """One headless worker session, recorded in docs/.runs/dispatch.json like an acceptance step."""
+    import shlex
+    runf = root / RUNS / "dispatch.json"
+    run = load_run(runf)
+    run.setdefault("steps", [])
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
+    out = root / RUNS / "dispatch" / f"{stamp}-{kind}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    (out.parent / f"{stamp}-{kind}.prompt.md").write_text(prompt, encoding="utf-8")
+    cmd = shlex.split(os.path.expanduser(cfg.get("worker", WORKER)))
+    if Path(cmd[0]).name == "claude" and "--output-format" not in cmd:
+        cmd += ["--output-format", "json"] + (["--json-schema", json.dumps(schema)] if schema else [])
+    step = run_step(root, runf, run, {"step": kind}, cmd, out, minutes * 60, stdin=prompt)
+    text = (root / step["log"]).read_text(encoding="utf-8", errors="replace")
+    try:
+        env = json.loads(text)
+    except ValueError:
+        env = {}
+    res = env.get("structured_output") if isinstance(env, dict) else None
+    if not isinstance(res, dict):
+        m = re.search(r"\{.*\}", env.get("result", "") if isinstance(env, dict) else text, re.S)
+        try:
+            res = json.loads(m.group(0)) if m and schema else {}
+        except ValueError:
+            res = {}
+        if not schema:
+            res = {"notes": clip(env.get("result", "") if isinstance(env, dict) else text, 400)}
+    res["exit"], res["log"] = step.get("exit"), step["log"]
+    if isinstance(env, dict) and env.get("total_cost_usd") is not None:
+        res["cost_usd"] = round(float(env["total_cost_usd"]), 2)
+    step.update({k: v for k, v in res.items() if k in ("closed", "changed", "notes", "cost_usd")})
+    save_run(runf, run)
+    return res
+
+
+def busy(root: Path, s: dict) -> str:
+    """Why the dispatcher leaves a project alone right now; empty when it may work there."""
+    claims = [c for c in s["running"]["claims"] if not c["stale"]]
+    if claims:
+        return ", ".join(f"{c.get('ticket')} ({c.get('agent', '')})" for c in claims)
+    if s["running"]["unclaimed_active_sessions"]:
+        return f"{s['running']['unclaimed_active_sessions']} active session(s)"
+    run = load_run(root / RUNS / "dispatch.json")
+    live = [st for st in run.get("steps", []) if "ended" not in st and pid_alive(str(st.get("pid", "")))]
+    return f"dispatcher still running ({live[0]['step']})" if live else ""
+
+
+def dispatch_state() -> dict:
+    try:
+        st = json.loads(DISPATCH_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        st = {}
+    today = dt.date.today().isoformat()
+    if st.get("day") != today:
+        st = {"day": today, "sent": 0, "runs": st.get("runs", {})}
+    return st
+
+
+def dispatch_one(root: Path, cfg: dict, dry: bool, log) -> None:
+    s = collect_status(root)
+    why = busy(root, s)
+    if why:
+        log(f"{root.name}: someone is working there ({why}), only the brief")
+        return
+    turn = len(s["waiting"]["your_turn"])
+    if dry:
+        auto = [t["id"] for t in s["next"]["tickets"] + s["next"]["rest"] if AUTONOMOUS_RE.search(ticket_text(root, t["id"]))]
+        log(f"{root.name}: would tidy ({turn} answered by the owner, {len(s['next']['tickets'])} next)"
+            + (f", then do {auto[0]}" if auto else ""))
+        return
+    claim = root / CLAIMS / "TIDY.json"
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    if not (claim.parent / ".gitignore").exists():
+        (claim.parent / ".gitignore").write_text("# agentdrop claims: local to this machine, never committed\n*\n",
+                                                 encoding="utf-8")
+    claim.write_text(json.dumps({"ticket": "TIDY", "title": "утренний разбор" if s["ru"] else "morning tidy",
+                                 "session": "dispatcher", "agent": "dispatcher", "host": platform.node(),
+                                 "started": dt.datetime.now().astimezone().isoformat(timespec="seconds")},
+                                ensure_ascii=False), encoding="utf-8")
+    try:
+        r = run_worker(root, cfg, "tidy", tidy_prompt(s), float(cfg.get("tidy_timeout_min", 30)), TIDY_SCHEMA)
+    finally:
+        claim.unlink(missing_ok=True)
+    log(f"{root.name}: tidy exit {r['exit']}, closed {', '.join(r.get('closed') or []) or 'nothing'}"
+        + (f", changed {len(r.get('changed') or [])}" if r.get("changed") else "")
+        + (f", ${r['cost_usd']}" if "cost_usd" in r else "") + f" — {clip(r.get('notes', ''), 200)}")
+    s = collect_status(root)
+    auto = next((t for t in s["next"]["tickets"] + s["next"]["rest"]
+                 if AUTONOMOUS_RE.search(ticket_text(root, t["id"]))), None)
+    if auto and not busy(root, s):
+        r = run_worker(root, cfg, f"auto-{auto['id']}", autonomous_prompt(auto),
+                       float(cfg.get("autonomous_timeout_min", 120)))
+        log(f"{root.name}: {auto['id']} exit {r['exit']}" + (f", ${r['cost_usd']}" if "cost_usd" in r else "")
+            + f" — {clip(r.get('notes', ''), 200)}")
+
+
+def dispatch_brief(root: Path, cfg: dict, env: dict, dst: dict, cap: int, log) -> None:
+    s = collect_status(root)
+    left = cap - dst["sent"]
+    with tg_lock():
+        st = tg_state()
+        msgs = plan_brief(root, s, st, cfg)
+        if not msgs:
+            log(f"{root.name}: nothing new for the owner")
+            return
+        if left < 1:
+            log(f"{root.name}: {len(msgs)} message(s) held back, today's {cap} are used")
+            return
+        msgs = msgs[:left]
+        deliver(msgs, st, env, cfg)
+    mark_seen(root)
+    dst["sent"] += len(msgs)
+    log(f"{root.name}: brief, {len(msgs)} message(s)")
+
+
+def cmd_dispatch(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="agentdrop dispatch",
+                                description="The morning run: in each project nobody is working in, a headless "
+                                            "tidy pass acts on the owner's answers and closes what is done, one "
+                                            "[autonomous] ticket goes through `accept`, then the brief goes out.")
+    p.add_argument("--dry-run", action="store_true", help="Say what would run, run nothing, send nothing")
+    p.add_argument("--now", action="store_true", help="Run even in quiet hours (23:00–09:00)")
+    p.add_argument("--no-work", action="store_true", help="Only the briefs, no worker sessions")
+    p.add_argument("--project", action="append", help="Only this project (repeatable)")
+    p.add_argument("--service", choices=("on", "off", "status"), help=f"macOS: run it every day at "
+                   f"{DISPATCH_TIME[0]:02d}:{DISPATCH_TIME[1]:02d}")
+    a = p.parse_args(argv)
+    if a.service:
+        return launchd(DISPATCH_SERVICE, ["dispatch"], a.service, DISPATCH_LOG,
+                       {"StartCalendarInterval": {"Hour": DISPATCH_TIME[0], "Minute": DISPATCH_TIME[1]}},
+                       "dispatcher")
+    cfg, env = load_config(), tg_env()
+    hour = dt.datetime.now().hour
+    if not (a.now or a.dry_run) and (hour >= QUIET_HOURS[0] or hour < QUIET_HOURS[1]):
+        print("· quiet hours, nothing done (--now to run anyway)")
+        return 0
+    roots = [find_root(Path(os.path.expanduser(x))) for x in a.project] if a.project else dispatch_projects(cfg)
+    if not roots:
+        print(f"agentdrop dispatch: no projects. Put `projects = ~/path/a, ~/path/b` in {CONFIG}", file=sys.stderr)
+        return 2
+
+    def log(msg: str) -> None:
+        line = f"{dt.datetime.now():%d.%m %H:%M} {msg}"
+        print(line, flush=True)
+        if not a.dry_run:
+            STATE.mkdir(parents=True, exist_ok=True)
+            with DISPATCH_LOG.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+
+    if env and not a.dry_run:
+        for note in sync_replies(wait=True):   # the owner's answers into the docs before anyone reads them
+            log(note)
+    dst = dispatch_state()
+    for root in roots:
+        if not a.no_work:
+            try:
+                dispatch_one(root, cfg, a.dry_run, log)
+            except (OSError, subprocess.SubprocessError) as e:
+                log(f"! {root.name}: {e}")
+        if a.dry_run or not (env or cfg.get("notify")):
+            continue
+        try:
+            dispatch_brief(root, cfg, env, dst, int(cfg.get("day_cap", DAY_CAP)), log)
+        except TgError as e:
+            log(f"! {root.name}: brief not sent: {e}")
+        dst["runs"][str(root)] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        DISPATCH_STATE.write_text(json.dumps(dst, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return 0
+
+
 COMMANDS = {"status": cmd_status, "claim": cmd_claim, "release": cmd_release, "brief": cmd_brief,
-            "replies": cmd_replies, "accept": cmd_accept}
+            "replies": cmd_replies, "accept": cmd_accept,
+            "dispatch": cmd_dispatch}
 
 
 def main() -> None:

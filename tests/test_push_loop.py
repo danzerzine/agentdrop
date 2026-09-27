@@ -591,5 +591,84 @@ class Accept(WithTelegram):
         self.assertEqual(self.prompts(), [])
 
 
+WORKER = """import json, os, sys
+home = os.path.dirname(os.path.abspath(__file__))
+prompt = sys.stdin.read()
+n = len([f for f in os.listdir(home) if f.startswith('work')])
+open(os.path.join(home, f'work{n}.txt'), 'w').write(prompt)
+if prompt.startswith('Morning tidy'):
+    with open('docs/LOG.md', 'a') as f:
+        f.write('\\n## 27.09 — tidy closed B11\\n\\n- Done long ago.\\n')
+    print(json.dumps({'type': 'result', 'total_cost_usd': 0.3, 'structured_output': {
+        'closed': ['B11'], 'changed': [], 'notes': 'closed one'}}))
+else:
+    print(json.dumps({'type': 'result', 'result': 'accepted, exit 0'}))
+"""
+
+
+class Dispatch(WithTelegram):
+    def setUp(self):
+        super().setUp()
+        (self.home / "worker.py").write_text(WORKER, encoding="utf-8")
+        with open(self.home / ".agentdrop" / "config", "a", encoding="utf-8") as f:
+            f.write(f"worker = {sys.executable} {self.home / 'worker.py'}\nprojects = {self.root}\n")
+
+    def works(self):
+        return [p.read_text(encoding="utf-8") for p in sorted(self.home.glob("work*.txt"))]
+
+    def test_owner_answer_under_a_ticket_is_the_agents_turn(self):
+        todo = self.root / "docs" / "TODO.md"
+        todo.write_text(TODO.replace("Repro on iOS 18.", "Repro on iOS 18.\n\n  > **Owner, 27.09 06:21:** it works now, close it"),
+                        encoding="utf-8")
+        (self.home / ".agentdrop" / "config").write_text("owner = Owner\n", encoding="utf-8")
+        s = self.status()
+        self.assertNotIn("B7", [t["id"] for t in s["next"]["tickets"]])
+        self.assertIn("Fix login on Safari (B7)", s["waiting"]["your_turn"])
+
+    def test_tidy_then_brief(self):
+        r = self.run_ad("dispatch", "--now")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        [prompt] = self.works()
+        self.assertIn("B7: Fix login on Safari", prompt)
+        self.assertIn("Never deploy", prompt)
+        self.assertIn("closed B11", r.stdout)
+        self.assertFalse((self.root / "docs" / ".claims" / "TIDY.json").exists())
+        head = self.tg.sent[0]["text"]
+        self.assertIn("tidy closed B11", head)   # what the tidy pass did reaches the owner in the brief
+        self.assertTrue((self.home / ".agentdrop" / "dispatch.log").is_file())
+
+    def test_a_claimed_project_gets_only_the_brief(self):
+        self.assertEqual(self.run_ad("claim", "B9", session="s1").returncode, 0)
+        r = self.run_ad("dispatch", "--now")
+        self.assertIn("someone is working there (B9", r.stdout)
+        self.assertEqual(self.works(), [])
+        self.assertTrue(self.tg.sent)
+
+    def test_autonomous_ticket_goes_through_accept(self):
+        todo = self.root / "docs" / "TODO.md"
+        todo.write_text(TODO.replace("**B10. Dark theme.**", "**B10. Dark theme.** [autonomous]"), encoding="utf-8")
+        r = self.run_ad("dispatch", "--now")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        tidy, auto = self.works()
+        self.assertIn("agentdrop claim B10 --session dispatcher", auto)
+        self.assertIn("agentdrop accept B10", auto)
+        self.assertIn("B10 exit 0", r.stdout)
+
+    def test_daily_cap(self):
+        with open(self.home / ".agentdrop" / "config", "a", encoding="utf-8") as f:
+            f.write("day_cap = 2\n")
+        self.run_ad("dispatch", "--now", "--no-work")
+        self.assertEqual(len(self.tg.sent), 2)
+        r = self.run_ad("dispatch", "--now", "--no-work", "--project", str(self.root))
+        self.assertEqual(len(self.tg.sent), 2)
+        self.assertIn("held back", r.stdout)
+
+    def test_quiet_hours_and_dry_run_do_nothing(self):
+        r = self.run_ad("dispatch", "--dry-run")
+        self.assertIn("would tidy", r.stdout)
+        self.assertEqual(self.works(), [])
+        self.assertEqual(self.tg.sent, [])
+
+
 if __name__ == "__main__":
     unittest.main()
