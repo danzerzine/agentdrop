@@ -3537,6 +3537,7 @@ def cmd_dispatch(argv: list[str]) -> int:
 # that outlives the terminal and the chat that started it. Python picks the tickets; the model does them.
 
 PACK_WORKER = "claude -p --permission-mode bypassPermissions"
+PACK_EFFORT = "high"                 # research passes judged by a fresh judge: low effort came back rejected
 PACK_DIR = RUNS / "pack"             # <stamp>.prompt.md, .jsonl (the session), .err, .pid
 
 
@@ -3627,10 +3628,13 @@ def cmd_pack(argv: list[str]) -> int:
                                                     "(default 1); the budget is split evenly")
     p.add_argument("--only", help="These tickets instead of the frontier, in this order: B6,B108")
     p.add_argument("--budget", type=float, default=30, help="Dollar cap for the whole run (default 30)")
+    p.add_argument("--effort", help=f"Effort of the sessions (low … max; default `pack_effort` in the config, "
+                                     f"else {PACK_EFFORT}); subagents keep their own model settings")
     p.add_argument("--run", action="store_true", help="Start it now, detached; prints where it writes")
     p.add_argument("--last", action="store_true", help="How the latest run in this project is doing, or its brief")
     a = p.parse_args(argv)
     root, cfg = find_root(Path(os.path.expanduser(a.path))), load_config()
+    effort = a.effort or cfg.get("pack_effort", PACK_EFFORT)
     prev = last_pack(root)
     if a.last:
         if not prev:
@@ -3684,13 +3688,13 @@ def cmd_pack(argv: list[str]) -> int:
         cmd = shlex.split(os.path.expanduser(cfg.get("pack_worker", PACK_WORKER)))
         if Path(cmd[0]).name == "claude":
             cmd += ["--output-format", "stream-json", "--verbose", "--max-budget-usd", f"{budget:g}",
-                    "-n", f"pack-{root.name}-{name_k}"]
+                    "--effort", effort, "-n", f"pack-{root.name}-{name_k}"]
         with pf.open(encoding="utf-8") as inp, (d / f"{name_k}.jsonl").open("w") as out, \
                 (d / f"{name_k}.err").open("w") as err:
             proc = subprocess.Popen(cmd, cwd=root, stdin=inp, stdout=out, stderr=err, **detach)
         (d / f"{name_k}.pid").write_text(str(proc.pid))
         print(f"· started{f' lane {k}' if j > 1 else ''}: {', '.join(t['id'] for t in lane)}, cap ${budget:g}, "
-              f"pid {proc.pid}")
+              f"effort {effort}, pid {proc.pid}")
     print(f"· sessions in {d}; progress and the briefs: `agentdrop pack --last`")
     return 0
 
