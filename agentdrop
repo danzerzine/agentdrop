@@ -3544,24 +3544,34 @@ def pack_tickets(s: dict, n: int) -> list[dict]:
     return [t for t in s["next"]["tickets"] + s["next"]["rest"] if t.get("mode") != "human"][:n]
 
 
-def pack_prompt(s: dict, tickets: list[dict], budget: float, name: str) -> str:
+def pack_prompt(s: dict, tickets: list[dict], budget: float, name: str,
+                lane: tuple[int, int] = (1, 1), others: list[dict] | None = None) -> str:
+    k, n = lane
     lines = [f"Autonomous run in the project in this directory ({s['project']}), started by `agentdrop pack` "
              f"at {name}'s request. Nobody is watching: you can't ask {name} anything. Anything that needs their "
              "decision or other people goes to docs/QUESTIONS.md as its own item (the question, the options, your "
              "pick); then carry on with a reversible default.", "",
              "First read AGENTS.md, docs/STATE.md, docs/TODO.md and docs/PITFALLS.md, and run `agentdrop status`. "
-             "Skip a ticket another session has claimed.", "",
-             "The tickets, in this order; each is its own pass by the charter (claim → work → commit → "
-             "`agentdrop accept` → LOG, TODO, release):"]
-    for k, t in enumerate(tickets, 1):
-        lines.append(f"{k}. {t['title']} ({t['id']}, {t['priority']})" + (f". Why: {t['why']}" if t["why"] else ""))
+             "Skip a ticket another session has claimed.", ""]
+    if n > 1:
+        lines += [f"You are one of {n} sessions of this run working in this folder at the same time (lane {k}). "
+                  "The others do: " + "; ".join(f"{t['title']} ({t['id']})" for t in others or []) + ". Don't touch "
+                  "their tickets or files. The docs (TODO.md, LOG.md, STATE.md, QUESTIONS.md) are shared: edit only "
+                  "your own items, never revert another session's edits; committing a shared doc that also holds "
+                  "their uncommitted lines is fine. If `agentdrop accept` or git trips over files another session "
+                  "changed and hasn't committed yet, don't commit or undo them: wait a few minutes and run it "
+                  "again.", ""]
+    lines += ["The tickets, in this order; each is its own pass by the charter (claim → work → commit → "
+              "`agentdrop accept` → LOG, TODO, release):"]
+    for i, t in enumerate(tickets, 1):
+        lines.append(f"{i}. {t['title']} ({t['id']}, {t['priority']})" + (f". Why: {t['why']}" if t["why"] else ""))
     lines += ["When a ticket runs into missing data or access, write what is missing under it and go on. If time "
-              "and budget remain, take the next tickets from «Next up» in `agentdrop status` the same way, "
-              "skipping those marked [with owner] / [с человеком].", "",
+              "and budget remain, take the next tickets from «Next up» in `agentdrop status` the same way (claim "
+              "first; refused means another session has it), skipping those marked [with owner] / [с человеком].", "",
               "`agentdrop accept` takes up to half an hour: run it in the background and go on to the next ticket, "
               "but wait for every accept before the final brief. Exit 1: fix what it printed and run it again. "
               f"Exit 3: leave the ticket to {name} and go on.", "",
-              f"Budget: ${budget:g} for the whole session. Do bulk work (labelling, crawls, checking many items) with "
+              f"Budget: ${budget:g} for this session. Do bulk work (labelling, crawls, checking many items) with "
               "scripts, local models or cheaper subagents; spend the strongest model only on spot checks of "
               "disputed cases. Tell every subagent not to start subagents of its own: nested agents burn the "
               "budget unseen.", "",
@@ -3574,11 +3584,8 @@ def pack_prompt(s: dict, tickets: list[dict], budget: float, name: str) -> str:
     return "\n".join(lines)
 
 
-def last_pack(root: Path) -> dict | None:
-    runs = sorted((root / PACK_DIR).glob("*.jsonl"))
-    if not runs:
-        return None
-    f = runs[-1]
+def pack_lane(f: Path) -> dict:
+    """One session of a run: `<stamp>.jsonl`, or `<stamp>-<lane>.jsonl` when the run went in parallel."""
     pid = f.with_suffix(".pid")
     text = f.read_text(encoding="utf-8", errors="replace")
     res = claude_result(text)
@@ -3600,15 +3607,26 @@ def last_pack(root: Path) -> dict | None:
     return out
 
 
+def last_pack(root: Path) -> list[dict]:
+    """Every session of the latest run in this project (one, or one per lane)."""
+    runs = sorted((root / PACK_DIR).glob("*.jsonl"))
+    if not runs:
+        return []
+    stamp = runs[-1].stem[:13]   # 20260927-1307
+    return [pack_lane(f) for f in runs if f.stem[:13] == stamp]
+
+
 def cmd_pack(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="agentdrop pack",
                                 description="A dense autonomous run: the frontier tickets (not waiting for anyone "
                                             "or for another open ticket, not marked [with owner]) in priority order "
-                                            "as one prompt; --run starts it as a headless session in the background.")
+                                            "as one prompt; --run starts it as headless sessions in the background.")
     p.add_argument("path", nargs="?", default=".", help="Project directory (default: here)")
     p.add_argument("-n", type=int, default=5, help="How many tickets (default 5)")
+    p.add_argument("-j", type=int, default=1, help="Sessions working at once, the tickets dealt between them "
+                                                    "(default 1); the budget is split evenly")
     p.add_argument("--only", help="These tickets instead of the frontier, in this order: B6,B108")
-    p.add_argument("--budget", type=float, default=30, help="Dollar cap for the session (default 30)")
+    p.add_argument("--budget", type=float, default=30, help="Dollar cap for the whole run (default 30)")
     p.add_argument("--run", action="store_true", help="Start it now, detached; prints where it writes")
     p.add_argument("--last", action="store_true", help="How the latest run in this project is doing, or its brief")
     a = p.parse_args(argv)
@@ -3618,10 +3636,12 @@ def cmd_pack(argv: list[str]) -> int:
         if not prev:
             print("· no pack runs here yet")
             return 1
-        state = "running" if prev["running"] else "finished" if "result" in prev else "stopped without a result"
-        print(f"{prev['stamp']}: {state}" + (f", ${prev['cost_usd']:.2f}, {prev['minutes']} min"
-                                             if prev.get("cost_usd") is not None else "") + f" — {prev['log']}")
-        print(prev.get("result") or prev.get("last", ""))
+        for i, lane in enumerate(prev):
+            state = "running" if lane["running"] else "finished" if "result" in lane else "stopped without a result"
+            print(("\n" if i else "") + f"{lane['stamp']}: {state}"
+                  + (f", ${lane['cost_usd']:.2f}, {lane['minutes']} min" if lane.get("cost_usd") is not None else "")
+                  + f" — {lane['log']}")
+            print(lane.get("result") or lane.get("last", ""))
         return 0
     s = collect_status(root)
     if a.only:
@@ -3637,32 +3657,41 @@ def cmd_pack(argv: list[str]) -> int:
     if not tickets:
         print("· nothing on the frontier: every open ticket waits for someone or for another ticket")
         return 1
-    prompt = pack_prompt(s, tickets, a.budget, owner_name(cfg, s["ru"]))
+    j = max(1, min(a.j, len(tickets)))
+    lanes = [tickets[k::j] for k in range(j)]   # dealt in priority order: lane 1 gets the 1st, (j+1)th, …
+    budget = a.budget / j
+    name = owner_name(cfg, s["ru"])
+    prompts = [pack_prompt(s, lane, budget, name, (k + 1, j), [t for t in tickets if t not in lane])
+               for k, lane in enumerate(lanes)]
     if not a.run:
-        print(prompt)
+        print("\n\n---\n\n".join(prompts))
         return 0
-    if prev and prev["running"]:
-        print(f"agentdrop pack: a run is still going ({prev['stamp']}); `agentdrop pack --last`", file=sys.stderr)
+    live = [lane["stamp"] for lane in prev if lane["running"]]
+    if live:
+        print(f"agentdrop pack: a run is still going ({', '.join(live)}); `agentdrop pack --last`", file=sys.stderr)
         return 2
     import shlex
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
     d = root / PACK_DIR
     d.mkdir(parents=True, exist_ok=True)
-    pf = d / f"{stamp}.prompt.md"
-    pf.write_text(prompt, encoding="utf-8")
-    cmd = shlex.split(os.path.expanduser(cfg.get("pack_worker", PACK_WORKER)))
-    if Path(cmd[0]).name == "claude":
-        cmd += ["--output-format", "stream-json", "--verbose", "--max-budget-usd", f"{a.budget:g}",
-                "-n", f"pack-{root.name}-{stamp}"]
     # its own session/process group: closing the chat or the terminal that started it doesn't stop it
     detach = ({"creationflags": 0x00000008 | 0x00000200} if platform.system() == "Windows"
               else {"start_new_session": True})
-    with pf.open(encoding="utf-8") as inp, (d / f"{stamp}.jsonl").open("w") as out, \
-            (d / f"{stamp}.err").open("w") as err:
-        proc = subprocess.Popen(cmd, cwd=root, stdin=inp, stdout=out, stderr=err, **detach)
-    (d / f"{stamp}.pid").write_text(str(proc.pid))
-    print(f"· started: {', '.join(t['id'] for t in tickets)}, cap ${a.budget:g}, pid {proc.pid}")
-    print(f"· session {d / f'{stamp}.jsonl'}; progress and the brief: `agentdrop pack --last`")
+    for k, (lane, prompt) in enumerate(zip(lanes, prompts), 1):
+        name_k = stamp if j == 1 else f"{stamp}-{k}"
+        pf = d / f"{name_k}.prompt.md"
+        pf.write_text(prompt, encoding="utf-8")
+        cmd = shlex.split(os.path.expanduser(cfg.get("pack_worker", PACK_WORKER)))
+        if Path(cmd[0]).name == "claude":
+            cmd += ["--output-format", "stream-json", "--verbose", "--max-budget-usd", f"{budget:g}",
+                    "-n", f"pack-{root.name}-{name_k}"]
+        with pf.open(encoding="utf-8") as inp, (d / f"{name_k}.jsonl").open("w") as out, \
+                (d / f"{name_k}.err").open("w") as err:
+            proc = subprocess.Popen(cmd, cwd=root, stdin=inp, stdout=out, stderr=err, **detach)
+        (d / f"{name_k}.pid").write_text(str(proc.pid))
+        print(f"· started{f' lane {k}' if j > 1 else ''}: {', '.join(t['id'] for t in lane)}, cap ${budget:g}, "
+              f"pid {proc.pid}")
+    print(f"· sessions in {d}; progress and the briefs: `agentdrop pack --last`")
     return 0
 
 

@@ -153,6 +153,17 @@ class PushLoop(Project):
         self.assertLess(only.index("(B11"), only.index("(B7"))
         self.assertEqual(self.run_ad("pack", "--only", "B99").returncode, 2)
 
+    def test_pack_deals_tickets_between_parallel_sessions(self):
+        r = self.run_ad("pack", "-j", "2", "--budget", "20")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        first, second = r.stdout.split("\n\n---\n\n")
+        self.assertIn("1. Fix login on Safari (B7", first)
+        self.assertIn("2. Dark theme (B10", first)   # dealt: B7, B10, … to lane 1; B9, B11 to lane 2
+        self.assertIn("1. export to CSV (B9", second)
+        self.assertIn("lane 2", second)
+        self.assertIn("The others do: Fix login on Safari (B7)", second)
+        self.assertIn("Budget: $10 for this session", second)
+
     def test_pack_last_reads_the_run(self):
         self.assertEqual(self.run_ad("pack", "--last").returncode, 1)
         runs = self.root / "docs" / ".runs" / "pack"
