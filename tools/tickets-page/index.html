@@ -50,7 +50,7 @@ aside { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); align
 .triage { margin: 0; padding: 10px 14px; border-radius: 8px; font-weight: 500; background: var(--quote); }
 .triage.t-blocker { background: var(--owner-bg); color: var(--owner); }
 .triage.t-route { background: var(--others-bg); }
-.s-blocker { color: var(--owner); background: var(--owner-bg); } .s-route, .s-later { color: var(--others); background: var(--others-bg); }
+.s-blocker { color: var(--owner); background: var(--owner-bg); } .s-route, .s-later, .s-done { color: var(--others); background: var(--others-bg); }
 .group h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); display: flex; gap: 6px; }
 .group h3 span { font-variant-numeric: tabular-nums; }
 .row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; padding: 6px 8px; border-radius: 8px; color: inherit; text-decoration: none; }
@@ -116,7 +116,7 @@ code { font-family: var(--mono); font-size: .86em; background: var(--quote); bor
 const STATES = [
   ["blocker", "Стопорит работу"], ["owner", "Ждёт твоего решения"], ["route", "Передать другим людям"],
   ["turn", "Ты ответил, ход агента"], ["running", "В работе"], ["next", "Дальше"], ["others", "Ждёт других"],
-  ["later", "Отложено и справочно"],
+  ["later", "Отложено и справочно"], ["done", "Сделано"],
 ];
 const LABEL = Object.fromEntries(STATES);
 let data = { projects: [], items: [] }, project = "all", triage = {};
@@ -170,7 +170,7 @@ function renderList() {
   const html = STATES.map(([st, label]) => {
     const rows = pick.filter(i => tierOf(i) === st);
     if (!rows.length) return "";
-    const open = st !== "later" && st !== "next" || q;
+    const open = !["later", "next", "done"].includes(st) || q;
     return `<details class="group g-${st}"${open ? " open" : ""}><summary><h3>${label} <span>${rows.length}</span></h3></summary>` + rows.map(i =>
       `<a class="row${i.id === cur ? " on" : ""}" href="#${i.id}"><span class="code">${esc(i.code || "вопрос")}</span>` +
       `<span class="t">${project === "all" ? `<span style="color:var(--ink-3)">${esc(projLabel(i.project))} · </span>` : ""}${esc(i.title)}</span>` +

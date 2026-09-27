@@ -3577,6 +3577,20 @@ def collect_items(root: Path, cfg: dict) -> tuple[dict, list[dict]]:
                       "priority": "", "section": "QUESTIONS", "state": st, "why": "", "waits": "",
                       "pick": x.get("pick", ""), "body": body, "thread": thread,
                       "images": x.get("images", []), "doc": "QUESTIONS.md"})
+    have = {i["code"] for i in items}
+    for head, body in re.findall(r"(?m)^## (.+)\n((?:(?!## ).*\n?)*)", doc(root, "LOG.md")):
+        m = re.match(r"(\d{1,2}\.\d{2})\s*[—-]\s*(.*)", head.strip())
+        if not m:   # closed tickets, so a link from another ticket opens something
+            continue
+        title = re.sub(r"^B\d+\b[\s:—-]*|\s*\((?:B\d+[,\s]*)+\)", "", m.group(2)).strip()
+        for code in re.findall(r"\bB\d+\b", m.group(2)):
+            if code in have:
+                continue
+            have.add(code)
+            items.append({"id": f"{prefix}-{code}", "project": prefix, "code": code, "kind": "ticket",
+                          "title": (title[:1].upper() + title[1:]) or code, "priority": "", "section": "LOG", "state": "done",
+                          "why": "", "waits": "", "body": f"Сделано {m.group(1)}.\n\n{body.strip()}",
+                          "thread": [], "images": [], "doc": "LOG.md"})
     return proj, items
 
 
