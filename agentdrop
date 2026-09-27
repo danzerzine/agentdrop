@@ -3570,7 +3570,10 @@ def pack_prompt(s: dict, tickets: list[dict], budget: float, name: str,
               "and budget remain, take the next tickets from «Next up» in `agentdrop status` the same way (claim "
               "first; refused means another session has it), skipping those marked [with owner] / [с человеком].", "",
               "`agentdrop accept` takes up to half an hour: run it in the background and go on to the next ticket, "
-              "but wait for every accept before the final brief. Exit 1: fix what it printed and run it again. "
+              "but wait for every accept before the final brief: this session ends when you stop answering, and the "
+              "background jobs die with it, so before the brief block on them in the foreground (a loop that sleeps "
+              "until the accept log shows its exit code) rather than saying you will wait. Exit 1: fix what it "
+              "printed and run it again. "
               f"Exit 3: leave the ticket to {name} and go on.", "",
               f"Budget: ${budget:g} for this session. Do bulk work (labelling, crawls, checking many items) with "
               "scripts, local models or cheaper subagents; spend the strongest model only on spot checks of "

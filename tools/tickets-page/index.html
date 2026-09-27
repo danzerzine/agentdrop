@@ -265,6 +265,7 @@ function renderList() {
 
 function renderItem() {
   const id = location.hash.slice(1);
+  if (window.panelView && window.panelView(id)) return;   // the local panel's own views (inbox, agents)
   const dkey = id.startsWith("doc-") && Object.keys(docs.files).find(k => docId(k) === id);
   if (dkey) return renderDoc(dkey);
   const it = data.items.find(i => i.id === id);
@@ -305,6 +306,7 @@ document.addEventListener("selectionchange", () => {
     lastRange = sel.getRangeAt(0).cloneRange();
 });
 function wireAsk() {
+  if (window.panelAsk) return window.panelAsk();   // the local panel answers through its inbox
   const btn = document.getElementById("ask");
   if (!btn) return;
   lastRange = null;
