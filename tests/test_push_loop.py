@@ -519,7 +519,16 @@ class Accept(WithTelegram):
         self.assertEqual(run["state"], "checks_failed")
         self.assertEqual(self.tg.sent, [])
 
+    def test_pass_is_not_messaged_by_default(self):
+        self.verdicts("PASS")
+        (self.root / "ok.flag").write_text("", encoding="utf-8")
+        r = self.run_ad("accept", "B7")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.tg.sent, [])   # a PASS shows on the board and in the brief, not on the phone
+
     def test_pass_tells_the_owner_once(self):
+        with open(self.home / ".agentdrop" / "config", "a", encoding="utf-8") as f:
+            f.write("accept_tell_pass = yes\n")
         self.verdicts("PASS")
         (self.root / "ok.flag").write_text("", encoding="utf-8")
         r = self.run_ad("accept", "B7")

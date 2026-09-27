@@ -3166,7 +3166,10 @@ def cmd_accept(argv: list[str]) -> int:
     fresh_verdict = not (done and not a.fresh)
     run["state"] = "accepted" if v["verdict"] == "PASS" else "owner"
     save_run(runf, run)
-    if fresh_verdict or run.get("told") != fp:
+    # a PASS shows up on the board and in the pass-end brief; the owner is messaged only when the ticket needs them
+    # (accept_tell_pass = yes brings the PASS messages back)
+    tell = v["verdict"] != "PASS" or str(cfg.get("accept_tell_pass", "")).lower() in ("1", "yes", "true")
+    if tell and (fresh_verdict or run.get("told") != fp):
         print(notify_owner(root, cfg, accept_message(root, cfg, run, v, ru), ru))
         run["told"] = fp
         save_run(runf, run)
