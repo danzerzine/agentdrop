@@ -597,6 +597,9 @@ prompt = sys.stdin.read()
 n = len([f for f in os.listdir(home) if f.startswith('work')])
 open(os.path.join(home, f'work{n}.txt'), 'w').write(prompt)
 if prompt.startswith('Morning tidy'):
+    print(json.dumps({'type': 'assistant', 'message': {'content': [
+        {'type': 'tool_use', 'name': 'Bash', 'input': {'command': 'git log', 'description': 'Look at recent commits'}}]}}),
+        flush=True)
     with open('docs/LOG.md', 'a') as f:
         f.write('\\n## 27.09 — tidy closed B11\\n\\n- Done long ago.\\n')
     print(json.dumps({'type': 'result', 'total_cost_usd': 0.3, 'structured_output': {
@@ -632,6 +635,7 @@ class Dispatch(WithTelegram):
         self.assertIn("B7: Fix login on Safari", prompt)
         self.assertIn("Never deploy", prompt)
         self.assertIn("closed B11", r.stdout)
+        self.assertIn("Bash: Look at recent commits", r.stdout)   # each step shows as it happens
         self.assertFalse((self.root / "docs" / ".claims" / "TIDY.json").exists())
         head = self.tg.sent[0]["text"]
         self.assertIn("tidy closed B11", head)   # what the tidy pass did reaches the owner in the brief

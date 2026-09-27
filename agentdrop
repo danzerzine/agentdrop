@@ -2760,10 +2760,7 @@ def save_run(path: Path, run: dict) -> None:
 
 def parse_verdict(out: str) -> dict | None:
     """The judge's JSON: Claude's --output-format json envelope, or a bare object anywhere in the text."""
-    try:
-        env = json.loads(out)
-    except ValueError:
-        env = None
+    env = claude_result(out)
     if isinstance(env, dict):
         if isinstance(env.get("structured_output"), dict):
             env = env["structured_output"]
@@ -2782,9 +2779,92 @@ def parse_verdict(out: str) -> dict | None:
     return None
 
 
+def claude_event(ev: dict) -> str:
+    """A Claude stream-json event in a few words: what the session is doing now."""
+    if ev.get("type") != "assistant":
+        return ""
+    for c in reversed(ev.get("message", {}).get("content") or []):
+        if c.get("type") == "tool_use" and c.get("name") != "StructuredOutput":
+            i = c.get("input") or {}
+            what = next((str(i[k]) for k in ("description", "command", "file_path", "pattern", "path", "url")
+                         if i.get(k)), "")
+            return f"{c.get('name')}: {what}".strip(": ")
+        if c.get("type") == "text" and c.get("text", "").strip():
+            return "» " + c["text"].strip().splitlines()[0]
+    return ""
+
+
+def claude_result(text: str) -> dict | None:
+    """The final result of `claude -p`: the whole output (--output-format json) or its last
+    "result" line (stream-json)."""
+    try:
+        env = json.loads(text)
+        return env if isinstance(env, dict) else None
+    except ValueError:
+        pass
+    for line in reversed(text.splitlines()):
+        if line.startswith("{") and '"type":"result"' in line.replace(" ", ""):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+    return None
+
+
+class Progress:
+    """What a long step is doing. On a terminal: one status line redrawn in place (and every action
+    as its own line with --verbose); in a log: every action as a line."""
+    SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, label: str, verbose: bool = False):
+        import time
+        self.label, self.verbose, self.tty = label, verbose, sys.stdout.isatty()
+        self.start, self.last, self.steps, self.pos, self.buf, self.k = time.time(), "", 0, 0, "", 0
+
+    def read(self, path: Path) -> None:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                fh.seek(self.pos)
+                self.buf += fh.read()
+                self.pos = fh.tell()
+        except OSError:
+            return
+        *lines, self.buf = self.buf.split("\n")
+        for line in lines:
+            try:
+                what = claude_event(json.loads(line)) if line.startswith("{") else ""
+            except ValueError:
+                what = ""
+            if what:
+                self.steps += 1
+                self.last = what
+                if self.verbose or not self.tty:
+                    self.clear()
+                    print(f"  {dt.datetime.now():%H:%M:%S} {clip(what, 160)}", flush=True)
+
+    def draw(self) -> None:
+        if not self.tty:
+            return
+        import time
+        el = int(time.time() - self.start)
+        self.k += 1
+        line = f"{self.SPIN[self.k % len(self.SPIN)]} {self.label} · {el // 60}:{el % 60:02d}"
+        if self.steps:
+            line += f" · #{self.steps} {self.last}"
+        width = shutil.get_terminal_size((100, 20)).columns - 1
+        sys.stdout.write("\r\033[K" + line.replace("\n", " ")[:width])
+        sys.stdout.flush()
+
+    def clear(self) -> None:
+        if self.tty:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+
+
 def run_step(root: Path, runf: Path, run: dict, step: dict, cmd: str | list, out: Path,
-             timeout: float, stdin: str | None = None) -> dict:
+             timeout: float, stdin: str | None = None, progress: Progress | None = None) -> dict:
     """Start a step, record its pid before waiting on it, record how it ended."""
+    import time
     out.parent.mkdir(parents=True, exist_ok=True)
     step.update(started=dt.datetime.now().astimezone().isoformat(timespec="seconds"),
                 log=str(out.relative_to(root)), host=platform.node())
@@ -2797,13 +2877,29 @@ def run_step(root: Path, runf: Path, run: dict, step: dict, cmd: str | list, out
         step["pid"] = proc.pid
         run["steps"].append(step)
         save_run(runf, run)
+        if stdin is not None:   # the output goes to a file, so writing it all first can't deadlock
+            try:
+                proc.stdin.write(stdin)
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+        deadline = time.time() + timeout
         try:
-            proc.communicate(stdin, timeout=timeout)
-            step["exit"] = proc.returncode
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            step.update(exit=None, timeout=True)
+            while proc.poll() is None:
+                if time.time() > deadline:
+                    proc.kill()
+                    proc.wait()
+                    step.update(timeout=True)
+                    break
+                if progress:
+                    progress.read(out)
+                    progress.draw()
+                time.sleep(0.5)
+        finally:
+            if progress:
+                progress.read(out)
+                progress.clear()
+        step["exit"] = None if step.get("timeout") else proc.returncode
     step["ended"] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     save_run(runf, run)
     return step
@@ -2914,6 +3010,7 @@ def cmd_accept(argv: list[str]) -> int:
     p.add_argument("--root", default=".", help="Project directory (default: the current one)")
     p.add_argument("--base", help="Judge the change since this commit (default: where the claim started)")
     p.add_argument("--fresh", action="store_true", help="Run checks and the judge again even for the same tree")
+    p.add_argument("-v", "--verbose", action="store_true", help="Print every step of the judge, not only a status line")
     a = p.parse_args(argv)
     root, tid = find_root(Path(a.root)), ticket_id(a.ticket)
     ru, cfg = is_russian(root), load_config()
@@ -2987,7 +3084,7 @@ def cmd_accept(argv: list[str]) -> int:
             continue
         print(f"… {cmd}", flush=True)
         s = run_step(root, runf, run, {"step": "check", "cmd": cmd, "fp": fp}, cmd,
-                     logs / f"{n}-check{k}.log", timeout)
+                     logs / f"{n}-check{k}.log", timeout, progress=Progress(cmd, a.verbose))
         n += 1
         if s["exit"] != 0:
             run["state"] = "checks_failed"
@@ -3025,11 +3122,12 @@ def cmd_accept(argv: list[str]) -> int:
             if not any((d / ".claude" / "agents" / f"{cmd[k + 1]}.md").is_file() for d in (root, HOME)):
                 del cmd[k:k + 2]
         if Path(cmd[0]).name == "claude" and "--output-format" not in cmd:
-            cmd += ["--output-format", "json", "--json-schema", json.dumps(VERDICT_SCHEMA)]
+            cmd += ["--output-format", "stream-json", "--verbose", "--json-schema", json.dumps(VERDICT_SCHEMA)]
         print(("… судья смотрит (свежая сессия, до {} мин)" if ru else "… the judge is looking (a fresh session, up to {} min)")
               .format(int(float(cfg.get("judge_timeout_min", 40)))), flush=True)
         s = run_step(root, runf, run, {"step": "judge", "fp": fp}, cmd, logs / f"{n}-judge.json",
-                     float(cfg.get("judge_timeout_min", 40)) * 60, stdin=prompt)
+                     float(cfg.get("judge_timeout_min", 40)) * 60, stdin=prompt,
+                     progress=Progress("судья" if ru else "judge", a.verbose))
         v = parse_verdict((root / s["log"]).read_text(encoding="utf-8", errors="replace"))
         if not v:
             save_run(runf, run)
@@ -3039,7 +3137,7 @@ def cmd_accept(argv: list[str]) -> int:
                    f"{Path(s['log']).with_suffix('.err')}\n{tail(root / s['log'], 15)}"), file=sys.stderr)
             return 1
         try:
-            s["cost_usd"] = round(float(json.loads((root / s["log"]).read_text(encoding="utf-8"))["total_cost_usd"]), 2)
+            s["cost_usd"] = round(float((claude_result((root / s["log"]).read_text(encoding="utf-8")) or {})["total_cost_usd"]), 2)
         except (ValueError, KeyError, TypeError):
             pass
         s.update(verdict=v["verdict"], summary=v["summary"], findings=v["findings"])
@@ -3158,7 +3256,8 @@ def autonomous_prompt(t: dict) -> str:
     ])
 
 
-def run_worker(root: Path, cfg: dict, kind: str, prompt: str, minutes: float, schema: dict | None = None) -> dict:
+def run_worker(root: Path, cfg: dict, kind: str, prompt: str, minutes: float, schema: dict | None = None,
+               verbose: bool = False) -> dict:
     """One headless worker session, recorded in docs/.runs/dispatch.json like an acceptance step."""
     import shlex
     runf = root / RUNS / "dispatch.json"
@@ -3170,13 +3269,11 @@ def run_worker(root: Path, cfg: dict, kind: str, prompt: str, minutes: float, sc
     (out.parent / f"{stamp}-{kind}.prompt.md").write_text(prompt, encoding="utf-8")
     cmd = shlex.split(os.path.expanduser(cfg.get("worker", WORKER)))
     if Path(cmd[0]).name == "claude" and "--output-format" not in cmd:
-        cmd += ["--output-format", "json"] + (["--json-schema", json.dumps(schema)] if schema else [])
-    step = run_step(root, runf, run, {"step": kind}, cmd, out, minutes * 60, stdin=prompt)
+        cmd += ["--output-format", "stream-json", "--verbose"] + (["--json-schema", json.dumps(schema)] if schema else [])
+    step = run_step(root, runf, run, {"step": kind}, cmd, out, minutes * 60, stdin=prompt,
+                    progress=Progress(f"{root.name} · {kind}", verbose))
     text = (root / step["log"]).read_text(encoding="utf-8", errors="replace")
-    try:
-        env = json.loads(text)
-    except ValueError:
-        env = {}
+    env = claude_result(text) or {}
     res = env.get("structured_output") if isinstance(env, dict) else None
     if not isinstance(res, dict):
         m = re.search(r"\{.*\}", env.get("result", "") if isinstance(env, dict) else text, re.S)
@@ -3217,7 +3314,7 @@ def dispatch_state() -> dict:
     return st
 
 
-def dispatch_one(root: Path, cfg: dict, dry: bool, log) -> None:
+def dispatch_one(root: Path, cfg: dict, dry: bool, log, verbose: bool = False) -> None:
     s = collect_status(root)
     why = busy(root, s)
     if why:
@@ -3239,7 +3336,9 @@ def dispatch_one(root: Path, cfg: dict, dry: bool, log) -> None:
                                  "started": dt.datetime.now().astimezone().isoformat(timespec="seconds")},
                                 ensure_ascii=False), encoding="utf-8")
     try:
-        r = run_worker(root, cfg, "tidy", tidy_prompt(s), float(cfg.get("tidy_timeout_min", 30)), TIDY_SCHEMA)
+        log(f"{root.name}: " + ("утренний разбор — сессия Claude, до {} мин" if s["ru"] else
+                                "morning tidy — a Claude session, up to {} min").format(int(float(cfg.get("tidy_timeout_min", 30)))))
+        r = run_worker(root, cfg, "tidy", tidy_prompt(s), float(cfg.get("tidy_timeout_min", 30)), TIDY_SCHEMA, verbose)
     finally:
         claim.unlink(missing_ok=True)
     log(f"{root.name}: tidy exit {r['exit']}, closed {', '.join(r.get('closed') or []) or 'nothing'}"
@@ -3249,8 +3348,9 @@ def dispatch_one(root: Path, cfg: dict, dry: bool, log) -> None:
     auto = next((t for t in s["next"]["tickets"] + s["next"]["rest"]
                  if AUTONOMOUS_RE.search(ticket_text(root, t["id"]))), None)
     if auto and not busy(root, s):
+        log(f"{root.name}: {auto['id']} [autonomous] — {auto['title']}")
         r = run_worker(root, cfg, f"auto-{auto['id']}", autonomous_prompt(auto),
-                       float(cfg.get("autonomous_timeout_min", 120)))
+                       float(cfg.get("autonomous_timeout_min", 120)), verbose=verbose)
         log(f"{root.name}: {auto['id']} exit {r['exit']}" + (f", ${r['cost_usd']}" if "cost_usd" in r else "")
             + f" — {clip(r.get('notes', ''), 200)}")
 
@@ -3283,6 +3383,7 @@ def cmd_dispatch(argv: list[str]) -> int:
     p.add_argument("--now", action="store_true", help="Run even in quiet hours (23:00–09:00)")
     p.add_argument("--no-work", action="store_true", help="Only the briefs, no worker sessions")
     p.add_argument("--project", action="append", help="Only this project (repeatable)")
+    p.add_argument("-v", "--verbose", action="store_true", help="Print every step of the sessions, not only a status line")
     p.add_argument("--service", choices=("on", "off", "status"), help=f"macOS: run it every day at "
                    f"{DISPATCH_TIME[0]:02d}:{DISPATCH_TIME[1]:02d}")
     a = p.parse_args(argv)
@@ -3315,7 +3416,7 @@ def cmd_dispatch(argv: list[str]) -> int:
     for root in roots:
         if not a.no_work:
             try:
-                dispatch_one(root, cfg, a.dry_run, log)
+                dispatch_one(root, cfg, a.dry_run, log, a.verbose)
             except (OSError, subprocess.SubprocessError) as e:
                 log(f"! {root.name}: {e}")
         if a.dry_run or not (env or cfg.get("notify")):
