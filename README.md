@@ -89,7 +89,10 @@ agentdrop status            # the board for the project you're in (--json for sc
 agentdrop claim B41         # an agent takes a ticket at the start of a pass
 agentdrop release B41       # and gives it back at the end
 agentdrop brief --send      # the same, to your phone: one Telegram message per thing that waits for you
+agentdrop accept B41        # the project's checks, then a fresh judge; the verdict goes to your phone
 ```
+
+`agentdrop accept B41` is how a finished ticket gets accepted without you carrying verdicts between chats. It runs the commands in `docs/checks` (one per line: tests, lint, build, the docs check). If one fails, the output goes back to the agent that ran it and no judge is called. When they pass, it starts a fresh headless judge (`judge` in the config; `claude -p --agent acceptance-judge` by default) and gives it the ticket with its "why" quote, the spec the ticket names, the diff since the claim started and the check logs, but not the worker's own report. The judge answers PASS, REJECT or BLOCKED with findings. A REJECT goes back to the worker; the third one, or a BLOCKED, goes to you as a Telegram message, and so does a PASS. Your reply to that message lands under the ticket. Every step is written to `docs/.runs/B41.json` (ignored by git) before it starts, so a crashed run picks up where it stopped, and checks and verdicts are reused while the code is exactly the same.
 
 `agentdrop status` reads the project's docs, git and claims, with no LLM involved, and answers four questions: what waits for you (open questions with their context and the proposed answer, tickets blocked on your OK), what is running (claimed tickets, which session, when it last did anything; a claim with no activity for 4 hours is marked stale), what was done since you last looked (`--mark-seen` moves that mark) and what's next (unclaimed tickets by priority, each with its "why" quote). Every line leads with its meaning, the code in parentheses.
 

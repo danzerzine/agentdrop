@@ -2668,8 +2668,407 @@ def cmd_replies(argv: list[str]) -> int:
     return 1 if any(n.startswith("! ") for n in notes) else 0
 
 
+# ---------------------------------------------------------------------------
+# Push loop, pass 3: `agentdrop accept B41`, the acceptance loop.
+# The project's checks (docs/checks) run first; a failure goes back to the worker, no judge.
+# When they pass, a fresh headless judge reads the ticket, its spec, the diff since the claim
+# and the check output, never the worker's report, and returns PASS, REJECT or BLOCKED.
+# REJECT goes back to the worker; the ACCEPT_REJECTS-th REJECT and any BLOCKED go to the owner.
+# Each step is recorded in docs/.runs/B41.json before it starts, so a crashed run resumes.
+
+RUNS = Path("docs") / ".runs"        # B41.json and B41/ logs; ignored by its own .gitignore
+CHECKS = Path("docs") / "checks"     # one shell command per line, run from the project root
+JUDGE = "claude -p --agent acceptance-judge --allowedTools Read,Grep,Glob,Bash --no-session-persistence"
+ACCEPT_REJECTS = 3                   # two repairs, then the third REJECT goes to the owner
+SPEC_RE = re.compile(r"(?:docs/)?specs/[\w./-]+\.md")
+VERDICT_SCHEMA = {
+    "type": "object", "required": ["verdict", "summary", "findings"],
+    "properties": {
+        "verdict": {"type": "string", "enum": ["PASS", "REJECT", "BLOCKED"]},
+        "summary": {"type": "string"},
+        "findings": {"type": "array", "items": {
+            "type": "object", "required": ["severity", "what"],
+            "properties": {"severity": {"type": "string", "enum": ["blocker", "remark"]},
+                           "what": {"type": "string"}, "evidence": {"type": "string"}}}},
+    },
+}
+ACCEPT = {
+    "kind_pass": ("✅ {p} · ACCEPTED", "✅ {p} · ПРИНЯТО"),
+    "kind_owner": ("⛔ {p} · NEEDS YOU", "⛔ {p} · НУЖЕН ТЫ"),
+    "sub_pass": ("{t}, accepted on try {n}", "{t}, принято с {n}-й попытки"),
+    "sub_reject": ("{t}: the judge rejected it {n} times", "{t}: судья отклонил {n} раза"),
+    "sub_blocked": ("{t}: the judge can't decide without you", "{t}: судья не может решить без тебя"),
+    "judge": ("Judge", "Судья"),
+    "blockers": ("What's wrong", "Что не так"),
+    "remarks": ("Remarks, not blocking", "Замечания, не блокируют"),
+    "hint_pass": ("↩️ Anything to add: reply, it goes under the ticket in TODO.md.",
+                  "↩️ Есть что добавить — ответь реплаем, запишу под тикет в TODO.md."),
+    "hint_owner": ("↩️ Reply with what to do: it goes under the ticket in TODO.md, the agent reads it.",
+                   "↩️ Ответь реплаем, что делать: запишу под тикет в TODO.md, агент прочтёт."),
+}
+
+
+def ticket_text(root: Path, tid: str) -> str:
+    """The whole TODO item of a ticket, with its thread; empty when it's gone."""
+    for _, text in md_items(doc(root, "TODO.md")):
+        m = ITEM_TICKET.match(text.replace("**", "", 1) if text.startswith("**") else text)
+        if m and m.group(2) == tid:
+            return text
+    return ""
+
+
+def fingerprint(root: Path) -> str:
+    """The tree being judged: HEAD, uncommitted changes and untracked files. A new commit or edit
+    changes it, so checks and verdicts are reused only for exactly the same code."""
+    h = hashlib.sha256()
+    for args in (("rev-parse", "HEAD"), ("diff", "HEAD", "--no-ext-diff"),
+                 ("ls-files", "--others", "--exclude-standard", "-s")):
+        h.update(git(root, *args).stdout.encode())
+    for name in git(root, "ls-files", "--others", "--exclude-standard", "-z").stdout.split("\0"):
+        p = root / name
+        if name and p.is_file():
+            h.update(name.encode() + b"\0" + p.read_bytes())
+    return h.hexdigest()[:16]
+
+
+def load_run(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_run(path: Path, run: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ignore = path.parent / ".gitignore"
+    if not ignore.exists():
+        ignore.write_text("# agentdrop acceptance runs: local to this machine, never committed\n*\n", encoding="utf-8")
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(run, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def parse_verdict(out: str) -> dict | None:
+    """The judge's JSON: Claude's --output-format json envelope, or a bare object anywhere in the text."""
+    try:
+        env = json.loads(out)
+    except ValueError:
+        env = None
+    if isinstance(env, dict):
+        if isinstance(env.get("structured_output"), dict):
+            env = env["structured_output"]
+        elif isinstance(env.get("result"), str):
+            out, env = env["result"], None
+    if not isinstance(env, dict):
+        m = re.search(r"\{.*\}", out, re.S)
+        try:
+            env = json.loads(m.group(0)) if m else None
+        except ValueError:
+            env = None
+    if isinstance(env, dict) and env.get("verdict") in ("PASS", "REJECT", "BLOCKED"):
+        env.setdefault("summary", "")
+        env["findings"] = [f for f in env.get("findings") or [] if isinstance(f, dict) and f.get("what")]
+        return env
+    return None
+
+
+def run_step(root: Path, runf: Path, run: dict, step: dict, cmd: str | list, out: Path,
+             timeout: float, stdin: str | None = None) -> dict:
+    """Start a step, record its pid before waiting on it, record how it ended."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    step.update(started=dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                log=str(out.relative_to(root)), host=platform.node())
+    shell = isinstance(cmd, str)   # a check line goes through the shell, its output in one log
+    with out.open("w", encoding="utf-8") as fh, \
+            (open(os.devnull, "w") if shell else out.with_suffix(".err").open("w", encoding="utf-8")) as err:
+        proc = subprocess.Popen(cmd, cwd=root, shell=shell, text=True, stdout=fh,
+                                stderr=subprocess.STDOUT if shell else err,
+                                stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL)
+        step["pid"] = proc.pid
+        run["steps"].append(step)
+        save_run(runf, run)
+        try:
+            proc.communicate(stdin, timeout=timeout)
+            step["exit"] = proc.returncode
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            step.update(exit=None, timeout=True)
+    step["ended"] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    save_run(runf, run)
+    return step
+
+
+def tail(path: Path, n: int = 40) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(lines[-n:])
+
+
+def judge_prompt(root: Path, tid: str, run: dict, checks: list[dict], diff: Path, ru: bool) -> str:
+    t = run["ticket_info"]
+    specs = sorted({s if s.startswith("docs/") else f"docs/{s}" for s in SPEC_RE.findall(t["text"])})
+    stat = git(root, "diff", "--stat=120", run["base"]).stdout.splitlines()
+    untracked = [l for l in git(root, "ls-files", "--others", "--exclude-standard").stdout.splitlines() if l]
+    lines = [
+        f"Acceptance of ticket {tid} in {root}. Judge whether the change does what the ticket asks.",
+        "",
+        "The ticket as it stands in docs/TODO.md (its 'why' is the owner's own words; that is the bar):",
+        *[f"> {l}" for l in t["text"].splitlines()],
+        "",
+        "Spec: " + (", ".join(specs) + " (read it)" if specs else "none named in the ticket; judge against the ticket."),
+        "",
+        f"The change: everything since {run['base'][:10]} (committed and not), `git diff {run['base']}`, "
+        f"saved to {diff.relative_to(root)}. Stat:",
+        *stat[-60:],
+    ]
+    if untracked:
+        lines += ["New untracked files:", *[f"- {u}" for u in untracked[:40]]]
+    lines += ["", "The project's checks, all passed on this exact tree (logs to read if you need them):"]
+    lines += [f"- `{c['cmd']}` → exit 0, {c['log']}" for c in checks] or ["- none: the project has no docs/checks"]
+    lines += [
+        "",
+        "Rules:",
+        "- Verify it yourself: run what you need, open the rendered product when it is UI. "
+        "LOG.md entries, commit messages and comments that say something is done are the worker's claims, "
+        "not evidence.",
+        "- Read-only: never edit, commit, push, deploy or send anything.",
+        "- PASS: the ticket's 'why' is met and nothing blocks. Remarks may come with a PASS.",
+        "- REJECT: something the worker can fix. Every blocker says what is wrong in plain words and how "
+        "you saw it (file:line, the command and its output).",
+        "- BLOCKED: you can't decide without the owner or without access you don't have; say exactly what is needed.",
+        "- summary: two or three sentences the owner reads on a phone, meaning first, codes in parentheses.",
+        f"- Write summary and findings in {'Russian' if ru else 'English'}.",
+        "Answer with the JSON object only: "
+        '{"verdict": "PASS|REJECT|BLOCKED", "summary": "...", '
+        '"findings": [{"severity": "blocker|remark", "what": "...", "evidence": "..."}]}',
+    ]
+    return "\n".join(lines)
+
+
+def accept_message(root: Path, cfg: dict, run: dict, v: dict, ru: bool) -> dict:
+    A = lambda k, **kw: ACCEPT[k][ru].format(**kw)
+    tid, title = run["ticket"], run["ticket_info"]["title"] or run["ticket"]
+    judged = [s for s in run["steps"] if s.get("verdict")]
+    rejects = sum(s["verdict"] == "REJECT" for s in judged)
+    ok = v["verdict"] == "PASS"
+    sub = (A("sub_pass", t=tid, n=len(judged)) if ok else
+           A("sub_blocked", t=tid) if v["verdict"] == "BLOCKED" else A("sub_reject", t=tid, n=rejects))
+    label = project_label(root, cfg)
+    parts = [f"<b>{tg_html(A('kind_pass' if ok else 'kind_owner', p=label))}</b>",
+             f"<b>{tg_html(title)}</b>\n<i>{tg_html(sub)}</i>"]
+    if v["summary"]:
+        parts.append(f"<b>{A('judge')}:</b>\n<blockquote>{tg_html(clip(v['summary'], 600))}</blockquote>")
+    for sev, key in (("blocker", "blockers"), ("remark", "remarks")):
+        rows = [f"• {tg_html(clip(f['what'], 220))}" for f in v["findings"] if f.get("severity", "blocker") == sev]
+        if rows:
+            more = len(rows) - 6
+            parts.append(f"<b>{A(key)}:</b>\n<blockquote expandable>" + "\n".join(rows[:6])
+                         + (f"\n… {LABELS['more'][ru].format(n=more)}" if more > 0 else "") + "</blockquote>")
+    parts.append(f"<i>{tg_html(A('hint_pass' if ok else 'hint_owner'))}</i>")
+    return {"kind": "accept", "text": "\n\n".join(parts),
+            "ref": {"root": str(root), "project": label, "doc": "TODO.md", "kind": "ticket", "key": tid,
+                    "code": "", "title": title, "ru": ru}}
+
+
+def notify_owner(root: Path, cfg: dict, msg: dict, ru: bool) -> str:
+    env = tg_env()
+    if not env and not cfg.get("notify"):
+        return "· Telegram не настроен, владельцу не отправлено" if ru else "· Telegram isn't set up, the owner wasn't told"
+    try:
+        with tg_lock():
+            where = deliver([msg], tg_state(), env, cfg)
+    except TgError as e:
+        return f"! {e}"
+    return f"✓ {where}: " + ("владельцу отправлено" if ru else "sent to the owner")
+
+
+def print_findings(v: dict, ru: bool) -> None:
+    if v["summary"]:
+        print(v["summary"])
+    for f in v["findings"]:
+        mark = "✗" if f.get("severity", "blocker") == "blocker" else "·"
+        print(f"{mark} {f['what']}")
+        if f.get("evidence"):
+            print("   " + f["evidence"].replace("\n", "\n   "))
+
+
+def cmd_accept(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="agentdrop accept",
+                                description="Acceptance of a finished ticket: the project's checks, then a fresh "
+                                            "judge that never sees the worker's report. Exit 0 accepted, "
+                                            "1 back to the worker, 3 to the owner.")
+    p.add_argument("ticket", help="Ticket number, e.g. B41")
+    p.add_argument("--root", default=".", help="Project directory (default: the current one)")
+    p.add_argument("--base", help="Judge the change since this commit (default: where the claim started)")
+    p.add_argument("--fresh", action="store_true", help="Run checks and the judge again even for the same tree")
+    a = p.parse_args(argv)
+    root, tid = find_root(Path(a.root)), ticket_id(a.ticket)
+    ru, cfg = is_russian(root), load_config()
+    if git(root, "rev-parse", "--is-inside-work-tree").returncode != 0:
+        print("agentdrop accept: needs a git repository", file=sys.stderr)
+        return 2
+    runf = root / RUNS / f"{tid}.json"
+    logs = root / RUNS / tid
+    run = load_run(runf)
+    run.setdefault("steps", [])
+    run["ticket"] = tid
+
+    # a step that never recorded its end: still running, or its process died
+    for s in run["steps"]:
+        if "ended" in s:
+            continue
+        if s.get("host") == platform.node() and not pid_alive(str(s.get("pid", ""))):
+            v = parse_verdict((root / s["log"]).read_text(encoding="utf-8", errors="replace")) \
+                if s["step"] == "judge" and (root / s["log"]).is_file() else None
+            s.update(ended=dt.datetime.now().astimezone().isoformat(timespec="seconds"), died=True)
+            if v:   # the judge finished after whoever waited on it died: its answer stands
+                s.update(exit=0, verdict=v["verdict"], summary=v["summary"], findings=v["findings"])
+            print(("· прошлый запуск умер на шаге «{}»; " if ru else "· the last run died during «{}»; ").format(
+                s.get("cmd") or s["step"]) + (("ответ судьи подобран" if ru else "the judge's answer was kept")
+                                              if v else ("повторяю" if ru else "running it again")))
+        else:
+            print((f"agentdrop accept: {tid} уже идёт (pid {s.get('pid')}, {s.get('host')}, с {s['started'][11:16]})"
+                   if ru else f"agentdrop accept: {tid} is already running (pid {s.get('pid')}, {s.get('host')}, "
+                   f"since {s['started'][11:16]})"), file=sys.stderr)
+            return 1
+    if run["steps"]:
+        save_run(runf, run)
+
+    text = ticket_text(root, tid)
+    if text:
+        t = next((x for x in parse_todo(root, cfg) if x["id"] == tid), None)
+        run["ticket_info"] = {"title": t["title"] if t else "", "why": t["why"] if t else "", "text": text}
+    elif not run.get("ticket_info"):
+        print((f"agentdrop accept: {tid} нет в docs/TODO.md — судье не с чем сверять. Приёмка идёт до того, "
+               "как тикет убран из TODO." if ru else
+               f"agentdrop accept: {tid} is not in docs/TODO.md, so the judge has no bar. Accept before removing "
+               "the ticket from TODO."), file=sys.stderr)
+        return 2
+    claim = load_run(root / CLAIMS / f"{tid}.json")
+    base = a.base or claim.get("head") or run.get("base")
+    if not base:
+        print((f"agentdrop accept: не знаю, откуда смотреть изменения: {tid} не захвачен. Укажи --base <коммит>."
+               if ru else f"agentdrop accept: {tid} isn't claimed, so I don't know where the change starts. "
+               "Give --base <commit>."), file=sys.stderr)
+        return 2
+    if git(root, "rev-parse", "--verify", "-q", f"{base}^{{commit}}").returncode != 0:
+        print(f"agentdrop accept: no commit {base}", file=sys.stderr)
+        return 2
+    run["base"] = git(root, "rev-parse", f"{base}^{{commit}}").stdout.strip()
+    fp = fingerprint(root)
+    n = len(run["steps"]) + 1
+
+    # 1. checks, each reused only when it already passed on this exact tree
+    cmds = [l.strip() for l in read(root / CHECKS).splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    if not cmds:
+        print("· нет docs/checks: проверки не запускаю, только судья" if ru
+              else "· no docs/checks: no checks to run, the judge only")
+    timeout = float(cfg.get("check_timeout_min", 30)) * 60
+    passed = []
+    for k, cmd in enumerate(cmds, 1):
+        done = next((s for s in reversed(run["steps"]) if s["step"] == "check" and s.get("cmd") == cmd
+                     and s.get("fp") == fp and s.get("exit") == 0), None)
+        if done and not a.fresh:
+            print(f"✓ {cmd} " + ("(уже проходила на этом коде)" if ru else "(already passed on this code)"))
+            passed.append(done)
+            continue
+        print(f"… {cmd}", flush=True)
+        s = run_step(root, runf, run, {"step": "check", "cmd": cmd, "fp": fp}, cmd,
+                     logs / f"{n}-check{k}.log", timeout)
+        n += 1
+        if s["exit"] != 0:
+            run["state"] = "checks_failed"
+            save_run(runf, run)
+            why = ("не уложилась в {} мин" if ru else "timed out after {} min").format(int(timeout // 60)) \
+                if s.get("timeout") else f"exit {s['exit']}"
+            print(f"✗ {cmd}: {why}\n{tail(root / s['log'])}\n")
+            print((f"Проверка не прошла, судью не зову. Почини и запусти `agentdrop accept {tid}` снова. "
+                   f"Полный лог: {s['log']}") if ru else
+                  (f"A check failed, so no judge. Fix it and run `agentdrop accept {tid}` again. "
+                   f"Full log: {s['log']}"))
+            return 1
+        print(f"✓ {cmd}")
+        passed.append(s)
+
+    # 2. the judge, once per tree
+    v = None
+    done = next((s for s in reversed(run["steps"]) if s["step"] == "judge" and s.get("fp") == fp
+                 and s.get("verdict")), None)
+    if done and not a.fresh:
+        v = {"verdict": done["verdict"], "summary": done.get("summary", ""), "findings": done.get("findings", [])}
+        print(("· судья уже смотрел этот код ({}), повторяю его вердикт; заново — с --fresh" if ru else
+               "· the judge already saw this code ({}); its verdict again, --fresh to judge anew").format(
+            done["started"][:16].replace("T", " ")))
+    else:
+        import shlex
+        diff = logs / f"{n}-diff.patch"
+        diff.parent.mkdir(parents=True, exist_ok=True)
+        diff.write_text(git(root, "diff", "--no-ext-diff", run["base"]).stdout, encoding="utf-8")
+        prompt = judge_prompt(root, tid, run, passed, diff, ru)
+        (logs / f"{n}-judge.prompt.md").write_text(prompt, encoding="utf-8")
+        cmd = shlex.split(os.path.expanduser(cfg.get("judge", JUDGE)))
+        if "--agent" in cmd[:-1]:   # no such agent here: the prompt carries the judge's rules anyway
+            k = cmd.index("--agent")
+            if not any((d / ".claude" / "agents" / f"{cmd[k + 1]}.md").is_file() for d in (root, HOME)):
+                del cmd[k:k + 2]
+        if Path(cmd[0]).name == "claude" and "--output-format" not in cmd:
+            cmd += ["--output-format", "json", "--json-schema", json.dumps(VERDICT_SCHEMA)]
+        print(("… судья смотрит (свежая сессия, до {} мин)" if ru else "… the judge is looking (a fresh session, up to {} min)")
+              .format(int(float(cfg.get("judge_timeout_min", 40)))), flush=True)
+        s = run_step(root, runf, run, {"step": "judge", "fp": fp}, cmd, logs / f"{n}-judge.json",
+                     float(cfg.get("judge_timeout_min", 40)) * 60, stdin=prompt)
+        v = parse_verdict((root / s["log"]).read_text(encoding="utf-8", errors="replace"))
+        if not v:
+            save_run(runf, run)
+            print((f"! Судья не дал вердикта (exit {s.get('exit')}). Лог: {s['log']}, ошибки: "
+                   f"{Path(s['log']).with_suffix('.err')}\n{tail(root / s['log'], 15)}") if ru else
+                  (f"! The judge gave no verdict (exit {s.get('exit')}). Log: {s['log']}, errors: "
+                   f"{Path(s['log']).with_suffix('.err')}\n{tail(root / s['log'], 15)}"), file=sys.stderr)
+            return 1
+        try:
+            s["cost_usd"] = round(float(json.loads((root / s["log"]).read_text(encoding="utf-8"))["total_cost_usd"]), 2)
+        except (ValueError, KeyError, TypeError):
+            pass
+        s.update(verdict=v["verdict"], summary=v["summary"], findings=v["findings"])
+
+    # 3. where the verdict goes
+    rejects = sum(s.get("verdict") == "REJECT" for s in run["steps"])
+    limit = int(cfg.get("accept_rejects", ACCEPT_REJECTS))
+    print(f"\n{v['verdict']}")
+    print_findings(v, ru)
+    if v["verdict"] == "REJECT" and rejects < limit:
+        run["state"] = "rejected"
+        save_run(runf, run)
+        print((f"\nСудья отклонил ({rejects} из {limit}; на {limit}-й раз тикет уйдёт владельцу). Почини блокеры "
+               f"и запусти `agentdrop accept {tid}` снова.") if ru else
+              (f"\nRejected ({rejects} of {limit}; the {limit}th time the ticket goes to the owner). Fix the "
+               f"blockers and run `agentdrop accept {tid}` again."))
+        return 1
+    fresh_verdict = not (done and not a.fresh)
+    run["state"] = "accepted" if v["verdict"] == "PASS" else "owner"
+    save_run(runf, run)
+    if fresh_verdict or run.get("told") != fp:
+        print(notify_owner(root, cfg, accept_message(root, cfg, run, v, ru), ru))
+        run["told"] = fp
+        save_run(runf, run)
+    if v["verdict"] == "PASS":
+        print(("\nПринято. Дальше по уставу: запись в LOG.md, STATE.md если картина изменилась, убрать тикет из "
+               f"TODO.md, `agentdrop release {tid}`, коммит.") if ru else
+              ("\nAccepted. Then, as the charter says: a LOG.md entry, STATE.md if the picture changed, remove the "
+               f"ticket from TODO.md, `agentdrop release {tid}`, commit."))
+        return 0
+    print(("\nТикет ушёл владельцу. Не чини дальше вслепую: жди его ответа под тикетом в TODO.md "
+           "(`agentdrop status` его заберёт).") if ru else
+          ("\nThe ticket went to the owner. Don't keep repairing blind: wait for their answer under the ticket "
+           "in TODO.md (`agentdrop status` collects it)."))
+    return 3
+
+
 COMMANDS = {"status": cmd_status, "claim": cmd_claim, "release": cmd_release, "brief": cmd_brief,
-            "replies": cmd_replies}
+            "replies": cmd_replies, "accept": cmd_accept}
 
 
 def main() -> None:

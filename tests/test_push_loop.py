@@ -243,7 +243,7 @@ class FakeTelegram:
         self.updates.append({"update_id": 500 + len(self.updates), "message": m})
 
 
-class Brief(Project):
+class WithTelegram(Project):
     def setUp(self):
         super().setUp()
         self.tg = FakeTelegram()
@@ -269,6 +269,8 @@ class Brief(Project):
     def by_text(self, needle):
         return next(m for m in self.tg.sent if needle in m["text"])
 
+
+class Brief(WithTelegram):
     def test_one_message_per_item_then_nothing_new(self):
         r = self.run_ad("brief", "--send")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -468,6 +470,125 @@ class Brief(Project):
         self.assertIn("proj · YOUR OK", r.stdout)
         self.assertEqual(self.tg.sent, [])
         self.assertFalse((self.home / ".agentdrop" / "telegram.json").exists())
+
+
+JUDGE = """import json, os, sys
+home = os.path.dirname(os.path.abspath(__file__))
+prompt = sys.stdin.read()
+n = len([f for f in os.listdir(home) if f.startswith('prompt')])
+open(os.path.join(home, f'prompt{n}.txt'), 'w').write(prompt)
+verdicts = open(os.path.join(home, 'verdicts.txt')).read().split()
+v = verdicts[min(n, len(verdicts) - 1)]
+print(json.dumps({'type': 'result', 'total_cost_usd': 0.5, 'structured_output': {
+    'verdict': v, 'summary': f'judge says {v}',
+    'findings': [] if v == 'PASS' else [{'severity': 'blocker', 'what': 'Safari still fails', 'evidence': 'x.py:3'}]}}))
+"""
+
+
+class Accept(WithTelegram):
+    def setUp(self):
+        super().setUp()
+        (self.home / "judge.py").write_text(JUDGE, encoding="utf-8")
+        with open(self.home / ".agentdrop" / "config", "a", encoding="utf-8") as f:
+            f.write(f"judge = {sys.executable} {self.home / 'judge.py'}\n")
+        todo = self.root / "docs" / "TODO.md"
+        todo.write_text(TODO.replace("Repro on iOS 18.", "Repro on iOS 18. Spec: docs/specs/login.md."), encoding="utf-8")
+        (self.root / "docs" / "checks").write_text("# fast ones first\ntest -f ok.flag\n", encoding="utf-8")
+        self.env.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "start")
+        self.assertEqual(self.run_ad("claim", "B7", session="s1").returncode, 0)
+        (self.root / "login.py").write_text("fixed = True\n", encoding="utf-8")
+
+    def git(self, *args):
+        subprocess.run(["git", *args], cwd=self.root, env=self.env, check=True)
+
+    def verdicts(self, *v):
+        (self.home / "verdicts.txt").write_text(" ".join(v), encoding="utf-8")
+
+    def prompts(self):
+        return sorted(self.home.glob("prompt*.txt"))
+
+    def test_failed_check_goes_back_without_a_judge(self):
+        self.verdicts("PASS")
+        r = self.run_ad("accept", "B7")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("test -f ok.flag", r.stdout)
+        self.assertEqual(self.prompts(), [])
+        run = json.loads((self.root / "docs" / ".runs" / "B7.json").read_text(encoding="utf-8"))
+        self.assertEqual(run["state"], "checks_failed")
+        self.assertEqual(self.tg.sent, [])
+
+    def test_pass_tells_the_owner_once(self):
+        self.verdicts("PASS")
+        (self.root / "ok.flag").write_text("", encoding="utf-8")
+        r = self.run_ad("accept", "B7")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        prompt = self.prompts()[0].read_text(encoding="utf-8")
+        self.assertIn("I can't log in from the iPad", prompt)   # the owner's why is the bar
+        self.assertIn("docs/specs/login.md", prompt)
+        self.assertIn("login.py", prompt)                          # the new file is in the change
+        self.assertIn("`test -f ok.flag` → exit 0", prompt)
+        [msg] = self.tg.sent
+        self.assertIn("ACCEPTED", msg["text"])
+        self.assertIn("Fix login on Safari", msg["text"])
+        # same code again: no checks, no judge, no second message
+        r = self.run_ad("accept", "B7")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("already passed on this code", r.stdout)
+        self.assertEqual(len(self.prompts()), 1)
+        self.assertEqual(len(self.tg.sent), 1)
+        # the owner's reply lands under the ticket
+        self.tg.answer("great, ship it", reply_to=msg["message_id"])
+        self.assertEqual(self.run_ad("replies").returncode, 0)
+        self.assertIn("great, ship it", (self.root / "docs" / "TODO.md").read_text(encoding="utf-8"))
+
+    def test_third_reject_goes_to_the_owner(self):
+        self.verdicts("REJECT")
+        (self.root / "ok.flag").write_text("", encoding="utf-8")
+        for k in (1, 2):
+            r = self.run_ad("accept", "B7")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("Safari still fails", r.stdout)
+            self.assertEqual(self.tg.sent, [])
+            (self.root / "login.py").write_text(f"fixed = {k}\n", encoding="utf-8")   # a repair
+        r = self.run_ad("accept", "B7")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        [msg] = self.tg.sent
+        self.assertIn("NEEDS YOU", msg["text"])
+        self.assertIn("rejected it 3 times", msg["text"])
+        self.assertIn("Safari still fails", msg["text"])
+
+    def test_a_dead_judges_answer_is_kept(self):
+        (self.root / "ok.flag").write_text("", encoding="utf-8")
+        runs = self.root / "docs" / ".runs"
+        (runs / "B7").mkdir(parents=True)
+        (runs / "B7" / "2-judge.json").write_text(json.dumps({"structured_output": {
+            "verdict": "PASS", "summary": "fine", "findings": []}}), encoding="utf-8")
+        dead = subprocess.Popen([sys.executable, "-c", ""])
+        dead.wait()
+        import platform
+        (runs / "B7.json").write_text(json.dumps({"steps": [{
+            "step": "judge", "fp": "old", "pid": dead.pid, "host": platform.node(),
+            "started": "2026-09-27T10:00:00+03:00", "log": "docs/.runs/B7/2-judge.json"}]}), encoding="utf-8")
+        self.verdicts("REJECT")
+        r = self.run_ad("accept", "B7")
+        self.assertIn("died", r.stdout)
+        run = json.loads((runs / "B7.json").read_text(encoding="utf-8"))
+        self.assertEqual(run["steps"][0]["verdict"], "PASS")
+        self.assertTrue(run["steps"][0]["died"])
+
+    def test_a_live_run_is_not_started_twice(self):
+        import platform
+        runs = self.root / "docs" / ".runs"
+        runs.mkdir(parents=True)
+        (runs / "B7.json").write_text(json.dumps({"steps": [{
+            "step": "check", "cmd": "sleep 100", "pid": os.getpid(), "host": platform.node(),
+            "started": "2026-09-27T10:00:00+03:00", "log": "docs/.runs/B7/1-check1.log"}]}), encoding="utf-8")
+        r = self.run_ad("accept", "B7")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("already running", r.stderr)
+        self.assertEqual(self.prompts(), [])
 
 
 if __name__ == "__main__":
