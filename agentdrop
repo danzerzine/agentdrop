@@ -1697,6 +1697,7 @@ def cmd_release(argv: list[str]) -> int:
 TG_ENV = STATE / "telegram.env"      # TG_BOT_TOKEN, TG_CHAT_ID; TG_RELAY_URL, TG_RELAY_KEY where Telegram is blocked
 TG_STATE = STATE / "telegram.json"   # update offset, message id → item, when each item was last sent
 TG_LOCK = STATE / "telegram.lock"    # one reader of the bot's updates at a time, or an answer is written twice
+TG_BEAT = STATE / "telegram.listener"   # touched by the listener service while it runs
 BRIEF_ITEMS = 5                      # item messages per brief; the rest wait for the next one
 RESEND_HOURS = 24                    # an unanswered, unchanged item comes again after this
 QUIET_HOURS = (23, 9)                # messages arrive without sound
@@ -2188,12 +2189,19 @@ def take_callback(env: dict, st: dict, cfg: dict, q: dict) -> list[str]:
     return notes
 
 
-def pull_replies(env: dict, st: dict, cfg: dict, timeout: float = 20, wait: int = 0) -> list[str]:
+def get_updates(env: dict, offset: int, timeout: float = 20, wait: int = 0) -> list:
+    return tg_call(env, "getUpdates", {"offset": offset, "timeout": wait,
+                                       "allowed_updates": ["message", "message_reaction", "callback_query"]},
+                   timeout=timeout + wait)
+
+
+def pull_replies(env: dict, st: dict, cfg: dict, timeout: float = 20, ups: list | None = None) -> list[str]:
     notes = []
-    ups = tg_call(env, "getUpdates", {"offset": st["offset"], "timeout": wait,
-                                      "allowed_updates": ["message", "message_reaction", "callback_query"]},
-                  timeout=timeout + wait)
+    if ups is None:
+        ups = get_updates(env, st["offset"], timeout)
     for u in ups:
+        if u["update_id"] < st["offset"]:
+            continue
         st["offset"] = u["update_id"] + 1
         save_tg_state(st)   # an update that breaks something is never taken twice
         if u.get("message_reaction"):
@@ -2232,7 +2240,7 @@ def sync_replies(timeout: float = 20, wait: bool = False) -> list[str]:
     """Pull the owner's answers into the docs; quiet no-op when Telegram isn't set up, and when the
     listener service (`agentdrop replies --watch`) holds the bot: it has already taken them."""
     env = tg_env()
-    if not env or os.environ.get("AGENTDROP_OFFLINE"):
+    if not env or os.environ.get("AGENTDROP_OFFLINE") or listener_alive():
         return []
     try:
         with tg_lock(wait=wait):
@@ -2429,21 +2437,31 @@ SERVICE_PLIST = HOME / "Library" / "LaunchAgents" / f"{SERVICE}.plist"
 SERVICE_LOG = STATE / "telegram.log"
 
 
+def listener_alive() -> bool:
+    try:
+        return dt.datetime.now().timestamp() - TG_BEAT.stat().st_mtime < 90
+    except OSError:
+        return False
+
+
 def watch_replies() -> int:
-    """The listener: long-polls the bot so buttons and replies get an answer within seconds."""
+    """The listener: long-polls the bot so buttons and replies get an answer within seconds. It waits
+    for Telegram without the lock and takes it only to write, so a brief can go out meanwhile;
+    `status` and `brief` see its heartbeat and leave the bot's updates to it."""
     import time
     print(f"{dt.datetime.now():%d.%m %H:%M:%S} listening", flush=True)
     while True:
+        TG_BEAT.touch()
         env = tg_env()
         if not env:
             time.sleep(60)
             continue
         try:
-            with tg_lock(wait=False):
-                notes = pull_replies(env, tg_state(), load_config(), timeout=20, wait=25)
-        except TgBusy:
+            ups = get_updates(env, tg_state()["offset"], timeout=20, wait=25)
             notes = []
-            time.sleep(3)
+            if ups:
+                with tg_lock():
+                    notes = pull_replies(env, tg_state(), load_config(), ups=ups)
         except TgError as e:
             notes = [f"! Telegram: {e}"]
             time.sleep(15)
