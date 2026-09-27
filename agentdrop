@@ -3910,9 +3910,104 @@ def cmd_tickets(argv: list[str]) -> int:
     return 0
 
 
+# --- subscription limits: can an autonomous run start now ---------------------------------------------
+# Claude Code writes a rate_limit_event at the start of every `claude -p` run with stream-json output: how full
+# the five-hour and the seven-day windows are and when they reset. The newest one is the measurement.
+
+LIMIT_LOGS = HOME / ".agentdrop" / "scheduled" / "logs"
+LIMIT_FRESH_MIN = 90        # an older measurement says nothing about now
+LIMIT_FIVE_HOUR_MAX = 0.70  # above this the five-hour window stays for the owner's own work
+
+
+def limit_readings(roots: list[Path], since: float) -> list[dict]:
+    """Every measurement in run logs written after `since`, oldest first."""
+    files = list(LIMIT_LOGS.glob("*.jsonl")) + [f for r in roots for f in (r / PACK_DIR).glob("*.jsonl")]
+    out = []
+    for f in files:
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        if st.st_mtime < since:
+            continue
+        m = re.search(r"(\d{8}-\d{4})", f.stem)   # the run's start: page-20260927-1805, 20260927-1307-2
+        started = dt.datetime.strptime(m.group(1), "%Y%m%d-%H%M").timestamp() if m else st.st_mtime
+        with f.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"rate_limit_event"' not in line:
+                    continue
+                try:
+                    w = json.loads(line)["rate_limit_info"]["unifiedWindows"]
+                    out.append({"at": started,
+                                "five_hour": float(w["five_hour"]["utilization"]),
+                                "five_hour_resets": int(w["five_hour"]["resetsAt"]),
+                                "seven_day": float(w["seven_day"]["utilization"]),
+                                "seven_day_resets": int(w["seven_day"]["resetsAt"])})
+                except (ValueError, KeyError, TypeError):
+                    continue
+    return sorted(out, key=lambda r: r["at"])
+
+
+def limits_verdict(readings: list[dict], now: float) -> dict:
+    """Can an autonomous run start: a fresh measurement, the five-hour window at most 70% full, and today's use
+    of the seven-day window under the daily share (its free part at the day's first measurement / days to its
+    reset). Today's use counts every run, the owner's too, so autonomous runs give way when he works a lot."""
+    if not readings:
+        return {"can_start": False, "reason": "no_reading", "why": "no measurement in the run logs"}
+    last = readings[-1]
+    age = int((now - last["at"]) // 60)
+    midnight = dt.datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    today = [r for r in readings if r["at"] >= midnight and r["seven_day_resets"] == last["seven_day_resets"]]
+    first = today[0] if today else last
+    days = max((first["seven_day_resets"] - first["at"]) / 86400, 1.0)
+    share = round((1 - first["seven_day"]) / days, 4)
+    spent = round(max(last["seven_day"] - first["seven_day"], 0.0), 4)
+    out = {"measured_at": dt.datetime.fromtimestamp(last["at"]).astimezone().isoformat(timespec="minutes"),
+           "age_min": age,
+           "five_hour": {"used": last["five_hour"], "resets_at": dt.datetime.fromtimestamp(
+               last["five_hour_resets"]).astimezone().isoformat(timespec="minutes")},
+           "seven_day": {"used": last["seven_day"], "resets_at": dt.datetime.fromtimestamp(
+               last["seven_day_resets"]).astimezone().isoformat(timespec="minutes")},
+           "today": {"spent": spent, "share": share}}
+    if age > LIMIT_FRESH_MIN:
+        return {**out, "can_start": False, "reason": "stale",
+                "why": f"the last measurement is {age} min old, older than {LIMIT_FRESH_MIN}"}
+    if last["five_hour"] > LIMIT_FIVE_HOUR_MAX:
+        return {**out, "can_start": False, "reason": "five_hour",
+                "why": f"the five-hour window is {last['five_hour']:.0%} full, over {LIMIT_FIVE_HOUR_MAX:.0%}"}
+    if spent >= share:
+        return {**out, "can_start": False, "reason": "daily_share",
+                "why": f"today used {spent:.0%} of the week, the daily share is {share:.0%}"}
+    return {**out, "can_start": True, "reason": "ok",
+            "why": f"five-hour window {last['five_hour']:.0%}, today {spent:.0%} of a {share:.0%} daily share"}
+
+
+def cmd_limits(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="agentdrop limits",
+                                description="How full the subscription's five-hour and seven-day windows are, and "
+                                            "whether an autonomous run may start now. Exit 0 when it may.")
+    p.add_argument("paths", nargs="*", help="Project directories whose pack logs to read (default: as `tickets`)")
+    p.add_argument("--json", action="store_true", help="Print the measurement and the verdict as JSON")
+    a = p.parse_args(argv)
+    cfg = load_config()
+    roots = [find_root(Path(os.path.expanduser(x))) for x in a.paths] or dispatch_projects(cfg)
+    now = dt.datetime.now().timestamp()
+    v = limits_verdict(limit_readings(roots, now - 8 * 86400), now)
+    if a.json:
+        print(json.dumps(v, ensure_ascii=False, indent=1))
+    else:
+        if "five_hour" in v:
+            print(f"five-hour window  {v['five_hour']['used']:.0%}, resets {v['five_hour']['resets_at']}")
+            print(f"seven-day window  {v['seven_day']['used']:.0%}, resets {v['seven_day']['resets_at']}")
+            print(f"today             {v['today']['spent']:.0%} of the week, daily share {v['today']['share']:.0%}")
+            print(f"measured          {v['measured_at']} ({v['age_min']} min ago)")
+        print(("yes: " if v["can_start"] else "no: ") + v["why"])
+    return 0 if v["can_start"] else 1
+
+
 COMMANDS = {"status": cmd_status, "claim": cmd_claim, "release": cmd_release, "brief": cmd_brief,
             "replies": cmd_replies, "accept": cmd_accept,
-            "dispatch": cmd_dispatch, "pack": cmd_pack, "tickets": cmd_tickets}
+            "dispatch": cmd_dispatch, "pack": cmd_pack, "tickets": cmd_tickets, "limits": cmd_limits}
 
 
 def main() -> None:
