@@ -603,7 +603,9 @@ if prompt.startswith('Morning tidy'):
     with open('docs/LOG.md', 'a') as f:
         f.write('\\n## 27.09 — tidy closed B11\\n\\n- Done long ago.\\n')
     print(json.dumps({'type': 'result', 'total_cost_usd': 0.3, 'structured_output': {
-        'closed': ['B11'], 'changed': [], 'notes': 'closed one'}}))
+        'closed': ['B11'], 'changed': [], 'notes': 'closed one', 'report': [
+            {'text': 'Old reports cleanup (B11) closed: done in May', 'ticket': 'B11', 'check': False},
+            {'text': 'Dark theme (B10): I read your OK as system setting, not a toggle', 'ticket': 'B10', 'check': True}]}}))
 else:
     print(json.dumps({'type': 'result', 'result': 'accepted, exit 0'}))
 """
@@ -637,8 +639,16 @@ class Dispatch(WithTelegram):
         self.assertIn("closed B11", r.stdout)
         self.assertIn("Bash: Look at recent commits", r.stdout)   # each step shows as it happens
         self.assertFalse((self.root / "docs" / ".claims" / "TIDY.json").exists())
-        head = self.tg.sent[0]["text"]
-        self.assertIn("tidy closed B11", head)   # what the tidy pass did reaches the owner in the brief
+        report, check, head = (m["text"] for m in self.tg.sent[:3])
+        self.assertIn("MORNING TIDY", report)   # what the tidy pass did, in plain words, first
+        self.assertIn("Old reports cleanup (B11) closed", report)
+        self.assertIn("TAKE A LOOK", check)      # a reading of the owner's words gets its own message
+        self.assertIn("system setting, not a toggle", check)
+        self.assertIn("BRIEF", head)
+        self.assertNotIn("tidy closed B11", head)   # its LOG entry isn't repeated in the brief
+        self.tg.answer("no, a toggle", reply_to=self.tg.sent[1]["message_id"])
+        self.assertEqual(self.run_ad("replies").returncode, 0)
+        self.assertIn("no, a toggle", (self.root / "docs" / "TODO.md").read_text(encoding="utf-8"))
         self.assertTrue((self.home / ".agentdrop" / "dispatch.log").is_file())
 
     def test_a_claimed_project_gets_only_the_brief(self):

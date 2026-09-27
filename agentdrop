@@ -3190,10 +3190,21 @@ DISPATCH_LOG = STATE / "dispatch.log"
 DISPATCH_SERVICE = "com.agentdrop.dispatch"
 AUTONOMOUS_RE = re.compile(r"(?i)\[(?:autonomous|автономно)\]")
 TIDY_SCHEMA = {
-    "type": "object", "required": ["closed", "changed", "notes"],
+    "type": "object", "required": ["closed", "changed", "report", "notes"],
     "properties": {"closed": {"type": "array", "items": {"type": "string"}},
                    "changed": {"type": "array", "items": {"type": "string"}},
+                   "report": {"type": "array", "items": {
+                       "type": "object", "required": ["text", "check"],
+                       "properties": {"text": {"type": "string"}, "ticket": {"type": "string"},
+                                      "check": {"type": "boolean"}}}},
                    "notes": {"type": "string"}},
+}
+TIDY_MSG = {
+    "kind": ("🧹 {p} · MORNING TIDY", "🧹 {p} · УТРЕННИЙ РАЗБОР"),
+    "kind_check": ("🤔 {p} · TAKE A LOOK", "🤔 {p} · ГЛЯНЬ САМ"),
+    "checks": ("{n} below: my reading of your words, check it", "{n} ниже: я так понял твои слова, проверь"),
+    "check_hint": ("↩️ Meant it differently? Reply, it goes under the ticket.",
+                   "↩️ Имел в виду иначе — ответь реплаем, запишу под тикет."),
 }
 HANDS_OFF = ("Nobody is watching this run. Never deploy, never send anything to anyone (mail, chats, Telegram), "
              "never spend money, never touch servers or production data. Commit only the files you changed, "
@@ -3232,9 +3243,17 @@ def tidy_prompt(s: dict) -> str:
     lines += ["Done already: close it. Text out of date: fix the text, keep what is still open. Blocked on other "
               "people: add a phrase «Ждёт <кого>: …» (or «Waiting for <whom>: …» in English docs). "
               "When you can't tell from the evidence, leave it as it is: never guess a ticket closed.", "",
-              "At the end: one commit with the docs you changed. Answer with JSON only: "
+              "At the end: one commit with the docs you changed.", "",
+              "Then the report for the owner, who reads it on a phone and answers by pointing at one line. "
+              "Write it in the language of the docs, one entry per thing you did, meaning first and the code in "
+              "parentheses, what changed and why in plain words, e.g. «Словарь сумм (B40) закрыт: слова на экране "
+              "задаёт Саша, записал решением с твоей цитатой». Tickets you checked and left unchanged go in one "
+              "entry. Set check=true on an entry where you acted on your reading of the owner's words and another "
+              "reading was possible: say both readings in it, so they can correct you with one reply. "
+              "Answer with JSON only: "
               '{"closed": ["B12", ...], "changed": ["B28: text updated, …", ...], '
-              '"notes": "one or two sentences for the owner, in the language of the docs"}']
+              '"report": [{"text": "...", "ticket": "B40", "check": false}, ...], '
+              '"notes": "one sentence, the gist"}']
     return "\n".join(lines)
 
 
@@ -3314,7 +3333,7 @@ def dispatch_state() -> dict:
     return st
 
 
-def dispatch_one(root: Path, cfg: dict, dry: bool, log, verbose: bool = False) -> None:
+def dispatch_one(root: Path, cfg: dict, dry: bool, log, pending: list, verbose: bool = False) -> None:
     s = collect_status(root)
     why = busy(root, s)
     if why:
@@ -3335,12 +3354,15 @@ def dispatch_one(root: Path, cfg: dict, dry: bool, log, verbose: bool = False) -
                                  "session": "dispatcher", "agent": "dispatcher", "host": platform.node(),
                                  "started": dt.datetime.now().astimezone().isoformat(timespec="seconds")},
                                 ensure_ascii=False), encoding="utf-8")
+    before = {e["heading"] for e in log_entries(root)}
     try:
         log(f"{root.name}: " + ("утренний разбор — сессия Claude, до {} мин" if s["ru"] else
                                 "morning tidy — a Claude session, up to {} min").format(int(float(cfg.get("tidy_timeout_min", 30)))))
         r = run_worker(root, cfg, "tidy", tidy_prompt(s), float(cfg.get("tidy_timeout_min", 30)), TIDY_SCHEMA, verbose)
     finally:
         claim.unlink(missing_ok=True)
+    if r.get("report"):
+        pending.append((root, r["report"], [e["heading"] for e in log_entries(root) if e["heading"] not in before]))
     log(f"{root.name}: tidy exit {r['exit']}, closed {', '.join(r.get('closed') or []) or 'nothing'}"
         + (f", changed {len(r.get('changed') or [])}" if r.get("changed") else "")
         + (f", ${r['cost_usd']}" if "cost_usd" in r else "") + f" — {clip(r.get('notes', ''), 200)}")
@@ -3355,12 +3377,54 @@ def dispatch_one(root: Path, cfg: dict, dry: bool, log, verbose: bool = False) -
             + f" — {clip(r.get('notes', ''), 200)}")
 
 
-def dispatch_brief(root: Path, cfg: dict, env: dict, dst: dict, cap: int, log) -> None:
+def tidy_messages(root: Path, cfg: dict, report: list[dict]) -> list[dict]:
+    """The tidy pass's report as the owner wants it: one short message of what was done, then each
+    reading of their words that could be wrong as its own message, so one reply corrects it."""
+    ru, label = is_russian(root), project_label(root, cfg)
+    T = lambda k, **kw: TIDY_MSG[k][ru].format(**kw)
+    done = [e for e in report if not e.get("check")]
+    checks = [e for e in report if e.get("check")]
+    parts = [f"<b>{tg_html(T('kind', p=label))}</b>"]
+    if done:
+        parts.append("\n".join(f"• {tg_html(clip(e['text'], 300))}" for e in done))
+    if checks:
+        parts.append(f"<i>{tg_html(T('checks', n=len(checks)))}</i>")
+    base = {"root": str(root), "project": label, "doc": "QUESTIONS.md", "kind": "brief", "key": "",
+            "code": "", "title": T("kind", p=label), "ru": ru}
+    msgs = [{"kind": "tidy", "text": "\n\n".join(parts), "ref": base}]
+    for k, e in enumerate(checks, 1):
+        tid = ticket_id(e["ticket"]) if e.get("ticket") else ""
+        ref = ({**base, "doc": "TODO.md", "kind": "ticket", "key": tid, "title": clip(e["text"], 80)}
+               if re.fullmatch(r"B\d+", tid) else base)
+        pos = f", {k}/{len(checks)}" if len(checks) > 1 else ""
+        msgs.append({"kind": "tidy_check", "ref": ref, "text": "\n\n".join([
+            f"<b>{tg_html(T('kind_check', p=label))}{pos}</b>",
+            tg_html(clip(e["text"], 900)), f"<i>{tg_html(T('check_hint'))}</i>"])})
+    return msgs
+
+
+def add_seen(root: Path, headings: list[str]) -> None:
+    """LOG entries the owner already got another way (the tidy report), so the brief doesn't repeat them."""
+    if not headings:
+        return
+    state = seen_state()
+    cur = state.get(str(root))
+    if not cur:   # never looked: the brief shows the latest day, so everything before it counts as seen
+        entries = log_entries(root)
+        day = re.match(r"\S+", entries[0]["heading"]).group(0) if entries else ""
+        cur = state[str(root)] = {"at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                                  "headings": [e["heading"] for e in entries if not e["heading"].startswith(day)]}
+    cur["headings"] = (headings + cur.get("headings", []))[:300]
+    STATE.mkdir(parents=True, exist_ok=True)
+    SEEN.write_text(json.dumps(state, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+
+
+def dispatch_brief(root: Path, cfg: dict, env: dict, dst: dict, cap: int, log, first: list | None = None) -> None:
     s = collect_status(root)
     left = cap - dst["sent"]
     with tg_lock():
         st = tg_state()
-        msgs = plan_brief(root, s, st, cfg)
+        msgs = (first or []) + plan_brief(root, s, st, cfg)
         if not msgs:
             log(f"{root.name}: nothing new for the owner")
             return
@@ -3414,15 +3478,20 @@ def cmd_dispatch(argv: list[str]) -> int:
             log(note)
     dst = dispatch_state()
     for root in roots:
+        pending: list = []
         if not a.no_work:
             try:
-                dispatch_one(root, cfg, a.dry_run, log, a.verbose)
+                dispatch_one(root, cfg, a.dry_run, log, pending, a.verbose)
             except (OSError, subprocess.SubprocessError) as e:
                 log(f"! {root.name}: {e}")
         if a.dry_run or not (env or cfg.get("notify")):
             continue
+        first = []
+        for _, report, headings in pending:
+            first += tidy_messages(root, cfg, report)
+            add_seen(root, headings)
         try:
-            dispatch_brief(root, cfg, env, dst, int(cfg.get("day_cap", DAY_CAP)), log)
+            dispatch_brief(root, cfg, env, dst, int(cfg.get("day_cap", DAY_CAP)), log, first)
         except TgError as e:
             log(f"! {root.name}: brief not sent: {e}")
         dst["runs"][str(root)] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
