@@ -254,7 +254,7 @@ class WithTelegram(Project):
         router.write_text(
             "import json, re, sys\n"
             "p = sys.stdin.read()\n"
-            "msg = p.split('His message:', 1)[1]\n"
+            "msg = p.split('Their message:', 1)[1]\n"
             "opts = re.findall(r'^- \"([^\"]+)\"', p, re.M)\n"
             "r = 'status' if 'going on' in msg else 'unclear' if 'loose' in msg else 'agentdrop' if 'bot' in msg else next((o for o in opts if o.startswith('project')), '') "
             "if 'new task' in msg else ('item' if 'item' in opts else opts[0])\n"

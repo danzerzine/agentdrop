@@ -2119,7 +2119,7 @@ def project_blurb(root: Path) -> str:
 
 def route(cfg: dict, text: str, ref: dict | None, projects: dict[str, dict]) -> dict:
     """Where the owner's chat message belongs: "item", "project" (a new question there), "agentdrop"
-    (about the bot and the messages), "status" (he asks what's going on), or "unclear". An LLM reads
+    (about the bot and the messages), "status" (they ask what's going on), or "unclear". An LLM reads
     it; Python only acts on the label."""
     opts = []
     if ref and ref["kind"] != "brief":
@@ -2131,17 +2131,17 @@ def route(cfg: dict, text: str, ref: dict | None, projects: dict[str, dict]) -> 
         opts.append('- "unclear": can\'t tell which project')
     opts.append('- "agentdrop": about the bot itself: its messages, their format, buttons, summaries, '
                 'or how the owner wants to be asked')
-    opts.append('- "status": he asks what is going on, what is next or what is needed from him right now')
+    opts.append('- "status": they ask what is going on, what is next or what is needed from them right now')
     known = "\n".join(f"- {p}: {project_blurb(Path(v['root']))}" for p, v in projects.items())
-    prompt = ("The owner of several software projects chats with a Telegram bot that sends him their questions and "
-              "summaries. Decide where his message belongs.\n\nOptions:\n" + "\n".join(opts) +
-              (f"\n\nHis projects:\n{known}" if known else "") +
-              f"\n\nHis message:\n«{text}»\n\nIf he reacts to the item (asks about it, says he doesn't "
-              "understand it, answers it) and also makes a general point about how questions or messages "
+    prompt = ("The owner of several software projects chats with a Telegram bot that sends them the projects' questions "
+              "and summaries. Decide where the owner's message belongs.\n\nOptions:\n" + "\n".join(opts) +
+              (f"\n\nTheir projects:\n{known}" if known else "") +
+              f"\n\nTheir message:\n«{text}»\n\nIf they react to the item (ask about it, say they don't "
+              "understand it, answer it) and also make a general point about how questions or messages "
               "should be written, choose the item route and set also_agentdrop.\n\nAnswer with JSON only: "
-              '{"route": "<option>", "why": "<at most 10 words, in the language of his message>", '
-              '"also_agentdrop": <true if, besides the main route, he also says how questions or messages '
-              'should be written in general>, "projects": [<for "status": the projects he means, '
+              '{"route": "<option>", "why": "<at most 10 words, in the language of their message>", '
+              '"also_agentdrop": <true if, besides the main route, they also say how questions or messages '
+              'should be written in general>, "projects": [<for "status": the projects they mean, '
               'from the list; empty for all>]}')
     got = run_router(cfg, prompt)
     label, why = str(got.get("route", "")), clip(str(got.get("why", "")), 100)
