@@ -3076,7 +3076,8 @@ def cmd_accept(argv: list[str]) -> int:
     n = len(run["steps"]) + 1
 
     # 1. checks, each reused only when it already passed on this exact tree
-    cmds = [l.strip() for l in read(root / CHECKS).splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    checks = read(root / CHECKS) if (root / CHECKS).is_file() else ""   # no file: no project checks
+    cmds = [l.strip() for l in checks.splitlines() if l.strip() and not l.lstrip().startswith("#")]
     if not cmds:
         print("· нет docs/checks: проверки не запускаю, только судья" if ru
               else "· no docs/checks: no checks to run, the judge only")

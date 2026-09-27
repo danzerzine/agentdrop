@@ -543,6 +543,16 @@ class Accept(WithTelegram):
         self.assertEqual(self.run_ad("replies").returncode, 0)
         self.assertIn("great, ship it", (self.root / "docs" / "TODO.md").read_text(encoding="utf-8"))
 
+    def test_no_checks_file_goes_straight_to_the_judge(self):
+        self.git("rm", "-q", "docs/checks")
+        self.git("commit", "-qm", "no project checks")
+        self.verdicts("PASS")
+        r = self.run_ad("accept", "B7")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("no docs/checks", r.stdout)
+        [prompt] = self.prompts()
+        self.assertIn("the project has no docs/checks", prompt.read_text(encoding="utf-8"))
+
     def test_third_reject_goes_to_the_owner(self):
         self.verdicts("REJECT")
         (self.root / "ok.flag").write_text("", encoding="utf-8")
