@@ -3826,7 +3826,8 @@ def pack_tickets(s: dict, n: int) -> list[dict]:
 
 
 def pack_prompt(s: dict, tickets: list[dict], budget: float, name: str,
-                lane: tuple[int, int] = (1, 1), others: list[dict] | None = None, store: bool = False) -> str:
+                lane: tuple[int, int] = (1, 1), others: list[dict] | None = None, store: bool = False,
+                history: list[str] | None = None) -> str:
     k, n = lane
     ask = ("goes under its task: `agentdrop task ask B<n> \"…\"` (the question, the options, your pick), or "
            "`agentdrop task state B<n> waiting_others \"<whom>: …\"`" if store else
@@ -3850,6 +3851,11 @@ def pack_prompt(s: dict, tickets: list[dict], budget: float, name: str,
         if store else "claim → work → commit → `agentdrop accept` → LOG, TODO, release):")]
     for i, t in enumerate(tickets, 1):
         lines.append(f"{i}. {t['title']} ({t['id']}, {t['priority']})" + (f". Why: {t['why']}" if t["why"] else ""))
+    if history:
+        lines += ["", "This continues earlier runs; they are below, newest last. Before working, read what they did "
+                  "(the task's thread and history, `git log`, the end of a log if you need more) and go on from where "
+                  "they stopped: don't redo committed work, and don't repeat what a stopped run was stopped in the "
+                  "middle of without checking why.", *history, ""]
     lines += [("When a ticket runs into missing data or access, say what is missing with `agentdrop task comment` and "
                "go on. If time and budget remain, `agentdrop task take` with no number gives the next one (refused "
                "means another session has it)." if store else
@@ -3881,7 +3887,14 @@ def pack_lane(f: Path) -> dict:
     text = f.read_text(encoding="utf-8", errors="replace")
     res = claude_result(text)
     res = res if isinstance(res, dict) and res.get("type") == "result" else None
-    out = {"stamp": f.stem, "log": str(f), "running": not res and pid.exists() and pid_alive(pid.read_text())}
+    stopped = f.with_suffix(".stopped")
+    out = {"stamp": f.stem, "log": str(f),
+           "running": not res and not stopped.exists() and pid.exists() and pid_alive(pid.read_text())}
+    if stopped.exists():
+        try:
+            out["stopped"] = json.loads(stopped.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            out["stopped"] = {}
     if res:
         out.update(result=res.get("result", ""), cost_usd=res.get("total_cost_usd"),
                    minutes=round(res.get("duration_ms", 0) / 60000))
@@ -3907,6 +3920,98 @@ def last_pack(root: Path) -> list[dict]:
     return [pack_lane(f) for f in runs if f.stem[:13] == stamp]
 
 
+def pack_tickets_of(f: Path) -> list[str]:
+    """The tickets a run was given: the numbered lines of its prompt."""
+    pf = f.with_suffix(".prompt.md")
+    text = pf.read_text(encoding="utf-8") if pf.exists() else ""
+    return re.findall(r"^\d+\. .*\((B\d+), (?:P\d)?\)", text, re.M)
+
+
+def pack_session(f: Path) -> str:
+    """The agent's session id, from the first lines of a run's log."""
+    try:
+        with f.open(encoding="utf-8", errors="replace") as fh:
+            for _, line in zip(range(30), fh):
+                m = re.search(r'"session_id":\s*"([0-9a-f-]{36})"', line)
+                if m:
+                    return m.group(1)
+    except OSError:
+        pass
+    return ""
+
+
+def live_packs(root: Path) -> list[Path]:
+    """Every run in this project still going, of any start time."""
+    return [f for f in sorted((root / PACK_DIR).glob("*.jsonl"))
+            if f.with_suffix(".pid").exists() and pid_alive(f.with_suffix(".pid").read_text()) and pack_lane(f)["running"]]
+
+
+def pack_history(root: Path, tid: str) -> list[str]:
+    """One line per earlier run of this ticket, for the prompt of the next one: when, how it ended, its last words."""
+    out = []
+    for f in sorted((root / PACK_DIR).glob("*.jsonl")):
+        if tid not in pack_tickets_of(f):
+            continue
+        lane = pack_lane(f)
+        start = dt.datetime.strptime(f.stem[:13], "%Y%m%d-%H%M")
+        mins = lane.get("minutes") or max(1, round((f.stat().st_mtime - start.timestamp()) / 60))
+        if lane["running"]:
+            how = "still going"
+        elif "stopped" in lane:
+            how = f"stopped by {lane['stopped'].get('by') or 'hand'}"
+        elif "result" in lane:
+            how = "finished" + (f", ${lane['cost_usd']:.2f}" if lane.get("cost_usd") is not None else "")
+        else:
+            how = "broke off without a result"
+        words = lane.get("result") or lane.get("last") or ""
+        out.append(f"- {tid}, {start:%d.%m %H:%M}, {mins} min, {how}"
+                   + (f". Its last words: {clip(' '.join(words.split()), 700)}" if words else "")
+                   + f" (log: {(PACK_DIR / f.name).as_posix()})")
+    return out
+
+
+def pack_stop(root: Path, cfg: dict, run: str, by: str) -> int:
+    """Stop one run: its own process group only; the tasks it holds go back to the queue, noted in their history."""
+    import signal
+    import time
+    f = root / PACK_DIR / f"{run}.jsonl"
+    if not f.exists():
+        print(f"agentdrop pack --stop: no run {run} in {root.name}", file=sys.stderr)
+        return 2
+    if not pack_lane(f)["running"]:
+        print(f"agentdrop pack --stop: {run} is not running", file=sys.stderr)
+        return 1
+    pid = int(f.with_suffix(".pid").read_text().strip())
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pid, sig)   # the run was started in its own session: the group is the agent and its tools
+        except ProcessLookupError:
+            break
+        except (OSError, AttributeError):
+            os.kill(pid, sig)
+        for _ in range(50):
+            if not pid_alive(str(pid)):
+                break
+            time.sleep(0.1)
+        else:
+            continue
+        break
+    at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    f.with_suffix(".stopped").write_text(json.dumps({"by": by, "at": at}, ensure_ascii=False), encoding="utf-8")
+    sid, src = pack_session(f), tasks_of(root, cfg)
+    store = isinstance(src, StoreTasks)
+    held = [c.get("ticket", "") for c in read_claims(root) if sid and c.get("session") == sid]
+    for tid in dict.fromkeys(pack_tickets_of(f) + held):
+        if tid in held:
+            (root / CLAIMS / f"{tid}.json").unlink(missing_ok=True)
+            if store:
+                src.released(tid, by)
+        if store and src.record(tid):
+            src.journal(tid, by, "run stopped", {"run": run, "held": tid in held})
+    print(f"✓ stopped {run}" + (f"; back in the queue: {', '.join(held)}" if held else ""))
+    return 0
+
+
 def cmd_pack(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="agentdrop pack",
                                 description="A dense autonomous run: the frontier tickets (not waiting for anyone "
@@ -3922,8 +4027,13 @@ def cmd_pack(argv: list[str]) -> int:
                                      f"else {PACK_EFFORT}); subagents keep their own model settings")
     p.add_argument("--run", action="store_true", help="Start it now, detached; prints where it writes")
     p.add_argument("--last", action="store_true", help="How the latest run in this project is doing, or its brief")
+    p.add_argument("--stop", metavar="RUN", help="Stop this run (its log's name, 20260927-1307): only its own "
+                                                 "processes; the tasks it holds go back to the queue")
+    p.add_argument("--by", help="Who stops it, for the tasks' history (default: the owner's name)")
     a = p.parse_args(argv)
     root, cfg = find_root(Path(os.path.expanduser(a.path))), load_config()
+    if a.stop:
+        return pack_stop(root, cfg, a.stop, a.by or owner_name(cfg, owner_ru(cfg)))
     effort = a.effort or cfg.get("pack_effort", PACK_EFFORT)
     prev = last_pack(root)
     if a.last:
@@ -3955,19 +4065,32 @@ def cmd_pack(argv: list[str]) -> int:
     lanes = [tickets[k::j] for k in range(j)]   # dealt in priority order: lane 1 gets the 1st, (j+1)th, …
     budget = a.budget / j
     name = owner_name(cfg, s["ru"])
-    store = isinstance(tasks_of(root, cfg), StoreTasks)
-    prompts = [pack_prompt(s, lane, budget, name, (k + 1, j), [t for t in tickets if t not in lane], store)
+    src = tasks_of(root, cfg)
+    store = isinstance(src, StoreTasks)
+    past = {t["id"]: pack_history(root, t["id"]) for t in tickets} if a.only else {}
+    prompts = [pack_prompt(s, lane, budget, name, (k + 1, j), [t for t in tickets if t not in lane], store,
+                           [x for t in lane for x in past.get(t["id"], [])])
                for k, lane in enumerate(lanes)]
     if not a.run:
         print("\n\n---\n\n".join(prompts))
         return 0
-    live = [lane["stamp"] for lane in prev if lane["running"]]
+    # a run of named tickets may go beside other runs, as long as none of them has these tickets
+    mine = {t["id"] for t in tickets}
+    live = [f.stem for f in live_packs(root) if not a.only or mine & set(pack_tickets_of(f))]
     if live:
         print(f"agentdrop pack: a run is still going ({', '.join(live)}); `agentdrop pack --last`", file=sys.stderr)
         return 2
+    if a.only:   # a claim left by an earlier run of these tickets that died is no one's any more
+        dead = {pack_session(f) for f in (root / PACK_DIR).glob("*.jsonl")
+                if mine & set(pack_tickets_of(f)) and not pack_lane(f)["running"]} - {""}
+        for c in read_claims(root):
+            if c.get("ticket") in mine and c.get("session") in dead:
+                (root / CLAIMS / f"{c['ticket']}.json").unlink(missing_ok=True)
     import shlex
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
     d = root / PACK_DIR
+    if any(d.glob(f"{stamp}*")):   # another run started this minute: seconds keep the names apart
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     d.mkdir(parents=True, exist_ok=True)
     # its own session/process group: closing the chat or the terminal that started it doesn't stop it
     detach = ({"creationflags": 0x00000008 | 0x00000200} if platform.system() == "Windows"
@@ -3984,6 +4107,9 @@ def cmd_pack(argv: list[str]) -> int:
                 (d / f"{name_k}.err").open("w") as err:
             proc = subprocess.Popen(cmd, cwd=root, stdin=inp, stdout=out, stderr=err, **detach)
         (d / f"{name_k}.pid").write_text(str(proc.pid))
+        if store:
+            for t in lane:
+                src.journal(t["id"], "agentdrop pack", "run started", {"run": name_k, "pid": proc.pid})
         print(f"· started{f' lane {k}' if j > 1 else ''}: {', '.join(t['id'] for t in lane)}, cap ${budget:g}, "
               f"effort {effort}, pid {proc.pid}")
     print(f"· sessions in {d}; progress and the briefs: `agentdrop pack --last`")
@@ -4927,6 +5053,11 @@ class StoreTasks:
             conn.executemany("INSERT INTO links (project, task, after) VALUES (?, ?, ?)", [(self.project, tid, x) for x in after])
             self._event(conn, tid, author, "created", {**rec, "after": after})
         return self.record(tid)
+
+    def journal(self, tid: str, author: str, what: str, detail: dict) -> None:
+        """An event in the task's history that changes nothing else: a run started or stopped."""
+        with self._write() as conn:
+            self._event(conn, self._resolve(tid), author, what, detail)
 
     def released(self, tid: str, author: str) -> None:
         """`agentdrop release`: a task still in work goes back to the queue when its session lets go."""

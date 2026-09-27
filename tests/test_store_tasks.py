@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -266,6 +267,90 @@ class MarkdownUntouched(StoreProject):
         self.assertEqual(self.run_ad("task", "where").returncode, 1)
         self.assertIn("claimed", self.ok("claim", "B7", session="s1"))
         self.assertEqual(self.snapshot(), self.docs)
+
+
+WORKER = """import json, os, re, subprocess, sys, time, uuid
+prompt = sys.stdin.read()   # as `claude -p` gets it
+sid = str(uuid.uuid4())
+print(json.dumps({"type": "system", "subtype": "init", "session_id": sid}), flush=True)
+tid = re.search(r"^1\\. .*\\((B\\d+), ", prompt, re.M).group(1)
+subprocess.run([sys.executable, AGENTDROP_PATH, "task", "take", tid], env=dict(os.environ, AGENTDROP_SESSION=sid),
+               stdout=subprocess.DEVNULL)
+print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": f"Half of {tid} done."}]}}),
+      flush=True)
+child = subprocess.Popen(["sleep", "60"])   # a tool the agent runs: it dies with the run
+open(f"child-{tid}.pid", "w").write(str(child.pid))
+time.sleep(60)
+"""
+
+
+class Runs(StoreProject):
+    """Start a run for one task, stop only that run, continue with what the earlier runs did."""
+
+    def setUp(self):
+        super().setUp()
+        self.to_store()
+        (self.home / "worker.py").write_text(WORKER.replace("AGENTDROP_PATH", repr(str(REPO / "agentdrop"))),
+                                             encoding="utf-8")
+        self.config(f"pack_worker = {sys.executable} {self.home / 'worker.py'}\n", append=True)
+        self.addCleanup(lambda: [self.kill(f.read_text()) for f in (self.root / "docs" / ".runs" / "pack").glob("*.pid")])
+
+    @staticmethod
+    def kill(pid):
+        try:
+            os.killpg(int(pid), 9)
+        except OSError:
+            pass
+
+    @staticmethod
+    def alive(pid):
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            return False
+        r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+        return not r.stdout.strip().startswith("Z")
+
+    def wait(self, cond, what):
+        for _ in range(100):
+            if cond():
+                return
+            time.sleep(0.1)
+        self.fail(f"timed out waiting for {what}")
+
+    def run_of(self, tid):
+        runs = self.root / "docs" / ".runs" / "pack"
+        return max((f for f in runs.glob("*.prompt.md") if f"({tid}, " in f.read_text()), key=lambda f: f.stat().st_mtime)
+
+    def test_start_stop_only_this_run_continue_with_history(self):
+        self.ok("pack", "--only", "B7", "--run")
+        self.wait(lambda: (self.root / "child-B7.pid").exists(), "the B7 run's tool")
+        self.ok("pack", "--only", "B9", "--run")   # another task's run goes beside it
+        self.wait(lambda: (self.root / "child-B9.pid").exists(), "the B9 run's tool")
+        self.assertEqual(self.run_ad("pack", "--only", "B7", "--run").returncode, 2)   # not twice for one task
+        self.assertEqual(self.state("B7"), "running")
+
+        b7, b9 = self.run_of("B7").name.split(".")[0], self.run_of("B9").name.split(".")[0]
+        runs = self.root / "docs" / ".runs" / "pack"
+        pids = {t: (runs / f"{s}.pid").read_text() for t, s in (("B7", b7), ("B9", b9))}
+        tools = {t: (self.root / f"child-{t}.pid").read_text() for t in ("B7", "B9")}
+        out = self.ok("pack", "--stop", b7)
+        self.assertIn("back in the queue: B7", out)
+        self.assertFalse(self.alive(pids["B7"]) or self.alive(tools["B7"]))
+        self.assertTrue(self.alive(pids["B9"]) and self.alive(tools["B9"]))   # only this run's processes
+        self.assertEqual((self.state("B7"), self.state("B9")), ("queued", "running"))
+        self.assertFalse((self.root / "docs" / ".claims" / "B7.json").exists())
+        events = [e["what"] for e in self.rows("SELECT what FROM events WHERE task = 'B7' ORDER BY id")]
+        self.assertEqual(events[-5:], ["run started", "state", "taken", "state", "run stopped"])
+        self.assertEqual(self.run_ad("pack", "--stop", b7).returncode, 1)   # already stopped
+
+        prompt = self.ok("pack", "--only", "B7")   # continuing: the new run is told what the earlier one did
+        self.assertIn("This continues earlier runs", prompt)
+        self.assertRegex(prompt, r"- B7, \d\d\.\d\d \d\d:\d\d, \d+ min, stopped by Owner\. Its last words: Half of B7 done\.")
+        self.assertNotIn("Half of B9", prompt)
+        self.assertIn("run stopped", self.ok("task", "show", "B7"))   # and the task's history shows the runs
+        self.ok("pack", "--only", "B7", "--run")
+        self.wait(lambda: self.state("B7") == "running" and len(list(runs.glob("*.prompt.md"))) == 3, "the next B7 run")
 
 
 class OldStore(StoreProject):
