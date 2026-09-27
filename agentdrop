@@ -89,7 +89,7 @@ START_HOOK_CMD = '"$CLAUDE_PROJECT_DIR"/scripts/check_docs.sh --session-start'
 # Kit files agentdrop owns: refreshed in projects on every run (old copy backed up), unlike the
 # docs templates, which are only created. Project-specific tweaks go to .docs-allow and AGENTS.md.
 OWNED = {"scripts/check_docs.sh", ".githooks/pre-commit", ".claude/skills/review-intake/SKILL.md",
-         ".claude/skills/harvest/SKILL.md", "scripts/owner_asks.py", ".claude/agents/skeptic.md",
+         ".claude/skills/harvest/SKILL.md", ".claude/skills/grill/SKILL.md", "scripts/owner_asks.py", ".claude/agents/skeptic.md",
          ".claude/agents/acceptance-judge.md"}
 
 # Where the project docs live relative to git: the owner's answer is kept in the code repo's

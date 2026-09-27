@@ -135,6 +135,7 @@ docs/
   reviews/inbox/           drop raw reviews here
 .claude/skills/review-intake/
 .claude/skills/harvest/    moves lessons from this project into your rules
+.claude/skills/grill/      turns a fuzzy idea into a plan by questions in rounds
 .claude/settings.json      Claude Code hooks: the guard on Stop, reminders on SessionStart
 scripts/check_docs.sh      guard: markdown only where the map allows
 .githooks/pre-commit       runs the guard on staged files
@@ -143,6 +144,10 @@ scripts/check_docs.sh      guard: markdown only where the map allows
 The docs templates are created once and are yours from then on. The files agentdrop owns (the guard, the git hook, the skills, the research scripts and agents) are refreshed on every `agentdrop .`, with the old copy backed up.
 
 The managed block in `AGENTS.md` holds only the charter: where each kind of note goes, how to finish a pass, and which file wins when instructions conflict. A new entry in `DECISIONS.md` has to end with a `Decided: who, where, quote` line; the guard rejects it otherwise, so agent defaults land in `QUESTIONS.md` instead of posing as decisions. Your common rules stay in the global configs, so no session loads them twice. Anything project-specific goes above the block. agentdrop never rewrites that part.
+
+## Planning: grill
+
+A new idea rarely arrives as a plan. It comes as a paragraph, a pasted brief or five asks in one message, and building from that means guessing. When you bring something like that, the agent offers a grill (the `grill` skill, adapted from Matt Pocock's `grilling` and `domain-modeling`). It questions you in rounds. Every question has the agent's own pick next to it, so you answer with a word: "1 ok, 2 b, 3 only on the phone". It looks up the facts itself and asks you only for decisions. After each round the settled terms go into the glossary in `CONTEXT.md`, and choices that are costly to undo go into `DECISIONS.md` with your words. When nothing is left open, it writes the spec to `docs/specs/` and offers to cut it into tickets. On the first real use, 18 decisions took six replies, and the picture ended up on paper rather than in one chat.
 
 ## The loop: harvest
 
