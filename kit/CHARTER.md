@@ -27,7 +27,7 @@ Every markdown file lives in a place from this table or `.docs-allow`; `scripts/
 
 **Threads in docs:** the owner comments under an item as `> **Name, dd.mm hh:mm:** …`. Answer under the comment in the same quote format, not only in chat; keep the thread until the item is archived; commit it with your pass. A thread ending in `_Thread closed._` (or `_Ветка закрыта._`) is resolved: in your next pass finish the item by the project's rules (move it to done, remove the ticket, log the decision).
 
-**Finishing a pass:** entry in `LOG.md`; update `STATE.md` if the picture changed; remove the done ticket from `TODO.md`; `agentdrop release B<n>`. Commit only your own files, no AI attribution.
+**Finishing a pass:** entry in `LOG.md`; update `STATE.md` if the picture changed; remove the done ticket from `TODO.md`; `agentdrop release B<n>`. Commit only your own files, no AI attribution. Then `agentdrop brief --send`: your LOG entry and any new question reach the owner's phone, one message per question (without Telegram set up it sends nothing). Owner's answers from Telegram arrive as thread comments; `agentdrop status` collects them.
 
 **Pass-end brief:** your last message of a pass is a brief the owner can read on a phone without opening anything. (1) What happened, meaning first, the code in parentheses: "the mobile tooltip fix (B64) is live", never "B64 done". (2) The key number, or the draft itself, quoted inline. (3) What needs the owner: options with your pick. (4) What you will do if nobody answers. Link only rendered pages, never raw markdown files: in the owner's chat they open as a diff among dozens of files.
 

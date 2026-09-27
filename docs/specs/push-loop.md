@@ -64,7 +64,7 @@ Against the owner's words above:
 ## Order of passes
 
 1. `status`, `claim`/`release`, charter rules for claims and the pass-end brief. Pilot in both projects.
-2. `brief` and the notifier (Telegram through the owner's existing bot relay).
+2. `brief` and the notifier (Telegram through the owner's existing bot relay). Done 27.09: a head message plus one message per waiting item, at most 5 per brief; an item comes again when it changes or after 24 hours unanswered. Replies are collected by `status`, `brief --send` and `agentdrop replies`, so there is still no daemon; the bot confirms each saved answer, and an answer to an item closed in the meantime becomes a new item in QUESTIONS. Sent live to both pilots.
 3. `accept` in the web app pilot, then the research variant.
 4. The dispatcher on a schedule.
 5. Harvest: generalize whatever the pilots taught into the public kit and README.

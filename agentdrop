@@ -1201,10 +1201,11 @@ def clip(text: str, n: int = 220) -> str:
     return cut + "…"
 
 
-def md_items(text: str) -> list[tuple[list[str], str]]:
-    """Top-level `- ` list items with their indented continuation, and the headings above each."""
-    items, heads, cur = [], {}, None
-    for line in text.splitlines():
+def md_spans(lines: list[str]) -> list[tuple[list[str], int, int]]:
+    """Top-level `- ` list items as line ranges [start, end), trailing blank lines excluded,
+    with the headings above each. An item runs on through blank and indented lines."""
+    spans, heads, cur = [], {}, None
+    for i, line in enumerate(lines):
         h = re.match(r"^(#{1,4})\s+(.*)", line)
         if h:
             cur = None
@@ -1213,13 +1214,20 @@ def md_items(text: str) -> list[tuple[list[str], str]]:
             heads[level] = h.group(2).strip()
             continue
         if line.startswith("- "):
-            cur = [line[2:]]
-            items.append(([heads[k] for k in sorted(heads)], cur))
+            cur = [[heads[k] for k in sorted(heads)], i, i + 1]
+            spans.append(cur)
         elif cur is not None and (not line.strip() or line[:1] in (" ", "\t")):
-            cur.append(line)
+            if line.strip():
+                cur[2] = i + 1
         else:
             cur = None
-    return [(hs, "\n".join(lines).rstrip()) for hs, lines in items]
+    return [(hs, a, b) for hs, a, b in spans]
+
+
+def md_items(text: str) -> list[tuple[list[str], str]]:
+    """Top-level `- ` list items with their indented continuation, and the headings above each."""
+    lines = text.splitlines()
+    return [(hs, "\n".join([lines[a][2:], *lines[a + 1:b]]).rstrip()) for hs, a, b in md_spans(lines)]
 
 
 def bold_title(text: str) -> tuple[str, str]:
@@ -1259,6 +1267,7 @@ def parse_todo(root: Path, cfg: dict) -> list[dict]:
             "context": "" if why else clip(body, 200),
             "waits": clip(waits.group(0), 110) if waits else "",
             "waits_owner": bool(waits and by_owner(waits.group(0), words)),
+            "detail": clip(body.strip(), 700),
         })
     return out
 
@@ -1279,14 +1288,16 @@ def parse_questions(root: Path, cfg: dict) -> dict:
         if not to_owner:
             res["people"] += 1
             continue
-        title, body = bold_title(text)
+        key, body = bold_title(text)
+        title = key
         if REVERT_RE.search(path) or REVERT_RE.search(body[:300]):
             res["revertible"] += 1
             continue
         code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)\.\s*", title)
         if code:
             title = f"{title[code.end():].rstrip('. ')} ({code.group(1)})"
-        authors = [m.group(1).strip() for line in text.splitlines() if (m := COMMENT_RE.match(line))]
+        comments = [(m.group(1).strip(), line) for line in text.splitlines() if (m := COMMENT_RE.match(line))]
+        authors = [a for a, _ in comments]
         if authors and by_owner(authors[-1], words):
             res["your_turn"].append(clip(title.rstrip(". "), 90))
             continue
@@ -1297,6 +1308,9 @@ def parse_questions(root: Path, cfg: dict) -> dict:
             "context": clip(para, 220),
             "pick": clip(reco.group(0), 200) if reco else "",
             "thread": len(authors),
+            "doc": "QUESTIONS.md", "key": f"**{key}**" if key else text.split("\n", 1)[0][:80],
+            "detail": clip(re.split(r"\n\s*>", body, maxsplit=1)[0], 700),
+            "last": clip(re.sub(r"^\s*>\s*", "", comments[-1][1]), 400) if comments else "",
         })
     return res
 
@@ -1587,6 +1601,8 @@ def cmd_status(argv: list[str]) -> int:
     if not (root / "docs" / "TODO.md").is_file():
         print(f"agentdrop status: no docs/TODO.md in {root} or above", file=sys.stderr)
         return 2
+    for note in sync_replies(timeout=6):   # the owner's Telegram answers land before anyone reads the docs
+        print(note, file=sys.stderr)
     s = collect_status(root)
     print(json.dumps(s, ensure_ascii=False, indent=1) if a.json else render_status(s))
     if a.mark_seen:
@@ -1672,7 +1688,447 @@ def cmd_release(argv: list[str]) -> int:
     return 0
 
 
-COMMANDS = {"status": cmd_status, "claim": cmd_claim, "release": cmd_release}
+# ---------------------------------------------------------------------------
+# Push loop, pass 2: `agentdrop brief` and the owner's answers from Telegram.
+# A brief is one short head message plus one message per item that waits for the owner.
+# The owner answers by replying to an item's message; `agentdrop replies` (also run by
+# `status` and `brief --send`) writes the answer under that item as a thread comment.
+
+TG_ENV = STATE / "telegram.env"      # TG_BOT_TOKEN, TG_CHAT_ID; TG_RELAY_URL, TG_RELAY_KEY where Telegram is blocked
+TG_STATE = STATE / "telegram.json"   # update offset, message id → item, when each item was last sent
+TG_LOCK = STATE / "telegram.lock"    # one reader of the bot's updates at a time, or an answer is written twice
+BRIEF_ITEMS = 5                      # item messages per brief; the rest wait for the next one
+RESEND_HOURS = 24                    # an unanswered, unchanged item comes again after this
+QUIET_HOURS = (23, 9)                # messages arrive without sound
+KEEP_DAYS = 45
+HINT_HOURS = 2                       # "reply to an item" hints only for fresh messages
+
+BRIEF = {
+    "kind_brief": ("brief", "сводка"),
+    "kind_decision": ("decision needed", "нужно решение"),
+    "waiting": ("Waiting for you: {n}", "Ждут тебя: {n}"),
+    "below": ("{n} below, one message each", "{n} ниже, по одному сообщению"),
+    "earlier": ("{n} sent earlier, answer those", "{n} уже присылал, отвечай на те"),
+    "later": ("{n} more in the next brief", "ещё {n} в следующей сводке"),
+    "your_turn": ("you answered {n}, the agent's turn", "на {n} ты ответил, ход агента"),
+    "running": ("Running", "Идёт"),
+    "done": ("Done", "Сделано"),
+    "next": ("Next", "Дальше"),
+    "pick": ("Proposal", "Предложение"),
+    "last": ("Last in the thread", "Последнее в ветке"),
+    "reply_hint": ("Reply to this message: your answer goes under the item in {doc}.",
+                   "Ответь на это сообщение: ответ ляжет веткой под пункт в {doc}."),
+    "saved": ("Saved under «{title}» in {project}, {doc}.", "Записал под «{title}» в {project}, {doc}."),
+    "moved": ("«{title}» is gone from {project}, {doc} (closed?). Saved as a new item in QUESTIONS.md.",
+              "«{title}» в {project}, {doc} больше нет (закрыт?). Записал новым пунктом в QUESTIONS.md."),
+    "no_project": ("Project {project} isn't on this machine ({root}); the answer is not saved.",
+                   "Проекта {project} нет на этой машине ({root}); ответ не записан."),
+    "not_item": ("This message isn't tied to an item. Reply to the message of the item you're answering.",
+                 "Это сообщение не привязано к пункту. Ответь реплаем на сообщение того пункта, о котором речь."),
+    "text_only": ("Only text answers for now.", "Пока понимаю только текст."),
+    "new_item": ("Answer from Telegram about «{title}»", "Ответ из Telegram про «{title}»"),
+}
+
+
+class TgError(Exception):
+    pass
+
+
+def tg_env() -> dict:
+    env = {}
+    try:
+        for line in TG_ENV.read_text(encoding="utf-8").splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.split("=", 1)
+                env[k.strip().removeprefix("export ").strip()] = v.strip().strip("\"'")
+    except OSError:
+        pass
+    return env if env.get("TG_BOT_TOKEN") and env.get("TG_CHAT_ID") else {}
+
+
+def tg_call(env: dict, method: str, payload: dict, timeout: float = 20) -> object:
+    import urllib.error
+    import urllib.request
+    base = (env.get("TG_RELAY_URL") or "https://api.telegram.org").rstrip("/")
+    # Cloudflare answers 403 to the default Python-urllib user agent
+    headers = {"content-type": "application/json", "user-agent": "agentdrop/1"}
+    if env.get("TG_RELAY_KEY"):
+        headers["x-relay-key"] = env["TG_RELAY_KEY"]
+    req = urllib.request.Request(f"{base}/bot{env['TG_BOT_TOKEN']}/{method}",
+                                 data=json.dumps(payload).encode(), headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            data = json.load(e)
+        except ValueError:
+            raise TgError(f"HTTP {e.code}") from None
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise TgError(str(getattr(e, "reason", e))) from None
+    if not data.get("ok"):
+        raise TgError(str(data.get("description", "error")))
+    return data["result"]
+
+
+def tg_html(text: str) -> str:
+    """Markdown bits of a doc line as Telegram HTML."""
+    import html
+    t = html.escape(text, quote=False)
+    # Telegram turns a bare "QUESTIONS.md" into a link to a website; a file name goes as code
+    t = "`".join(re.sub(r"(?<![\w/`])([\w.-]+(?:/[\w.-]+)*\.(?:md|py|csv|json|jsonl|sh|txt|js|html|yml|yaml))\b",
+                        r"`\1`", part) if k % 2 == 0 else part for k, part in enumerate(t.split("`")))
+    t = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", t)
+    t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t)
+    return re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', t)
+
+
+def tg_plain(text: str) -> str:
+    import html
+    return html.unescape(re.sub(r"<[^>]+>", "", text))
+
+
+def tg_send(env: dict, text: str, reply_to: int | None = None) -> int:
+    hour = dt.datetime.now().hour
+    payload = {"chat_id": env["TG_CHAT_ID"], "text": text, "parse_mode": "HTML",
+               "link_preview_options": {"is_disabled": True},
+               "disable_notification": hour >= QUIET_HOURS[0] or hour < QUIET_HOURS[1]}
+    if reply_to:
+        payload["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
+    try:
+        return tg_call(env, "sendMessage", payload)["message_id"]
+    except TgError as e:
+        if "parse" not in str(e).lower():
+            raise
+        payload.pop("parse_mode")   # a tag broke somewhere: the same words, without formatting
+        payload["text"] = tg_plain(text)
+        return tg_call(env, "sendMessage", payload)["message_id"]
+
+
+def tg_state() -> dict:
+    try:
+        st = json.loads(TG_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        st = {}
+    st.setdefault("offset", 0)
+    st.setdefault("messages", {})
+    st.setdefault("items", {})
+    return st
+
+
+def save_tg_state(st: dict) -> None:
+    cutoff = (dt.datetime.now().astimezone() - dt.timedelta(days=KEEP_DAYS)).isoformat()
+    st["messages"] = {k: v for k, v in st["messages"].items() if v.get("at", "") >= cutoff}
+    st["items"] = {k: v for k, v in st["items"].items() if v.get("at", "") >= cutoff}
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp = TG_STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    os.replace(tmp, TG_STATE)
+
+
+class tg_lock:
+    """A lock file, so two sessions running `status` at once don't both take the same answer."""
+
+    def __enter__(self):
+        import time
+        STATE.mkdir(parents=True, exist_ok=True)
+        for _ in range(50):
+            try:
+                os.close(os.open(TG_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - TG_LOCK.stat().st_mtime > 120:
+                        TG_LOCK.unlink()
+                        continue
+                except OSError:
+                    continue
+                time.sleep(0.2)
+        raise TgError("another agentdrop holds the Telegram lock")
+
+    def __exit__(self, *exc):
+        try:
+            TG_LOCK.unlink()
+        except OSError:
+            pass
+
+
+def owner_name(cfg: dict, ru: bool) -> str:
+    names = [n.strip() for n in cfg.get("owner", "").split(",") if n.strip()]
+    return names[0] if names else ("Владелец" if ru else "Owner")
+
+
+def owner_ru(cfg: dict) -> bool:
+    return bool(re.search(r"[а-яё]", cfg.get("owner", ""), re.I))
+
+
+def item_span(lines: list[str], ref: dict) -> tuple[int, int] | None:
+    code = ref.get("code")
+    for _, a, b in md_spans(lines):
+        first = lines[a][2:]
+        if ref["kind"] == "ticket":
+            m = ITEM_TICKET.match(first.replace("**", "", 1) if first.startswith("**") else first)
+            if m and m.group(2) == ref["key"]:
+                return a, b
+        elif first.startswith(ref["key"]) or (code and first.startswith(f"**{code}.")):
+            return a, b
+    return None
+
+
+def quote_lines(author: str, when: str, text: str, indent: str) -> list[str]:
+    body = [f"**{author}, {when}:** " + (text.strip().splitlines() or [""])[0].strip()]
+    body += [t.rstrip() for t in text.strip().splitlines()[1:]]
+    out = []
+    for k, t in enumerate(body):
+        more = k < len(body) - 1 and body[k + 1].strip()
+        out.append(f"{indent}> {t}{'  ' if t.strip() and more else ''}" if t.strip() else f"{indent}>")
+    return out
+
+
+def add_thread_comment(ref: dict, author: str, when: str, text: str) -> str:
+    """Write the owner's answer under the item: "saved", or "moved" when the item is gone
+    and the answer became a new item in QUESTIONS.md."""
+    root = Path(ref["root"])
+    path = root / "docs" / ref["doc"]
+    lines = read(path).split("\n") if path.is_file() else []
+    span = item_span(lines, ref)
+    if span:
+        _, b = span
+        new = quote_lines(author, when, text, "  ")
+        lines[b:b] = new if lines[b - 1].lstrip().startswith(">") else ["", *new]
+        write(path, "\n".join(lines))
+        return "saved"
+    qpath = root / "docs" / "QUESTIONS.md"
+    qlines = read(qpath).split("\n") if qpath.is_file() else ["# QUESTIONS", ""]
+    heads = [i for i, l in enumerate(qlines) if l.startswith("## ")]
+    open_heads = [i for i in heads if not re.search(r"(?i)закрыт|closed|resolved", qlines[i])]
+    ru = bool(ref.get("ru"))
+    words = owner_words(load_config())
+    start = next((i for i in open_heads if by_owner(qlines[i], words)), open_heads[0] if open_heads else None)
+    end = next((i for i in heads if start is not None and i > start), len(qlines))
+    while end > 0 and not qlines[end - 1].strip():
+        end -= 1
+    item = ["", f"- **{BRIEF['new_item'][ru].format(title=ref['title'])}** ({ref['doc']})", "",
+            *quote_lines(author, when, text, "  ")]
+    qlines[end:end] = item + ([""] if end < len(qlines) and qlines[end].strip() else [])
+    write(qpath, "\n".join(qlines))
+    return "moved"
+
+
+def pull_replies(env: dict, st: dict, cfg: dict, timeout: float = 20) -> list[str]:
+    notes = []
+    ups = tg_call(env, "getUpdates", {"offset": st["offset"], "timeout": 0, "allowed_updates": ["message"]},
+                  timeout=timeout)
+    for u in ups:
+        st["offset"] = u["update_id"] + 1
+        m = u.get("message") or {}
+        if str(m.get("chat", {}).get("id")) != str(env["TG_CHAT_ID"]):
+            save_tg_state(st)
+            continue
+        rt = m.get("reply_to_message") or {}
+        ref = st["messages"].get(str(rt.get("message_id"))) if rt else None
+        text = (m.get("text") or m.get("caption") or "").strip()
+        ru = bool(ref.get("ru")) if ref else owner_ru(cfg)
+        B = lambda k, **kw: BRIEF[k][ru].format(**kw)
+        if ref is None or (ref and not text) or (ref and not Path(ref["root"]).is_dir()):
+            save_tg_state(st)
+            recent = dt.datetime.now().timestamp() - m.get("date", 0) < HINT_HOURS * 3600
+            if ref is None and (not text or text.startswith("/") or not recent):
+                continue   # chatter, commands and old messages from before agentdrop read this bot
+            reason = (B("not_item") if ref is None else B("text_only") if not text
+                      else B("no_project", project=ref["project"], root=ref["root"]))
+            tg_send(env, reason, reply_to=m.get("message_id"))
+            notes.append(f"· Telegram: «{clip(text, 60)}» → {reason}")
+            continue
+        when = dt.datetime.fromtimestamp(m.get("date", 0)).strftime("%d.%m %H:%M")
+        how = add_thread_comment(ref, owner_name(cfg, ru), when, text)
+        save_tg_state(st)   # before the ack: a failed ack must never write the answer twice
+        ack = B(how, title=clip(ref["title"], 80), project=ref["project"], doc=ref["doc"])
+        tg_send(env, ack, reply_to=m.get("message_id"))
+        notes.append("· Telegram: " + ack)
+    save_tg_state(st)
+    return notes
+
+
+def sync_replies(timeout: float = 20) -> list[str]:
+    """Pull the owner's answers into the docs; quiet no-op when Telegram isn't set up."""
+    env = tg_env()
+    if not env or os.environ.get("AGENTDROP_OFFLINE"):
+        return []
+    try:
+        with tg_lock():
+            return pull_replies(env, tg_state(), load_config(), timeout)
+    except TgError as e:
+        return [f"! Telegram: {e}"]
+
+
+def item_message(s: dict, kind: str, it: dict) -> str:
+    ru = s["ru"]
+    B = lambda k, **kw: BRIEF[k][ru].format(**kw)
+    parts = [f"<b>{tg_html(s['project'])} · {B('kind_decision')}</b>"]
+    if kind == "question":
+        parts.append(f"<b>{tg_html(it['title'])}</b>")
+        if it.get("detail"):
+            parts.append(tg_html(it["detail"]))
+        if it["pick"] and it["pick"][:60] not in it.get("detail", ""):
+            parts.append(f"{B('pick')}: {tg_html(it['pick'])}")
+        if it.get("last"):
+            parts.append(f"{B('last')}: {tg_html(it['last'])}")
+    else:
+        parts.append(f"<b>{tg_html(it['title'])}</b> ({it['id']}, {it['priority']})")
+        if it["why"]:
+            parts.append(f"{LABELS['why'][ru].capitalize()}: {tg_html(it['why'])}")
+        parts.append(tg_html(it.get("detail") or it["waits"]))
+    parts.append(f"<i>{B('reply_hint', doc='<code>' + it.get('doc', 'TODO.md') + '</code>')}</i>")
+    return "\n\n".join(parts)
+
+
+def head_message(s: dict, new: int, earlier: int, later: int) -> str:
+    ru = s["ru"]
+    B = lambda k, **kw: BRIEF[k][ru].format(**kw)
+    out = [f"<b>{tg_html(s['project'])} · {B('kind_brief')}</b>"]
+    w = s["waiting"]
+    total = len(w["questions"]) + len(w["tickets"])
+    if total:
+        bits = [B(k, n=n) for k, n in (("below", new), ("earlier", earlier), ("later", later)) if n]
+        out.append(B("waiting", n=total) + (f" ({'; '.join(bits)})" if bits else ""))
+    if w["your_turn"]:
+        out.append(B("your_turn", n=len(w["your_turn"])))
+    claims = s["running"]["claims"]
+    if claims:
+        out.append(f"\n<b>{B('running')}</b>")
+        for c in claims[:5]:
+            idle = age(c["idle_seconds"], ru)
+            state = LABELS["stale"][ru].format(a=idle) if c["stale"] else LABELS["active"][ru].format(a=idle)
+            out.append(f"- {tg_html(c['title'] or c.get('ticket', ''))} ({c.get('ticket')}), {state}")
+    done = s["done"]["entries"]
+    if done:
+        out.append(f"\n<b>{B('done')}</b>")
+        for e in done[:4]:
+            out.append(f"- {tg_html(clip(e['heading'], 140))}" + (f"\n  {tg_html(clip(e['first'], 160))}"
+                                                                   if e["first"] else ""))
+        if len(done) > 4:
+            out.append(f"  … {LABELS['more'][ru].format(n=len(done) - 4)}")
+    nxt = s["next"]["tickets"][:3]
+    if nxt:
+        out.append(f"\n<b>{B('next')}</b>")
+        out += [f"- {tg_html(t['title'])} ({t['id']}, {t['priority']})" for t in nxt]
+    return "\n".join(out)
+
+
+def plan_brief(root: Path, s: dict, st: dict, cfg: dict, everything: bool = False) -> list[dict]:
+    """The messages a brief sends now: the head, then items that are new, changed or unanswered
+    for RESEND_HOURS. Empty when nothing changed since the last brief."""
+    now = dt.datetime.now().astimezone()
+    resend = float(cfg.get("brief_resend_hours", RESEND_HOURS))
+    w = s["waiting"]
+    fresh, earlier = [], 0
+    for kind, it in [("question", q) for q in w["questions"]] + [("ticket", t) for t in w["tickets"]]:
+        doc_name = it.get("doc", "TODO.md")
+        key = it["key"] if kind == "question" else it["id"]
+        ident = f"{root}|{doc_name}|{key}"
+        text = item_message(s, kind, it)
+        digest = sha(text.encode())[:16]
+        prev = st["items"].get(ident)
+        sent = parse_time(prev.get("at", "")) if prev else None
+        if (not everything and prev and prev.get("hash") == digest and sent
+                and (now - sent).total_seconds() < resend * 3600):
+            earlier += 1
+            continue
+        code = re.match(r"\*\*([A-ZА-ЯЁ]{1,3}-\d+)\.", key) if kind == "question" else None
+        fresh.append({"kind": kind, "text": text, "ident": ident, "hash": digest,
+                      "ref": {"root": str(root), "project": s["project"], "doc": doc_name, "kind": kind,
+                              "key": key, "code": code.group(1) if code else "", "title": it["title"],
+                              "ru": s["ru"]}})
+    limit = int(cfg.get("brief_items", BRIEF_ITEMS))
+    later = max(0, len(fresh) - limit)
+    fresh = fresh[:limit]
+    if not (everything or fresh or s["done"]["entries"]):
+        return []
+    return [{"kind": "head", "text": head_message(s, len(fresh), earlier, later)}, *fresh]
+
+
+def deliver(msgs: list[dict], st: dict, env: dict, cfg: dict) -> str:
+    """Send the brief: Telegram when ~/.agentdrop/telegram.env is set, else the `notify` command."""
+    now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    for m in msgs:
+        if env:
+            mid = tg_send(env, m["text"])
+            if m.get("ref"):
+                st["messages"][str(mid)] = {**m["ref"], "at": now}
+        else:
+            r = subprocess.run(os.path.expanduser(cfg["notify"]), shell=True, input=tg_plain(m["text"]),
+                               text=True, capture_output=True)
+            if r.returncode != 0:
+                raise TgError(f"notify exited {r.returncode}: {clip(r.stderr, 200)}")
+        if m.get("ident"):
+            st["items"][m["ident"]] = {"hash": m["hash"], "at": now}
+        save_tg_state(st)
+    return "Telegram" if env else cfg["notify"]
+
+
+def cmd_brief(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="agentdrop brief",
+                                description="The owner's brief: a short head message and one message per item "
+                                            "that waits for the owner. Prints it; --send delivers it.")
+    p.add_argument("path", nargs="?", default=".", help="Project directory (default: the current one)")
+    p.add_argument("--send", action="store_true",
+                   help="Deliver to Telegram (~/.agentdrop/telegram.env) or the `notify` command in "
+                        "~/.agentdrop/config, and remember what was sent")
+    p.add_argument("--all", action="store_true", help="Every waiting item, also those sent recently")
+    p.add_argument("--json", action="store_true", help="Machine-readable output")
+    a = p.parse_args(argv)
+    root = find_root(Path(a.path))
+    if not (root / "docs" / "TODO.md").is_file():
+        print(f"agentdrop brief: no docs/TODO.md in {root} or above", file=sys.stderr)
+        return 2
+    cfg, env = load_config(), tg_env()
+    if a.send:
+        if not env and not cfg.get("notify"):   # not an error: the charter runs this in every project
+            print(f"· agentdrop brief: nowhere to send, nothing sent. Put TG_BOT_TOKEN and TG_CHAT_ID in {TG_ENV}, "
+                  f"or `notify = <command>` in {CONFIG}", file=sys.stderr)
+            return 0
+        for note in sync_replies():   # answers first, so the brief doesn't ask what's already answered
+            print(note, file=sys.stderr)
+    s = collect_status(root)
+    try:
+        with tg_lock():
+            st = tg_state()
+            msgs = plan_brief(root, s, st, cfg, a.all)
+            if a.json:
+                print(json.dumps(msgs, ensure_ascii=False, indent=1))
+            elif not a.send:
+                print("\n\n———\n\n".join(tg_plain(m["text"]) for m in msgs) or
+                      ("нового нет" if s["ru"] else "nothing new"))
+            if not a.send:
+                return 0
+            if not msgs:
+                print("· нового нет, ничего не отправлено" if s["ru"] else "· nothing new, nothing sent")
+                return 0
+            where = deliver(msgs, st, env, cfg)
+    except TgError as e:
+        print(f"agentdrop brief: {e}", file=sys.stderr)
+        return 1
+    mark_seen(root)
+    items = len(msgs) - 1
+    print(f"✓ {where}: сводка и пунктов {items}" if s["ru"] else f"✓ {where}: head and {items} items")
+    return 0
+
+
+def cmd_replies(argv: list[str]) -> int:
+    argparse.ArgumentParser(prog="agentdrop replies",
+                            description="Write the owner's Telegram answers under their items in the docs. "
+                                        "`status` and `brief --send` do this too.").parse_args(argv)
+    if not tg_env():
+        print(f"agentdrop replies: Telegram isn't set up ({TG_ENV})", file=sys.stderr)
+        return 2
+    notes = sync_replies()
+    print("\n".join(notes) or ("· новых ответов нет" if owner_ru(load_config()) else "· no new answers"))
+    return 1 if any(n.startswith("! ") for n in notes) else 0
+
+
+COMMANDS = {"status": cmd_status, "claim": cmd_claim, "release": cmd_release, "brief": cmd_brief,
+            "replies": cmd_replies}
 
 
 def main() -> None:

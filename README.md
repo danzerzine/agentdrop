@@ -88,13 +88,20 @@ agentdrop --no-research .   # turn it off; the registries stay
 agentdrop status            # the board for the project you're in (--json for scripts)
 agentdrop claim B41         # an agent takes a ticket at the start of a pass
 agentdrop release B41       # and gives it back at the end
+agentdrop brief --send      # the same, to your phone: one Telegram message per thing that waits for you
 ```
 
 `agentdrop status` reads the project's docs, git and claims, with no LLM involved, and answers four questions: what waits for you (open questions with their context and the proposed answer, tickets blocked on your OK), what is running (claimed tickets, which session, when it last did anything; a claim with no activity for 4 hours is marked stale), what was done since you last looked (`--mark-seen` moves that mark) and what's next (unclaimed tickets by priority, each with its "why" quote). Every line leads with its meaning, the code in parentheses.
 
 Claims live in `docs/.claims/`, one small JSON per ticket, ignored by git. A second session that tries to claim the same ticket is refused, so two agents don't work on it unknowingly. The charter tells agents to check status and claim before editing, and to end every pass with a brief you can read on a phone: what happened, the key number or draft, options with the agent's pick, and what happens if you don't answer.
 
-Settings for this machine go in `~/.agentdrop/config`, one `key = value` per line: `owner = Your Name` (how your comments are signed in the docs; the first section of `QUESTIONS.md` counts as yours otherwise) and `stale_hours = 4`.
+`agentdrop brief` turns the board into messages for a phone: a short head (how many things wait for you, what runs, what was done, what's next), then each question or blocked ticket as its own message with its context quoted. Without `--send` it only prints them. With `--send` it delivers them to Telegram and remembers what went out: an item comes again only when it changes or after 24 hours without an answer, and at most 5 items go per brief. At night (23:00–09:00) messages arrive without sound. The charter has agents run it after the last commit of a pass, so the pass's LOG entry and any new question reach you on their own.
+
+To answer, reply to the item's message in Telegram. The reply is written into the project's docs under that item as a thread comment (`> **Your Name, 27.09 10:15:** …`), the bot confirms where it went, and the next agent that runs `agentdrop status` sees it as the agent's turn. `status`, `brief --send` and `agentdrop replies` all collect replies, so nothing runs in the background. If the item was closed in the meantime, the answer becomes a new item in `QUESTIONS.md`.
+
+Telegram settings go in `~/.agentdrop/telegram.env` (keep it `chmod 600`): `TG_BOT_TOKEN` and `TG_CHAT_ID`, plus `TG_RELAY_URL` and `TG_RELAY_KEY` on a machine that can't reach `api.telegram.org` (a relay that forwards `/bot<token>/<method>` when the `x-relay-key` header matches). Only agentdrop may read the bot's updates: a second reader, or a webhook, takes replies before agentdrop sees them. The bot can still send other things, such as server alerts. Without Telegram, `notify = <command>` in the config gets each message on stdin, one run per message (replies then need another way back).
+
+Settings for this machine go in `~/.agentdrop/config`, one `key = value` per line: `owner = Your Name` (how your comments are signed in the docs; the first section of `QUESTIONS.md` counts as yours otherwise), `stale_hours = 4`, `brief_items = 5` and `brief_resend_hours = 24`.
 
 ## What a project gets
 

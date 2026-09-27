@@ -1,4 +1,5 @@
-"""End-to-end: `agentdrop status`, `claim` and `release` on a throwaway project.
+"""End-to-end: `agentdrop status`, `claim`, `release`, `brief` and Telegram replies on a throwaway
+project, with a fake Telegram Bot API on localhost standing in for the relay.
 
     python3 -m unittest discover tests
 """
@@ -8,7 +9,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -74,7 +78,7 @@ LOG = """# LOG — work log
 """
 
 
-class PushLoop(unittest.TestCase):
+class Project(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -100,6 +104,8 @@ class PushLoop(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
 
+
+class PushLoop(Project):
     def test_next_up_is_ordered_by_priority_and_quotes_why(self):
         s = self.status()
         ids = [t["id"] for t in s["next"]["tickets"]]
@@ -162,6 +168,139 @@ class PushLoop(unittest.TestCase):
         self.assertIn("--force", r.stderr)
         self.assertEqual(self.run_ad("claim", "B7", "--force", session="bbbb2222").returncode, 0)
         self.assertEqual(self.status()["running"]["claims"][0]["session"], "bbbb2222")
+
+
+class FakeTelegram:
+    """Bot API stand-in: records sendMessage, serves queued getUpdates, checks the relay key."""
+
+    def __init__(self):
+        self.sent, self.updates, self.next_id, self.bad_key = [], [], 100, 0
+        fake = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["content-length"])) or b"{}")
+                method = self.path.rsplit("/", 1)[-1]
+                if self.headers.get("x-relay-key") != "k" or not self.path.startswith("/botT0K:x/"):
+                    fake.bad_key += 1
+                    return self.reply(404, {"ok": False, "description": "not found"})
+                if method == "sendMessage":
+                    fake.next_id += 1
+                    fake.sent.append({**body, "message_id": fake.next_id})
+                    return self.reply(200, {"ok": True, "result": {"message_id": fake.next_id}})
+                if method == "getUpdates":
+                    ups = [u for u in fake.updates if u["update_id"] >= body.get("offset", 0)]
+                    return self.reply(200, {"ok": True, "result": ups})
+                self.reply(404, {"ok": False, "description": "no method"})
+
+            def reply(self, code, data):
+                raw = json.dumps(data).encode()
+                self.send_response(code)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def answer(self, text, reply_to=None, chat=42):
+        m = {"message_id": 900 + len(self.updates), "date": int(time.time()), "chat": {"id": chat}, "text": text}
+        if reply_to:
+            m["reply_to_message"] = {"message_id": reply_to, "from": {"is_bot": True}}
+        self.updates.append({"update_id": 500 + len(self.updates), "message": m})
+
+
+class Brief(Project):
+    def setUp(self):
+        super().setUp()
+        self.tg = FakeTelegram()
+        self.addCleanup(self.tg.server.shutdown)
+        (self.home / ".agentdrop").mkdir()
+        (self.home / ".agentdrop" / "telegram.env").write_text(
+            f"TG_BOT_TOKEN=T0K:x\nTG_CHAT_ID=42\nTG_RELAY_URL={self.tg.url}\nTG_RELAY_KEY=k\n", encoding="utf-8")
+
+    def by_text(self, needle):
+        return next(m for m in self.tg.sent if needle in m["text"])
+
+    def test_one_message_per_item_then_nothing_new(self):
+        r = self.run_ad("brief", "--send")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        texts = [m["text"] for m in self.tg.sent]
+        self.assertEqual(len(texts), 3)   # head, the chart question, the ticket blocked on the owner
+        self.assertTrue(texts[0].startswith("<b>proj · brief</b>"))
+        self.assertIn("Waiting for you: 2 (2 below, one message each)", texts[0])
+        self.assertIn("27.09 — B6 login page redesign\n  New login page, tests 40 green.", texts[0])
+        self.assertIn("<b>Which chart library (Q-2)</b>", texts[1])
+        self.assertIn("I recommend Recharts", texts[1])
+        self.assertIn("<b>Deploy script</b> (B8, P0)", texts[2])
+        self.assertIn("goes under the item in <code>TODO.md</code>", texts[2])
+        self.assertEqual(self.tg.bad_key, 0)
+
+        r = self.run_ad("brief", "--send")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("nothing new", r.stdout)
+        self.assertEqual(len(self.tg.sent), 3)
+
+    def test_reply_lands_under_its_item_and_is_acknowledged(self):
+        self.run_ad("brief", "--send")
+        q2 = self.by_text("Q-2")["message_id"]
+        b8 = self.by_text("(B8, P0)")["message_id"]
+        head = self.tg.sent[0]["message_id"]
+        self.tg.answer("Recharts.\nKeep it simple.", reply_to=q2)
+        self.tg.answer("OK, take the new server", reply_to=b8)
+        self.tg.answer("what about this?", reply_to=head)
+        self.tg.answer("hi from a stranger", reply_to=q2, chat=7)
+        sent_before = len(self.tg.sent)
+
+        r = self.run_ad("status", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Saved under «Which chart library (Q-2)» in proj, QUESTIONS.md", r.stderr)
+        questions = (self.root / "docs" / "QUESTIONS.md").read_text(encoding="utf-8")
+        self.assertIn("I recommend Recharts: we already use it.\n\n  > **Owner, ", questions)
+        self.assertIn(":** Recharts.  \n  > Keep it simple.\n- **Keep the beta open?**", questions)
+        self.assertNotIn("stranger", questions)
+        todo = (self.root / "docs" / "TODO.md").read_text(encoding="utf-8")
+        self.assertIn("Waiting for the owner's OK on the server.\n\n  > **Owner, ", todo)
+        self.assertIn(":** OK, take the new server\n- P2: B9", todo)
+
+        s = json.loads(r.stdout)
+        self.assertEqual(s["waiting"]["questions"], [])
+        self.assertIn("Which chart library (Q-2)", s["waiting"]["your_turn"])
+
+        acks = self.tg.sent[sent_before:]
+        self.assertEqual(len(acks), 3)   # two saved, one "not tied to an item"; the stranger gets nothing
+        self.assertEqual(acks[0]["reply_parameters"]["message_id"], 900)
+        self.assertIn("isn't tied to an item", acks[2]["text"])
+
+        self.run_ad("status")   # the same updates are never written twice
+        self.assertEqual(questions, (self.root / "docs" / "QUESTIONS.md").read_text(encoding="utf-8"))
+
+    def test_answer_to_a_closed_item_becomes_a_new_question(self):
+        self.run_ad("brief", "--send")
+        q2 = self.by_text("Q-2")["message_id"]
+        path = self.root / "docs" / "QUESTIONS.md"
+        path.write_text(QUESTIONS.replace("- **Q-2. Which chart library.** Two options: Recharts or ECharts. "
+                                          "I recommend Recharts: we already use it.\n", ""), encoding="utf-8")
+        self.tg.answer("ECharts after all", reply_to=q2)
+        r = self.run_ad("replies")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("is gone from proj", r.stdout)
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("- **Answer from Telegram about «Which chart library (Q-2)»** (QUESTIONS.md)\n\n"
+                      "  > **Owner, ", text)
+        self.assertLess(text.index("ECharts after all"), text.index("## For others"))
+
+    def test_print_without_send_touches_nothing(self):
+        r = self.run_ad("brief")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("proj · decision needed", r.stdout)
+        self.assertEqual(self.tg.sent, [])
+        self.assertFalse((self.home / ".agentdrop" / "telegram.json").exists())
 
 
 if __name__ == "__main__":
