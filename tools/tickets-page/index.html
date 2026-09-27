@@ -47,6 +47,8 @@ aside { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); align
 .group:not([open]) summary h3::after { content: "▸"; }
 .group.g-blocker h3 { color: var(--owner); }
 .row .note { font-size: 12.5px; color: var(--ink-3); line-height: 1.4; }
+.who-line { margin: 0; align-self: flex-start; padding: 6px 12px; border-radius: 8px; font-size: 14px; }
+.who-line b { font-weight: 600; }
 .triage { margin: 0; padding: 10px 14px; border-radius: 8px; font-weight: 500; background: var(--quote); }
 .triage.t-blocker { background: var(--owner-bg); color: var(--owner); }
 .triage.t-route { background: var(--others-bg); }
@@ -131,6 +133,18 @@ const STATES = [
 ];
 const LABEL = Object.fromEntries(STATES);
 let data = { projects: [], items: [] }, project = "all", triage = {};
+const WHO = {
+  blocker: ["ты", "без этого стоит чужая работа"], owner: ["ты", "нужно твоё решение"], route: ["ты", "передать людям"],
+  turn: ["агент проекта", "ты ответил, его ход"], running: ["агент проекта", "в работе"], next: ["агент проекта", "в очереди"],
+  later: ["никто", "отложено"], done: ["никто", "тикет закрыт"],
+};
+const whoOf = i => { const t = tierOf(i);
+  if (t !== "others") return WHO[t];
+  let w = (i.waits || "").replace(/^\s*(жд[её]т|жд[её]м|ждем)\s*:?\s*/i, "").replace(/`/g, "");
+  let depth = 0;   // the waits text can start inside parentheses: cut at the first unmatched ")"
+  for (let k = 0; k < w.length; k++) { if (w[k] === "(") depth++; else if (w[k] === ")" && --depth < 0) { w = w.slice(0, k); break; } }
+  w = w.replace(/\s*\([^)]*$/, "").replace(/^только после ответа /i, "ответа ").replace(/[\s,;:]+$/, "");
+  return ["другие люди", w ? "ждёт " + w : "кого ждёт, в тикете не указано"]; };
 const tierOf = i => { const t = (triage[i.id] || {}).tier; return t === "decide" ? "owner" : t || i.state; };
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -214,6 +228,7 @@ function renderItem() {
   view.innerHTML = `<article id="t-${it.id}" data-item="${esc(tag)}" data-comment-target>
     <div class="meta"><span>${esc(projLabel(it.project))}</span>${it.code ? `<span class="code">${esc(it.code)}</span>` : ""}${it.priority ? `<span>${esc(it.priority)}</span>` : ""}<span class="pill s-${tierOf(it)}">${LABEL[tierOf(it)] || it.state}</span></div>
     <h1 id="h-${it.id}">${inline(it.title)}</h1>
+    <p class="who-line s-${tierOf(it)}"><b>На ком:</b> ${esc(whoOf(it)[0])} · ${linkCodes(esc(whoOf(it)[1]))}</p>
     ${triage[it.id] ? `<p class="triage t-${tierOf(it)}">${esc(triage[it.id].note)}</p>` : ""}
     ${it.why ? `<p class="why"><b>Зачем:</b> ${inline(it.why)}</p>` : ""}
     <div class="body">${md(it.pick ? String(it.body).replace(it.pick, "") : it.body)}${it.pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(it.pick.replace(/^Предложение[^:]*:\s*/i, ""))}</p>` : ""}</div>

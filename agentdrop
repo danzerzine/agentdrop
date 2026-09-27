@@ -1141,7 +1141,7 @@ UNITS = {"min": ("min", "мин"), "h": ("h", "ч"), "d": ("d", "дн")}
 ITEM_TICKET = re.compile(r"^(?:(P[0-3]):?\s+)?(B\d+)\b\s*(?:\(?(P[0-3])\)?)?\s*(?:\[[^\]]*\])?\s*[.:—–-]*\s*")
 WHY_RE = re.compile(r"(?:Зачем|Why):\s*(«[^»]*»(?:\s*\([^)]*\))?|\"[^\"]*\"(?:\s*\([^)]*\))?|[^.]*\.)")
 WAITS_RE = re.compile(r"(?i)(?<!\w)(жд[её]т|жд[её]м|ждем|waiting (?:for|on)|blocked (?:by|on)|(?:только )?после (?:ответа|OK)\b)"
-                      r"[^.;]{0,200}")
+                      r"(?:[^.;]|\.(?=\d)){0,200}")   # 26.09 does not end it
 DEFERRED_RE = re.compile(r"(?i)(?<!\w)(?:отложен[оаы]?|deferred|parked|on hold)(?!\w)")
 RECO_RE = re.compile(r"(?i)(?:^|(?<=[.!?]\s))[^.!?]*(?:рекоменд|предлага|предложение|мой выбор|моя ставка|"
                      r"recommend|i suggest|my pick|proposal)[^.!?]*[.!?]?")
