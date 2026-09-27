@@ -120,6 +120,7 @@ code { font-family: var(--mono); font-size: .86em; background: var(--quote); bor
   <aside>
     <div class="brand"><h2>Тикеты</h2><small id="gen"></small></div>
     <div class="filters" id="projects" role="group" aria-label="Проект"></div>
+    <div class="filters" id="tabs" role="group" aria-label="Раздел"></div>
     <input id="q" type="search" placeholder="Номер или слово из названия" aria-label="Поиск">
     <nav class="list" id="list" aria-label="Все тикеты"></nav>
   </aside>
@@ -138,7 +139,16 @@ const STATES = [
   ["later", "Отложено и справочно"], ["done", "Сделано"],
 ];
 const LABEL = Object.fromEntries(STATES);
-let data = { projects: [], items: [] }, project = "all", triage = {}, themes = {};
+let data = { projects: [], items: [] }, project = "all", triage = {}, themes = {}, tab = "work";
+const TABS = [["work", "В работе", ["blocker", "owner", "route", "turn", "running", "next"]],
+  ["others", "Ждёт других", ["others"]], ["archive", "Отложено и закрыто", ["later", "done"]]];
+const tabOf = st => (TABS.find(t => t[2].includes(st)) || TABS[0])[0];
+function renderTabs() {
+  const el = document.getElementById("tabs");
+  const n = k => data.items.filter(i => (project === "all" || i.project === project) && tabOf(tierOf(i)) === k).length;
+  el.innerHTML = TABS.map(([k, l]) => `<button class="chip" aria-pressed="${k === tab}" data-k="${k}">${esc(l)} <span style="color:var(--ink-3)">${n(k)}</span></button>`).join("");
+  el.querySelectorAll("button").forEach(b => b.onclick = () => { tab = b.dataset.k; try { localStorage.setItem("tab", tab); } catch (e) {} renderTabs(); renderList(); });
+}
 const WHO = {
   blocker: ["ты", "без этого стоит чужая работа"], owner: ["ты", "нужно твоё решение"], route: ["ты", "передать людям"],
   turn: ["агент проекта", "ты ответил, его ход"], running: ["агент проекта", "в работе"], next: ["агент проекта", "в очереди"],
@@ -197,7 +207,7 @@ function renderFilters() {
   const el = document.getElementById("projects");
   const opts = [["all", "Все"], ...data.projects.map(p => [p.key, p.label])];
   el.innerHTML = opts.map(([k, l]) => `<button class="chip" id="p-${k}" aria-pressed="${k === project}" data-k="${k}">${esc(l)}</button>`).join("");
-  el.querySelectorAll("button").forEach(b => b.onclick = () => { project = b.dataset.k; try { localStorage.setItem("proj", project); } catch (e) {} renderFilters(); renderList(); });
+  el.querySelectorAll("button").forEach(b => b.onclick = () => { project = b.dataset.k; try { localStorage.setItem("proj", project); } catch (e) {} renderFilters(); renderTabs(); renderList(); });
 }
 
 function rowHtml(i, st, cur, start) {
@@ -216,7 +226,7 @@ function renderList() {
   const pick = data.items.filter(i => (project === "all" || i.project === project) &&
     (!q || (i.code + " " + i.title).toLowerCase().includes(q)));
   const prio = i => ({ P0: 0, P1: 1, P2: 2, P3: 3 }[i.priority] ?? 4);
-  const html = STATES.map(([st, label]) => {
+  const html = STATES.filter(([st]) => q || tabOf(st) === tab).map(([st, label]) => {
     const rows = pick.filter(i => tierOf(i) === st).sort((x, y) => prio(x) - prio(y));
     if (!rows.length) return "";
     const open = !["later", "done"].includes(st) || q;
@@ -326,7 +336,11 @@ function renderDoc(key) {
   window.scrollTo({ top: 0 });
 }
 
-function route() { renderList(); renderItem(); }
+function route() {
+  const it = data.items.find(i => i.id === location.hash.slice(1));   // a link to an item in another tab opens that tab
+  if (it && tabOf(tierOf(it)) !== tab) { tab = tabOf(tierOf(it)); renderTabs(); }
+  renderList(); renderItem();
+}
 
 async function start() {
   try { project = localStorage.getItem("proj") || "all"; } catch (e) {}
@@ -343,7 +357,9 @@ async function start() {
   if (!data.projects.some(p => p.key === project)) project = "all";
   const d = new Date(data.generated);
   document.getElementById("gen").textContent = isNaN(d) ? "" : "на " + d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  try { tab = localStorage.getItem("tab") || "work"; } catch (e) {}
   renderFilters();
+  renderTabs();
   document.getElementById("q").addEventListener("input", renderList);
   document.getElementById("back").onclick = e => { e.preventDefault(); history.pushState(null, "", location.pathname + location.search); route(); };
   window.addEventListener("hashchange", route);
