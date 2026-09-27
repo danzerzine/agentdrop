@@ -74,6 +74,7 @@ h1 { margin: 0; font-size: 24px; line-height: 1.3; font-weight: 600; text-wrap: 
 .body ul { padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
 code { font-family: var(--mono); font-size: .86em; background: var(--quote); border-radius: 4px; padding: 1px 5px; overflow-wrap: anywhere; }
 .pick { border-left: 3px solid var(--accent); padding: 4px 0 4px 12px; }
+.tref { color: var(--accent); font-weight: 500; text-underline-offset: 2px; }
 .thread { display: flex; flex-direction: column; gap: 10px; }
 .thread h4, .howto h4 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
 .msg { max-width: 68ch; padding: 10px 14px; border-radius: 10px; background: var(--quote); }
@@ -122,8 +123,15 @@ let data = { projects: [], items: [] }, project = "all", triage = {};
 const tierOf = i => { const t = (triage[i.id] || {}).tier; return t === "decide" ? "owner" : t || i.state; };
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let curProject = "";
+function linkCodes(h) {
+  return h.replace(/(?<![\w\/-])(B\d{2,4})(?![\w-])/g, (m, code) => {
+    const t = data.items.find(i => i.id === `${curProject}-${code}`);
+    return t ? `<a class="tref" href="#${t.id}" title="${esc(t.title)}">${code}</a>` : m;
+  });
+}
 function inline(s) {
-  return esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  return linkCodes(esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>"));
 }
 function md(text) {
   const out = [];
@@ -176,6 +184,7 @@ function renderItem() {
   const it = data.items.find(i => i.id === id);
   document.body.classList.toggle("one", !!it);
   const view = document.getElementById("view");
+  curProject = it ? it.project : "";
   if (!it) { view.innerHTML = `<p class="empty">${id ? "Такого тикета больше нет: закрыт или переименован." : "Выбери тикет слева."}</p>`; return; }
   const thread = (it.thread || []).map(m => {
     const me = /данияр|владел/i.test(m.author);
@@ -187,7 +196,7 @@ function renderItem() {
     <h1 id="h-${it.id}">${inline(it.title)}</h1>
     ${triage[it.id] ? `<p class="triage t-${tierOf(it)}">${esc(triage[it.id].note)}</p>` : ""}
     ${it.why ? `<p class="why"><b>Зачем:</b> ${inline(it.why)}</p>` : ""}
-    <div class="body">${md(it.body)}${it.pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(it.pick.replace(/^Предложение[^:]*:\s*/i, ""))}</p>` : ""}</div>
+    <div class="body">${md(it.pick ? String(it.body).replace(it.pick, "") : it.body)}${it.pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(it.pick.replace(/^Предложение[^:]*:\s*/i, ""))}</p>` : ""}</div>
     ${thread ? `<section class="thread"><h4>Ветка</h4>${thread}</section>` : ""}
     <div class="howto"><h4>Ответить или спросить · ${esc(tag)}</h4>
       <button class="ask" id="ask" type="button" hidden>Написать про этот тикет</button>
