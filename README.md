@@ -82,6 +82,20 @@ agentdrop --research .      # turn research mode on (the first setup asks)
 agentdrop --no-research .   # turn it off; the registries stay
 ```
 
+## The board: what waits, what runs, what's next
+
+```sh
+agentdrop status            # the board for the project you're in (--json for scripts)
+agentdrop claim B41         # an agent takes a ticket at the start of a pass
+agentdrop release B41       # and gives it back at the end
+```
+
+`agentdrop status` reads the project's docs, git and claims, with no LLM involved, and answers four questions: what waits for you (open questions with their context and the proposed answer, tickets blocked on your OK), what is running (claimed tickets, which session, when it last did anything; a claim with no activity for 4 hours is marked stale), what was done since you last looked (`--mark-seen` moves that mark) and what's next (unclaimed tickets by priority, each with its "why" quote). Every line leads with its meaning, the code in parentheses.
+
+Claims live in `docs/.claims/`, one small JSON per ticket, ignored by git. A second session that tries to claim the same ticket is refused, so two agents don't work on it unknowingly. The charter tells agents to check status and claim before editing, and to end every pass with a brief you can read on a phone: what happened, the key number or draft, options with the agent's pick, and what happens if you don't answer.
+
+Settings for this machine go in `~/.agentdrop/config`, one `key = value` per line: `owner = Your Name` (how your comments are signed in the docs; the first section of `QUESTIONS.md` counts as yours otherwise) and `stale_hours = 4`.
+
 ## What a project gets
 
 ```

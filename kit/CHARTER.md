@@ -4,6 +4,8 @@
 
 **Before work:** read `docs/STATE.md` and `docs/TODO.md`. Before product, architecture, data or deploy decisions, also read `docs/CONTEXT.md` and the relevant `docs/DECISIONS.md` entries. Before touching fragile code, read `docs/PITFALLS.md`. Before any UI change, read the project's design system doc named in `AGENTS.md`; sizes, spacing and colors come from its roles and tokens, not from the eye.
 
+**Claims:** before editing, run `agentdrop status` (what waits for the owner, what other sessions hold, what's next) and claim your ticket: `agentdrop claim B<n>`. If another session holds it, take another ticket or ask the owner; never work on a claimed ticket silently. A pass without a ticket (docs, review intake) claims nothing but still checks status for sessions editing the same docs. Release at the end of the pass, also when you stop halfway: `agentdrop release B<n>`.
+
 | File | What goes there |
 |---|---|
 | `docs/CONTEXT.md` | product, people, data sources, glossary, code map; changes rarely |
@@ -25,6 +27,8 @@ Every markdown file lives in a place from this table or `.docs-allow`; `scripts/
 
 **Threads in docs:** the owner comments under an item as `> **Name, dd.mm hh:mm:** …`. Answer under the comment in the same quote format, not only in chat; keep the thread until the item is archived; commit it with your pass. A thread ending in `_Thread closed._` (or `_Ветка закрыта._`) is resolved: in your next pass finish the item by the project's rules (move it to done, remove the ticket, log the decision).
 
-**Finishing a pass:** entry in `LOG.md`; update `STATE.md` if the picture changed; remove the done ticket from `TODO.md`. Commit only your own files, no AI attribution.
+**Finishing a pass:** entry in `LOG.md`; update `STATE.md` if the picture changed; remove the done ticket from `TODO.md`; `agentdrop release B<n>`. Commit only your own files, no AI attribution.
+
+**Pass-end brief:** your last message of a pass is a brief the owner can read on a phone without opening anything. (1) What happened, meaning first, the code in parentheses: "the mobile tooltip fix (B64) is live", never "B64 done". (2) The key number, or the draft itself, quoted inline. (3) What needs the owner: options with your pick. (4) What you will do if nobody answers. Link only rendered pages, never raw markdown files: in the owner's chat they open as a diff among dozens of files.
 
 **Harvest:** lessons that would help any project go up into the owner's agentdrop rules, not only into this project's docs. When five or more passes sit above the `<!-- harvest -->` marker in `LOG.md` (in Claude Code a SessionStart hook says so), or a pass produced a rule that isn't about this project, offer a harvest in one line; the `harvest` skill (`.claude/skills/harvest/SKILL.md`, other harnesses: read and follow it) proposes and writes after the owner's OK.

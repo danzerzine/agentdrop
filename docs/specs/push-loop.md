@@ -39,6 +39,8 @@ Five small pieces. Each works without the ones after it. Plain files, stdlib Pyt
 
 No task graph, parallel workers, git worktrees per worker, vendor runner abstraction or Herdr. No daemon, no database. The worker and judge commands are plain strings in the config (`claude -p …`, `codex exec …`). Revisit when the autonomous queue is limited by time rather than by trust.
 
+Next after v1, owner's idea 27.09: a Telegram Mini App on the same bot to look through tickets and questions and leave feedback on them. It would write the owner's comments into the docs as threads (`> **Name, dd.mm hh:mm:** …`), the format agents already answer. It needs a small web backend with access to the project docs, so it waits until briefs (pass 2) prove the bot is the channel the owner reads.
+
 ## Invariants
 
 - Python decides order, retries, limits and routing; an LLM only does the work and gives the verdict.

@@ -8,6 +8,9 @@ Usage:
   agentdrop --install          Install command + sync global rules
   agentdrop sync               Re-sync global rules after editing COMMON.md
   agentdrop edit               Open the master COMMON.md
+  agentdrop status [PATH]      The owner's board: waits for you, running, done, next (--json)
+  agentdrop claim B41          Claim a ticket for this session (docs/.claims/, not in git)
+  agentdrop release B41        Release it at the end of the pass
 
 Project skeleton (docs/, charter, review-intake skill, docs guard) lives at:
   ~/.agentdrop/kit/   — CHARTER.md goes into AGENTS.md, other files are copied if missing
@@ -1091,7 +1094,591 @@ def open_common() -> None:
             print(COMMON)
 
 
+# ---------------------------------------------------------------------------
+# Push loop, pass 1: `agentdrop status` (the owner's board) and ticket claims.
+# Deterministic, no LLM: it reads the project's docs, git and docs/.claims/.
+
+CONFIG = STATE / "config"            # key = value lines: owner = Name, stale_hours = 4
+SEEN = STATE / "seen.json"           # LOG entries the owner has already been shown, per project
+CLAIMS = Path("docs") / ".claims"    # one JSON per claimed ticket; ignored by its own .gitignore
+STALE_HOURS = 4
+ACTIVE_MINUTES = 30
+SHOW = {"waiting": 8, "running": 10, "done": 8, "next": 5}
+
+LABELS = {
+    "waiting": ("Waiting for you", "Ждёт тебя"),
+    "running": ("Running now", "Идёт сейчас"),
+    "done": ("Done since you last looked", "Сделано с прошлого взгляда"),
+    "done_first": ("Done recently (last day in LOG)", "Сделано недавно (последний день в LOG)"),
+    "next": ("Next up", "Дальше по очереди"),
+    "nothing": ("nothing", "ничего"),
+    "more": ("and {n} more", "и ещё {n}"),
+    "why": ("why", "зачем"),
+    "context": ("context", "суть"),
+    "pick": ("proposal", "предложение"),
+    "waits": ("waits", "ждёт"),
+    "your_turn": ("you answered, the agent's turn: {items}", "ты ответил, ход агента: {items}"),
+    "revertible": ("{n} agent decisions you can revert (QUESTIONS)",
+                   "решений агента, которые можно отменить (QUESTIONS): {n}"),
+    "people": ("{n} questions wait for other people (QUESTIONS)", "вопросов ждут других людей (QUESTIONS): {n}"),
+    "asks_open": ("research asks: {open} open or partial, {lost} lost", "просьбы (ASKS): {open} в работе или частично, {lost} потеряно"),
+    "asks_new": ("{hook}", "{hook}"),
+    "since": ("since {t}", "с {t}"),
+    "active": ("last activity {a} ago", "последняя активность {a} назад"),
+    "stale": ("STALE: no activity for {a}", "ЗАВИСЛО: нет активности {a}"),
+    "unclaimed": ("{n} sessions active in the last {m} min without a claim",
+                  "сессий без захваченного тикета, активных за {m} мин: {n}"),
+    "open_rest": ("open tickets left: {counts}", "ещё открытых тикетов: {counts}"),
+    "branch": ("branch {b}", "ветка {b}"),
+    "dirty": ("{n} files changed", "изменено файлов: {n}"),
+    "ahead": ("{n} commits not pushed", "не запушено коммитов: {n}"),
+    "last_commit": ("last commit {a} ago: {s}", "последний коммит {a} назад: {s}"),
+    "claimed": ("claimed", "захвачен"),
+}
+UNITS = {"min": ("min", "мин"), "h": ("h", "ч"), "d": ("d", "дн")}
+
+ITEM_TICKET = re.compile(r"^(?:(P[0-3]):?\s+)?(B\d+)\b\s*(?:\(?(P[0-3])\)?)?\s*(?:\[[^\]]*\])?\s*[.:—–-]*\s*")
+WHY_RE = re.compile(r"(?:Зачем|Why):\s*(«[^»]*»(?:\s*\([^)]*\))?|\"[^\"]*\"(?:\s*\([^)]*\))?|[^.]*\.)")
+WAITS_RE = re.compile(r"(?i)(?<!\w)(жд[её]т|жд[её]м|ждем|waiting (?:for|on)|blocked (?:by|on)|(?:только )?после (?:ответа|OK)\b)"
+                      r"[^.;]{0,70}")
+RECO_RE = re.compile(r"(?i)(?:^|(?<=[.!?]\s))[^.!?]*(?:рекоменд|предлага|предложение|мой выбор|моя ставка|"
+                     r"recommend|i suggest|my pick|proposal)[^.!?]*[.!?]?")
+COMMENT_RE = re.compile(r"^\s*>\s*\*\*([^,*]+?)(?:,[^*]*)?:\*\*")
+CLOSED_RE = re.compile(r"_(?:Thread closed|Ветка закрыта)\._")
+REVERT_RE = re.compile(r"(?i)можно отменить|you can revert|may revert|revertible")
+SECTION_ORDER = [(re.compile(r"(?i)сейчас|^now"), 0, "P1"), (re.compile(r"(?i)дальше|^next"), 1, "P2"),
+                 (re.compile(r"(?i)потом|^later"), 2, "P3")]
+
+
+def doc(root: Path, name: str) -> str:
+    """A project doc under docs/, or "" when the project doesn't keep it."""
+    path = root / "docs" / name
+    return read(path) if path.is_file() else ""
+
+
+def load_config() -> dict:
+    cfg = {}
+    try:
+        for line in CONFIG.read_text(encoding="utf-8").splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip().strip("\"'")
+    except OSError:
+        pass
+    return cfg
+
+
+def owner_words(cfg: dict) -> list[str]:
+    names = [n.strip().lower() for n in cfg.get("owner", "").split(",") if n.strip()]
+    return names + ["владел", "owner"]
+
+
+def by_owner(text: str, words: list[str]) -> bool:
+    low = text.lower()
+    return any(re.search(r"(?<!\w)" + re.escape(w), low) for w in words)
+
+
+def find_root(start: Path) -> Path:
+    p = start.resolve()
+    for cand in (p, *p.parents):
+        if (cand / "docs" / "TODO.md").is_file():
+            return cand
+    return p
+
+
+def is_russian(root: Path) -> bool:
+    sample = doc(root, "TODO.md")[:3000] or doc(root, "../AGENTS.md")[:3000]
+    cyr = len(re.findall(r"[а-яё]", sample, re.I))
+    lat = len(re.findall(r"[a-z]", sample, re.I))
+    return cyr > lat
+
+
+def clip(text: str, n: int = 220) -> str:
+    text = re.sub(r"\s+", " ", text.replace("**", "")).strip()
+    if len(text) <= n:
+        return text
+    cut = text[:n].rsplit(" ", 1)[0].rstrip(",;:—–- ")
+    return cut + "…"
+
+
+def md_items(text: str) -> list[tuple[list[str], str]]:
+    """Top-level `- ` list items with their indented continuation, and the headings above each."""
+    items, heads, cur = [], {}, None
+    for line in text.splitlines():
+        h = re.match(r"^(#{1,4})\s+(.*)", line)
+        if h:
+            cur = None
+            level = len(h.group(1))
+            heads = {k: v for k, v in heads.items() if k < level}
+            heads[level] = h.group(2).strip()
+            continue
+        if line.startswith("- "):
+            cur = [line[2:]]
+            items.append(([heads[k] for k in sorted(heads)], cur))
+        elif cur is not None and (not line.strip() or line[:1] in (" ", "\t")):
+            cur.append(line)
+        else:
+            cur = None
+    return [(hs, "\n".join(lines).rstrip()) for hs, lines in items]
+
+
+def bold_title(text: str) -> tuple[str, str]:
+    m = re.match(r"\*\*(.+?)\*\*\s*(.*)", text, re.S)
+    if m:
+        return m.group(1).strip(), m.group(2)
+    return "", text
+
+
+def parse_todo(root: Path, cfg: dict) -> list[dict]:
+    words, out = owner_words(cfg), []
+    for idx, (heads, text) in enumerate(md_items(doc(root, "TODO.md"))):
+        section = next(((order, prio) for rx, order, prio in SECTION_ORDER
+                        if any(rx.search(h) for h in heads[1:])), None)
+        head = text.replace("**", "", 1) if text.startswith("**") else text
+        m = ITEM_TICKET.match(head)
+        if not m or section is None:
+            continue
+        first = text.split("\n\n", 1)[0]
+        title, body = bold_title(first)
+        if title:   # **B85 (P0). Title.** body
+            title = ITEM_TICKET.sub("", title, count=1)
+        else:       # B134 P1 — Title. Зачем: «…»
+            rest = first[m.end():]
+            cut = re.search(r"\s(?:Зачем|Why):", rest)
+            title, body = (rest[:cut.start()], rest[cut.start():]) if cut else (rest, "")
+            sent = re.match(r"(.{20,}?[.!?])\s", title, re.S)
+            if sent:
+                title, body = sent.group(1), title[sent.end():] + body
+        why = WHY_RE.search(first)
+        waits = WAITS_RE.search(text)
+        out.append({
+            "id": m.group(2), "priority": m.group(1) or m.group(3) or section[1],
+            "section": heads[-1] if heads else "", "order": (section[0], idx),
+            "title": clip(title.rstrip(". "), 160),
+            "why": clip(why.group(1), 200) if why else "",
+            "context": "" if why else clip(body, 200),
+            "waits": clip(waits.group(0), 90) if waits else "",
+            "waits_owner": bool(waits and by_owner(waits.group(0), words)),
+        })
+    return out
+
+
+def parse_questions(root: Path, cfg: dict) -> dict:
+    words = owner_words(cfg)
+    res = {"waiting": [], "your_turn": [], "revertible": 0, "people": 0}
+    text_all = doc(root, "QUESTIONS.md")
+    sections = [h for h in re.findall(r"(?m)^## (.+)$", text_all)
+                if not re.search(r"(?i)закрыт|closed|resolved", h)]
+    # the owner's section: the one that names them, else the first one (the kit puts it first)
+    owner_section = next((h for h in sections if by_owner(h, words)), sections[0] if sections else "")
+    for heads, text in md_items(text_all):
+        path = " / ".join(heads[1:])
+        if not path or re.search(r"(?i)закрыт|closed|resolved", path) or CLOSED_RE.search(text):
+            continue
+        to_owner = len(heads) > 1 and heads[1].strip() == owner_section.strip()
+        if not to_owner:
+            res["people"] += 1
+            continue
+        title, body = bold_title(text)
+        if REVERT_RE.search(path) or REVERT_RE.search(body[:300]):
+            res["revertible"] += 1
+            continue
+        code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)\.\s*", title)
+        if code:
+            title = f"{title[code.end():].rstrip('. ')} ({code.group(1)})"
+        authors = [m.group(1).strip() for line in text.splitlines() if (m := COMMENT_RE.match(line))]
+        if authors and by_owner(authors[-1], words):
+            res["your_turn"].append(clip(title.rstrip(". "), 90))
+            continue
+        para = re.split(r"\n\s*\n|\n\s*>", body, maxsplit=1)[0]
+        reco = RECO_RE.search(body)
+        res["waiting"].append({
+            "title": clip(title.rstrip(". "), 160),
+            "context": clip(para, 220),
+            "pick": clip(reco.group(0), 200) if reco else "",
+            "thread": len(authors),
+        })
+    return res
+
+
+def parse_asks(root: Path) -> dict | None:
+    text = doc(root, "ASKS.md")
+    if not text:
+        return None
+    counts = {"open": 0, "lost": 0}
+    for line in text.splitlines():
+        if re.match(r"^\|\s*A\d+\s*\|", line):
+            status = line.rstrip(" |").rsplit("|", 1)[-1].strip().lower()
+            if re.match(r"(нет|lost)\b", status):
+                counts["lost"] += 1
+            elif re.match(r"(частично|partial|в работе|in progress)", status):
+                counts["open"] += 1
+    hook = ""
+    script = root / "scripts" / "owner_asks.py"
+    if script.is_file():
+        try:
+            r = subprocess.run([sys.executable, str(script), "--hook"], cwd=root, capture_output=True,
+                               text=True, timeout=20)
+            hook = r.stdout.strip() if r.returncode == 0 else ""
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return {**counts, "unregistered": hook}
+
+
+def log_entries(root: Path) -> list[dict]:
+    entries, cur = [], None
+    for line in doc(root, "LOG.md").splitlines():
+        if line.startswith("## "):
+            cur = {"heading": line[3:].strip(), "first": ""}
+            entries.append(cur)
+        elif cur is not None and not cur["first"] and line.strip().startswith(("- ", "* ")):
+            cur["first"] = line.strip()[2:]
+    return entries
+
+
+def seen_state() -> dict:
+    try:
+        return json.loads(SEEN.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def session_id(explicit: str | None = None) -> str:
+    for v in (explicit, os.environ.get("AGENTDROP_SESSION"), os.environ.get("CLAUDE_CODE_SESSION_ID"),
+              os.environ.get("CODEX_SESSION_ID")):
+        if v:
+            return v
+    return f"{os.environ.get('USER') or os.environ.get('USERNAME') or 'user'}@{platform.node()}:{os.getppid()}"
+
+
+def agent_name() -> str:
+    agent = os.environ.get("AI_AGENT", "")
+    if agent:
+        return agent.split("_")[0]
+    return "claude-code" if os.environ.get("CLAUDE_CODE_SESSION_ID") else "shell"
+
+
+def claude_dir(root: Path) -> Path:
+    return HOME / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(root))
+
+
+def transcript(root: Path, sid: str) -> Path | None:
+    p = claude_dir(root) / f"{sid}.jsonl"
+    if p.is_file():
+        return p
+    return next(iter((HOME / ".claude" / "projects").glob(f"*/{sid}.jsonl")), None) if sid else None
+
+
+def parse_time(s: str) -> dt.datetime | None:
+    try:
+        t = dt.datetime.fromisoformat(s)
+        return t if t.tzinfo else t.astimezone()
+    except (TypeError, ValueError):
+        return None
+
+
+def age(seconds: float, ru: bool) -> str:
+    m = max(0, int(seconds // 60))
+    if m < 60:
+        return f"{m} {UNITS['min'][ru]}"
+    if m < 48 * 60:
+        return f"{m // 60} {UNITS['h'][ru]}" + (f" {m % 60} {UNITS['min'][ru]}" if m < 600 and m % 60 else "")
+    return f"{m // 1440} {UNITS['d'][ru]}"
+
+
+def read_claims(root: Path) -> list[dict]:
+    out = []
+    for f in sorted((root / CLAIMS).glob("*.json")):
+        try:
+            out.append(json.loads(f.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def claim_activity(root: Path, c: dict) -> float:
+    """Seconds since the claiming session last did anything we can see."""
+    now = dt.datetime.now().astimezone()
+    last = parse_time(c.get("started", "")) or now
+    t = transcript(root, c.get("session", ""))
+    if t:
+        last = max(last, dt.datetime.fromtimestamp(t.stat().st_mtime).astimezone())
+    return (now - last).total_seconds()
+
+
+def git_summary(root: Path) -> dict:
+    try:
+        if git(root, "rev-parse", "--is-inside-work-tree").returncode != 0:
+            return {}
+    except FileNotFoundError:
+        return {}
+    branch = git(root, "branch", "--show-current").stdout.strip() or "(detached)"
+    dirty = [l for l in git(root, "status", "--porcelain").stdout.splitlines() if l.strip()]
+    ahead = git(root, "rev-list", "--count", "@{u}..HEAD")
+    last = git(root, "log", "-1", "--format=%ct%x09%s").stdout.strip().split("\t", 1)
+    info = {"branch": branch, "dirty": len(dirty),
+            "ahead": int(ahead.stdout.strip()) if ahead.returncode == 0 and ahead.stdout.strip().isdigit() else None}
+    if len(last) == 2 and last[0].isdigit():
+        info["last_commit_age"] = dt.datetime.now().timestamp() - int(last[0])
+        info["last_commit"] = last[1]
+    return info
+
+
+def collect_status(root: Path) -> dict:
+    cfg = load_config()
+    ru = is_russian(root)
+    stale_h = float(cfg.get("stale_hours", STALE_HOURS))
+    tickets = parse_todo(root, cfg)
+    by_id = {t["id"]: t for t in tickets}
+
+    claims = []
+    for c in read_claims(root):
+        idle = claim_activity(root, c)
+        started = parse_time(c.get("started", ""))
+        t = by_id.get(c.get("ticket", ""), {})
+        claims.append({**c, "title": t.get("title") or c.get("title", ""), "idle_seconds": int(idle),
+                       "stale": idle > stale_h * 3600,
+                       "running_seconds": int((dt.datetime.now().astimezone() - started).total_seconds())
+                       if started else None})
+    claimed = {c.get("ticket") for c in claims}
+    claimed_sessions = {c.get("session") for c in claims}
+
+    active = 0
+    cdir = claude_dir(root)
+    if cdir.is_dir():
+        cutoff = dt.datetime.now().timestamp() - ACTIVE_MINUTES * 60
+        active = sum(1 for f in cdir.glob("*.jsonl") if f.stat().st_mtime > cutoff and f.stem not in claimed_sessions)
+
+    q = parse_questions(root, cfg)
+    owner_tickets = [t for t in tickets if t["waits_owner"] and t["id"] not in claimed]
+    free = [t for t in tickets if t["id"] not in claimed and not t["waits_owner"]]
+    free.sort(key=lambda t: (t["priority"], bool(t["waits"]), t["order"]))
+
+    entries = log_entries(root)
+    seen = seen_state().get(str(root))
+    if seen:
+        known = set(seen.get("headings", []))
+        done = [e for e in entries if e["heading"] not in known]
+    else:
+        day = re.match(r"\S+", entries[0]["heading"]).group(0) if entries else ""
+        done = [e for e in entries if e["heading"].startswith(day)] if day else []
+
+    return {
+        "project": root.name, "root": str(root), "ru": ru,
+        "generated": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "waiting": {"questions": q["waiting"], "tickets": owner_tickets, "your_turn": q["your_turn"],
+                    "revertible": q["revertible"], "people": q["people"],
+                    "asks": parse_asks(root)},
+        "running": {"claims": claims, "unclaimed_active_sessions": active, "active_minutes": ACTIVE_MINUTES},
+        "done": {"since_seen": bool(seen), "seen_at": seen.get("at") if seen else None, "entries": done},
+        "next": {"tickets": free[:SHOW["next"]], "rest": free[SHOW["next"]:]},
+        "git": git_summary(root),
+    }
+
+
+def render_status(s: dict) -> str:
+    ru = s["ru"]
+    L = lambda k, **kw: LABELS[k][ru].format(**kw)
+    out = [f"{s['project']} — {s['generated'][:16].replace('T', ' ')}"]
+    g = s["git"]
+    if g:
+        bits = [L("branch", b=g["branch"])]
+        if g["dirty"]:
+            bits.append(L("dirty", n=g["dirty"]))
+        if g.get("ahead"):
+            bits.append(L("ahead", n=g["ahead"]))
+        if "last_commit" in g:
+            bits.append(L("last_commit", a=age(g["last_commit_age"], ru), s=clip(g["last_commit"], 80)))
+        out.append("git: " + "; ".join(bits))
+
+    def more(items, key):
+        n = len(items) - SHOW[key]
+        return [f"  … {L('more', n=n)}"] if n > 0 else []
+
+    w = s["waiting"]
+    out += ["", f"## {L('waiting')}"]
+    for item in w["questions"][:SHOW["waiting"]]:
+        out.append(f"- {item['title']}")
+        if item["context"]:
+            out.append(f"  {L('context')}: {item['context']}")
+        if item["pick"]:
+            out.append(f"  {L('pick')}: {item['pick']}")
+    out += more(w["questions"], "waiting")
+    for t in w["tickets"]:
+        out.append(f"- {t['title']} ({t['id']}, {t['priority']})")
+        out.append(f"  {L('waits')}: {t['waits']}")
+    if w["your_turn"]:
+        out.append("· " + L("your_turn", items="; ".join(w["your_turn"])))
+    if w["revertible"]:
+        out.append("· " + L("revertible", n=w["revertible"]))
+    if w["people"]:
+        out.append("· " + L("people", n=w["people"]))
+    if w["asks"]:
+        a = w["asks"]
+        out.append("· " + L("asks_open", open=a["open"], lost=a["lost"]))
+        if a["unregistered"]:
+            out.append("· " + a["unregistered"])
+    if not (w["questions"] or w["tickets"]):
+        out.append(f"- {L('nothing')}")
+
+    r = s["running"]
+    out += ["", f"## {L('running')}"]
+    for c in r["claims"][:SHOW["running"]]:
+        started = parse_time(c.get("started", ""))
+        when = started.strftime("%d.%m %H:%M") if started else "?"
+        idle = age(c["idle_seconds"], ru)
+        state = L("stale", a=idle) if c["stale"] else L("active", a=idle)
+        title = c["title"] or c.get("ticket", "")
+        sid = c.get("session", "")[:8]
+        out.append(f"- {title} ({c.get('ticket')}) — {c.get('agent', '')} {sid}, "
+                   f"{L('since', t=when)}; {state}" + (f"; {c['branch']}" if c.get("branch") else ""))
+    if r["unclaimed_active_sessions"]:
+        out.append("· " + L("unclaimed", n=r["unclaimed_active_sessions"], m=r["active_minutes"]))
+    if not r["claims"] and not r["unclaimed_active_sessions"]:
+        out.append(f"- {L('nothing')}")
+
+    d = s["done"]
+    out += ["", f"## {L('done') if d['since_seen'] else L('done_first')}"]
+    for e in d["entries"][:SHOW["done"]]:
+        out.append(f"- {clip(e['heading'], 160)}")
+        if e["first"]:
+            out.append(f"  {clip(e['first'], 200)}")
+    out += more(d["entries"], "done")
+    if not d["entries"]:
+        out.append(f"- {L('nothing')}")
+
+    n = s["next"]
+    out += ["", f"## {L('next')}"]
+    for t in n["tickets"]:
+        out.append(f"- {t['title']} ({t['id']}, {t['priority']})")
+        if t["why"]:
+            out.append(f"  {L('why')}: {t['why']}")
+        elif t["context"]:
+            out.append(f"  {L('context')}: {t['context']}")
+        if t["waits"]:
+            out.append(f"  {L('waits')}: {t['waits']}")
+    if not n["tickets"]:
+        out.append(f"- {L('nothing')}")
+    if n["rest"]:
+        counts = {}
+        for t in n["rest"]:
+            counts[t["priority"]] = counts.get(t["priority"], 0) + 1
+        out.append("· " + L("open_rest", counts=", ".join(f"{p} {counts[p]}" for p in sorted(counts))))
+    return "\n".join(out)
+
+
+def mark_seen(root: Path) -> None:
+    state = seen_state()
+    state[str(root)] = {"at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                        "headings": [e["heading"] for e in log_entries(root)][:300]}
+    STATE.mkdir(parents=True, exist_ok=True)
+    SEEN.write_text(json.dumps(state, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+
+
+def cmd_status(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="agentdrop status",
+                                description="The owner's board: what waits for you, what runs, what's done, what's next.")
+    p.add_argument("path", nargs="?", default=".", help="Project directory (default: the current one)")
+    p.add_argument("--json", action="store_true", help="Machine-readable output")
+    p.add_argument("--mark-seen", action="store_true",
+                   help="Remember the LOG entries shown, so the next status lists only newer ones")
+    a = p.parse_args(argv)
+    root = find_root(Path(a.path))
+    if not (root / "docs" / "TODO.md").is_file():
+        print(f"agentdrop status: no docs/TODO.md in {root} or above", file=sys.stderr)
+        return 2
+    s = collect_status(root)
+    print(json.dumps(s, ensure_ascii=False, indent=1) if a.json else render_status(s))
+    if a.mark_seen:
+        mark_seen(root)
+    return 0
+
+
+def claim_parser(name: str, desc: str) -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog=f"agentdrop {name}", description=desc)
+    p.add_argument("ticket", help="Ticket number, e.g. B41")
+    p.add_argument("--root", default=".", help="Project directory (default: the current one)")
+    p.add_argument("--session", help="Session id (default: $AGENTDROP_SESSION, $CLAUDE_CODE_SESSION_ID, …)")
+    p.add_argument("--force", action="store_true", help="Take over or drop another session's claim")
+    return p
+
+
+def ticket_id(raw: str) -> str:
+    t = raw.strip().upper()
+    return t if re.fullmatch(r"B\d+", t) else ("B" + t if t.isdigit() else t)
+
+
+def cmd_claim(argv: list[str]) -> int:
+    a = claim_parser("claim", "Claim a ticket for this session at the start of a pass.").parse_args(argv)
+    root, tid, sid = find_root(Path(a.root)), ticket_id(a.ticket), session_id(a.session)
+    ru = is_russian(root)
+    d = root / CLAIMS
+    f = d / f"{tid}.json"
+    stale_h = float(load_config().get("stale_hours", STALE_HOURS))
+    if f.exists():
+        try:
+            other = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            other = {}
+        if other.get("session") and other.get("session") != sid and not a.force:
+            idle = claim_activity(root, other)
+            started = other.get("started", "?")[:16].replace("T", " ")
+            note = (" — зависло, можно забрать с --force" if ru else " — stale, take over with --force") \
+                if idle > stale_h * 3600 else ""
+            print((f"{tid} уже захвачен: {other.get('agent', '')} {other['session'][:8]} с {started}, "
+                   f"последняя активность {age(idle, ru)} назад{note}. Возьми другой тикет или спроси владельца."
+                   if ru else
+                   f"{tid} is already claimed by {other.get('agent', '')} {other['session'][:8]} since {started}, "
+                   f"last activity {age(idle, False)} ago{note}. Take another ticket or ask the owner."),
+                  file=sys.stderr)
+            return 1
+    ticket = next((t for t in parse_todo(root, load_config()) if t["id"] == tid), None)
+    if ticket is None:
+        print(f"! {tid} нет в docs/TODO.md — захватываю всё равно" if ru
+              else f"! {tid} is not in docs/TODO.md — claiming anyway", file=sys.stderr)
+    branch = git(root, "branch", "--show-current").stdout.strip() if (root / ".git").exists() else ""
+    head = git(root, "rev-parse", "HEAD").stdout.strip() if branch else ""
+    d.mkdir(parents=True, exist_ok=True)
+    ignore = d / ".gitignore"
+    if not ignore.exists():
+        ignore.write_text("# agentdrop claims: local to this machine, never committed\n*\n", encoding="utf-8")
+    data = {"ticket": tid, "title": ticket["title"] if ticket else "", "session": sid, "agent": agent_name(),
+            "started": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "branch": branch, "head": head, "host": platform.node()}
+    f.write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    print(f"✓ {tid} захвачен ({sid[:8]})" if ru else f"✓ {tid} claimed ({sid[:8]})")
+    return 0
+
+
+def cmd_release(argv: list[str]) -> int:
+    a = claim_parser("release", "Release a ticket at the end of a pass.").parse_args(argv)
+    root, tid, sid = find_root(Path(a.root)), ticket_id(a.ticket), session_id(a.session)
+    ru = is_russian(root)
+    f = root / CLAIMS / f"{tid}.json"
+    if not f.exists():
+        print(f"· {tid} не был захвачен" if ru else f"· {tid} was not claimed")
+        return 0
+    try:
+        other = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        other = {}
+    if other.get("session") not in (None, sid) and not a.force:
+        print((f"{tid} захвачен другой сессией ({other['session'][:8]}); снять — с --force" if ru
+               else f"{tid} is held by another session ({other['session'][:8]}); use --force to drop it"),
+              file=sys.stderr)
+        return 1
+    f.unlink()
+    print(f"✓ {tid} отпущен" if ru else f"✓ {tid} released")
+    return 0
+
+
+COMMANDS = {"status": cmd_status, "claim": cmd_claim, "release": cmd_release}
+
+
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] in COMMANDS:
+        _console_safe()
+        sys.exit(COMMANDS[sys.argv[1]](sys.argv[2:]))
     parser = argparse.ArgumentParser(
         description="Deploy shared AI-agent rules without overwriting harness-specific instructions."
     )
