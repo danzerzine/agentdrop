@@ -4309,7 +4309,8 @@ def limit_readings(roots: list[Path], since: float) -> list[dict]:
                                 "seven_day_resets": int(w["seven_day"]["resetsAt"])})
                 except (ValueError, KeyError, TypeError):
                     continue
-    return sorted(out, key=lambda r: (r["at"], r["written"]))   # runs started the same minute: last written wins
+    # newest last by when the log was last written, not when its run started: a long run's latest line is fresh
+    return sorted(out, key=lambda r: (r["written"], r["at"]))
 
 
 def limits_verdict(readings: list[dict], now: float) -> dict:
@@ -4319,14 +4320,14 @@ def limits_verdict(readings: list[dict], now: float) -> dict:
     if not readings:
         return {"can_start": False, "reason": "no_reading", "why": "no measurement in the run logs"}
     last = readings[-1]
-    age = int((now - last["at"]) // 60)
+    age = int((now - last["written"]) // 60)
     midnight = dt.datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     today = [r for r in readings if r["at"] >= midnight and r["seven_day_resets"] == last["seven_day_resets"]]
     first = today[0] if today else last
     days = max((first["seven_day_resets"] - first["at"]) / 86400, 1.0)
     share = round((1 - first["seven_day"]) / days, 4)
     spent = round(max(last["seven_day"] - first["seven_day"], 0.0), 4)
-    out = {"measured_at": dt.datetime.fromtimestamp(last["at"]).astimezone().isoformat(timespec="minutes"),
+    out = {"measured_at": dt.datetime.fromtimestamp(last["written"]).astimezone().isoformat(timespec="minutes"),
            "age_min": age,
            "five_hour": {"used": last["five_hour"], "resets_at": dt.datetime.fromtimestamp(
                last["five_hour_resets"]).astimezone().isoformat(timespec="minutes")},

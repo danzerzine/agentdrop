@@ -37,10 +37,13 @@ class Limits(unittest.TestCase):
         self.now = dt.datetime.now().replace(second=0, microsecond=0)
         self.reset = (self.now + dt.timedelta(days=2)).timestamp()   # the week resets in two days
 
-    def log(self, minutes_ago, five, seven, where=None, name="page-{}"):
+    def log(self, minutes_ago, five, seven, where=None, name="page-{}", written_ago=None):
+        """A run started `minutes_ago` whose log was last written `written_ago` minutes ago (by default then too)."""
         at = self.now - dt.timedelta(minutes=minutes_ago)
         f = (where or self.logs) / (name.format(at.strftime("%Y%m%d-%H%M")) + ".jsonl")
         f.write_text('{"type":"system"}\n' + event(five, seven, self.reset) + "\n", encoding="utf-8")
+        w = (self.now - dt.timedelta(minutes=minutes_ago if written_ago is None else written_ago)).timestamp()
+        os.utime(f, (w, w))
 
     def limits(self):
         r = subprocess.run([sys.executable, str(REPO / "agentdrop"), "limits", "--json", str(self.proj)],
@@ -73,6 +76,12 @@ class Limits(unittest.TestCase):
         code, v = self.limits()
         self.assertEqual((code, v["reason"]), (1, "daily_share"))
         self.assertAlmostEqual(v["today"]["spent"], 0.30, places=2)
+
+    def test_long_run_measures_by_its_last_write(self):
+        self.log(180, 0.10, 0.40, written_ago=5)   # started three hours ago, still writing
+        code, v = self.limits()
+        self.assertEqual((code, v["reason"]), (0, "ok"))
+        self.assertLess(v["age_min"], 10)
 
     def test_old_measurement_means_no(self):
         self.log(120, 0.10, 0.40)
