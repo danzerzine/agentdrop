@@ -3537,7 +3537,7 @@ def cmd_dispatch(argv: list[str]) -> int:
 # that outlives the terminal and the chat that started it. Python picks the tickets; the model does them.
 
 PACK_WORKER = "claude -p --permission-mode bypassPermissions"
-PACK_EFFORT = "high"                 # research passes judged by a fresh judge: low effort came back rejected
+PACK_EFFORT = "medium"               # low effort came back rejected by the judge; medium is the chosen balance
 PACK_DIR = RUNS / "pack"             # <stamp>.prompt.md, .jsonl (the session), .err, .pid
 
 
