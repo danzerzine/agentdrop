@@ -182,8 +182,17 @@ class FakeTelegram:
                 pass
 
             def do_POST(self):
-                body = json.loads(self.rfile.read(int(self.headers["content-length"])) or b"{}")
+                raw = self.rfile.read(int(self.headers["content-length"]))
                 method = self.path.rsplit("/", 1)[-1]
+                if self.headers.get("content-type", "").startswith("multipart/"):
+                    n = raw.count(b"attach://")
+                    fake.calls.append((method, {"photos": n, "raw": raw}))
+                    ids = []
+                    for _ in range(n):
+                        fake.next_id += 1
+                        ids.append({"message_id": fake.next_id})
+                    return self.reply(200, {"ok": True, "result": ids})
+                body = json.loads(raw or b"{}")
                 if self.headers.get("x-relay-key") != "k" or not self.path.startswith("/botT0K:x/"):
                     fake.bad_key += 1
                     return self.reply(404, {"ok": False, "description": "not found"})
@@ -238,7 +247,7 @@ class Brief(Project):
             "p = sys.stdin.read()\n"
             "msg = p.split('His message:', 1)[1]\n"
             "opts = re.findall(r'^- \"([^\"]+)\"', p, re.M)\n"
-            "r = 'unclear' if 'loose' in msg else 'agentdrop' if 'bot' in msg else next((o for o in opts if o.startswith('project')), '') "
+            "r = 'status' if 'going on' in msg else 'unclear' if 'loose' in msg else 'agentdrop' if 'bot' in msg else next((o for o in opts if o.startswith('project')), '') "
             "if 'new task' in msg else ('item' if 'item' in opts else opts[0])\n"
             "print('```json\\n' + json.dumps({'route': r, 'why': 'test'}) + '\\n```')\n", encoding="utf-8")
         self.source = self.home / "agentdrop-src"
@@ -383,6 +392,33 @@ class Brief(Project):
                       (self.root / "docs" / "TODO.md").read_text(encoding="utf-8"))
         edits = [b for m, b in self.tg.calls if m == "editMessageText"]
         self.assertIn("Saved under «Deploy script»", edits[-1]["text"])
+
+    def test_status_question_gets_the_board(self):
+        self.run_ad("brief", "--send")
+        self.tg.answer("what's going on and what do you need from me?")
+        self.run_ad("replies")
+        board = self.tg.sent[-1]["text"]
+        self.assertTrue(board.startswith("<b>📊 proj · NOW</b>"))
+        self.assertIn("1. Which chart library (Q-2)\n2. Deploy script (B8)", board)
+        self.assertIn("1. Fix login on Safari <i>(B7, P1)</i>", board)
+        self.assertNotIn("going on", (self.root / "docs" / "QUESTIONS.md").read_text(encoding="utf-8"))
+
+    def test_before_and_after_pictures_go_under_the_item(self):
+        shots = self.root / "docs" / "shots"
+        shots.mkdir()
+        for name in ("before.png", "after.png"):
+            (shots / name).write_bytes(b"\x89PNG fake")
+        q = self.root / "docs" / "QUESTIONS.md"
+        q.write_text(QUESTIONS.replace("I recommend Recharts: we already use it.",
+                                       "I recommend Recharts: we already use it. Now `shots/before.png`, "
+                                       "then shots/after.png; shots/missing.png is gone."), encoding="utf-8")
+        self.run_ad("brief", "--send")
+        album = [b for m, b in self.tg.calls if m == "sendMediaGroup"]
+        self.assertEqual(len(album), 1)
+        self.assertEqual(album[0]["photos"], 2)
+        self.assertIn(b"before.png", album[0]["raw"])
+        q2 = self.by_text("Q-2")["message_id"]
+        self.assertIn(f'"message_id": {q2}'.encode(), album[0]["raw"])   # under the item's message
 
     def test_ok_and_not_ok_buttons(self):
         self.run_ad("brief", "--send")
