@@ -53,11 +53,6 @@ aside { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); align
 .why-t { margin: 0 8px 4px; font-size: 12.5px; line-height: 1.4; color: var(--ink-2); }
 .start { font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-bg); border-radius: 999px; padding: 1px 6px; white-space: nowrap; }
 .row .note { font-size: 12.5px; color: var(--ink-3); line-height: 1.4; }
-.who-line { margin: 0; align-self: flex-start; padding: 6px 12px; border-radius: 8px; font-size: 14px; }
-.who-line b { font-weight: 600; }
-.triage { margin: 0; padding: 10px 14px; border-radius: 8px; font-weight: 500; background: var(--quote); }
-.triage.t-blocker { background: var(--owner-bg); color: var(--owner); }
-.triage.t-route { background: var(--others-bg); }
 .s-blocker { color: var(--owner); background: var(--owner-bg); } .s-route, .s-later, .s-done { color: var(--others); background: var(--others-bg); }
 .group h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); display: flex; gap: 6px; }
 .group h3 span { font-variant-numeric: tabular-nums; }
@@ -108,6 +103,24 @@ code { font-family: var(--mono); font-size: .86em; background: var(--quote); bor
 .ask-hint { font-size: 13px; color: var(--ink-3); }
 .back { display: none; color: var(--accent); text-decoration: none; font-size: 14px; margin-bottom: 10px; }
 .empty { color: var(--ink-3); padding: 40px 0; }
+/* task page: identity, state, what is expected, then details; technical data last */
+article.task { gap: 14px; }
+.task h1 { font-size: 22px; }
+.state { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; color: var(--ink-2); }
+.state b { color: var(--ink); font-weight: 600; }
+.expect { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-radius: 8px; background: var(--quote); }
+.expect.mine { background: var(--owner-bg); }
+.expect h4 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--owner); }
+.expect .triage-note { margin: 0; font-weight: 500; }
+.expect.mine .triage-note { color: var(--owner); }
+.expect .opts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.expect .pick { margin: 0; }
+.body-sec { display: flex; flex-direction: column; gap: 8px; }
+.body-sec h4 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
+.lead { margin: 0; max-width: 68ch; }
+.fold > summary { cursor: pointer; font-size: 13px; color: var(--ink-2); padding: 4px 0; }
+.fold[open] > summary { margin-bottom: 8px; }
+.tech { margin: 0; font-size: 12px; color: var(--ink-3); border-top: 1px solid var(--line); padding-top: 10px; overflow-wrap: anywhere; }
 @media (max-width: 760px) {
   .wrap { grid-template-columns: minmax(0, 1fr); padding-inline: 16px; }
   aside { position: static; max-height: none; }
@@ -122,15 +135,15 @@ code { font-family: var(--mono); font-size: .86em; background: var(--quote); bor
 
 <div class="wrap">
   <aside>
-    <div class="brand"><h2>Тикеты</h2><small id="gen"></small></div>
+    <div class="brand"><h2>Задачи</h2><small id="gen"></small></div>
     <div class="filters" id="projects" role="group" aria-label="Проект"></div>
     <div class="filters" id="tabs" role="group" aria-label="Раздел"></div>
     <input id="q" type="search" placeholder="Номер или слово из названия" aria-label="Поиск">
-    <nav class="list" id="list" aria-label="Все тикеты"></nav>
+    <nav class="list" id="list" aria-label="Все задачи"></nav>
   </aside>
   <main>
-    <a class="back" href="#" id="back">← Все тикеты</a>
-    <div id="view"><p class="empty">Выбери тикет слева.</p></div>
+    <a class="back" href="#" id="back">← Все задачи</a>
+    <div id="view"><p class="empty">Выберите задачу в списке.</p></div>
   </main>
 </div>
 
@@ -138,9 +151,9 @@ code { font-family: var(--mono); font-size: .86em; background: var(--quote); bor
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
 <script>
 const STATES = [
-  ["blocker", "Стопорит работу"], ["owner", "Ждёт твоего решения"], ["route", "Передать другим людям"],
-  ["turn", "Ты ответил, ход агента"], ["running", "В работе"], ["next", "Дальше"], ["others", "Ждёт других"],
-  ["later", "Отложено и справочно"], ["done", "Сделано"],
+  ["blocker", "Стопорит чужую работу"], ["owner", "Ждёт вас"], ["route", "Передать людям"],
+  ["turn", "Вы ответили, ход агента"], ["running", "В работе"], ["next", "В очереди"], ["others", "Ждёт других людей"],
+  ["later", "Отложены и справочно"], ["done", "Готово"],
 ];
 const LABEL = Object.fromEntries(STATES);
 let data = { projects: [], items: [] }, project = "all", triage = {}, themes = {}, tab = "work";
@@ -154,9 +167,9 @@ function renderTabs() {
   el.querySelectorAll("button").forEach(b => b.onclick = () => { tab = b.dataset.k; try { localStorage.setItem("tab", tab); } catch (e) {} renderTabs(); renderList(); });
 }
 const WHO = {
-  blocker: ["ты", "без этого стоит чужая работа"], owner: ["ты", "нужно твоё решение"], route: ["ты", "передать людям"],
-  turn: ["агент проекта", "ты ответил, его ход"], running: ["агент проекта", "в работе"], next: ["агент проекта", "в очереди"],
-  later: ["никто", "отложено"], done: ["никто", "тикет закрыт"],
+  blocker: ["вы", "без этого стоит чужая работа"], owner: ["вы", "нужно ваше решение"], route: ["вы", "передать людям"],
+  turn: ["агент проекта", "вы ответили, его ход"], running: ["агент проекта", "в работе"], next: ["агент проекта", "в очереди"],
+  later: ["никто", "отложено"], done: ["никто", "задача закрыта"],
 };
 const whoOf = i => { const t = tierOf(i);
   if (t !== "others") return WHO[t];
@@ -164,7 +177,7 @@ const whoOf = i => { const t = tierOf(i);
   let depth = 0;   // the waits text can start inside parentheses: cut at the first unmatched ")"
   for (let k = 0; k < w.length; k++) { if (w[k] === "(") depth++; else if (w[k] === ")" && --depth < 0) { w = w.slice(0, k); break; } }
   w = w.replace(/\s*\([^)]*$/, "").replace(/^только после ответа /i, "ответа ").replace(/[\s,;:]+$/, "");
-  return ["другие люди", w ? "ждёт " + w : "кого ждёт, в тикете не указано"]; };
+  return ["другие люди", w ? "ждёт " + w : "кого ждёт, в задаче не указано"]; };
 const tierOf = i => { const t = (triage[i.id] || {}).tier; return t === "decide" ? "owner" : t || i.state; };
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -263,6 +276,26 @@ function renderList() {
   document.getElementById("list").innerHTML = html || '<p class="empty">Ничего не нашлось.</p>';
 }
 
+// "Название? (B83, 27.09)" -> the title and the date; the code is shown on its own
+function splitTitle(t) {
+  const x = String(t || ""), m = /\s*\(([^()]*)\)\s*$/.exec(x);
+  if (!m || !/\bB\d+|\b\d{1,2}\.\d{2}\b/.test(m[1])) return { title: x, date: "" };
+  return { title: x.slice(0, m.index).trim(), date: (/\b(\d{1,2}\.\d{2})\b/.exec(m[1]) || [])[1] || "" };
+}
+function optionsOf(it) {   // "Варианты: (а) …; (б) …" -> [["а", "…"], …]
+  const m = /Варианты:\s*([\s\S]*?)(?:Мой выб|Предложение|$)/.exec(it.body || "");
+  if (!m) return [];
+  const parts = m[1].split(/\(([а-е])\)\s*/).slice(1), out = [];
+  for (let k = 0; k < parts.length; k += 2) out.push([parts[k], parts[k + 1].replace(/[;.,\s]+$/, "")]);
+  return out;
+}
+// A thread: the last two messages in view, the earlier ones folded
+function threadHtml(thread) {
+  const msg = m => `<div class="msg${/данияр|владел/i.test(m.author) ? " me" : ""}"><div class="who"><b>${esc(m.author || "—")}</b>${m.when ? ", " + esc(m.when) : ""}</div>${md(m.text)}</div>`;
+  const all = thread || [], old = all.slice(0, -2), last = all.slice(-2);
+  if (!all.length) return "";
+  return `<h4>Ветка · ${all.length}</h4>${old.length ? `<details class="fold"><summary>Ранее · ${old.length}</summary>${old.map(msg).join("")}</details>` : ""}${last.map(msg).join("")}`;
+}
 function renderItem() {
   const id = location.hash.slice(1);
   if (window.panelView && window.panelView(id)) return;   // the local panel's own views (inbox, agents)
@@ -272,26 +305,38 @@ function renderItem() {
   document.body.classList.toggle("one", !!it);
   const view = document.getElementById("view");
   curProject = it ? it.project : "";
-  if (!it) { view.innerHTML = `<p class="empty">${id ? "Такого тикета больше нет: закрыт или переименован." : "Выбери тикет слева."}</p>`; return; }
-  const thread = (it.thread || []).map(m => {
-    const me = /данияр|владел/i.test(m.author);
-    return `<div class="msg${me ? " me" : ""}"><div class="who"><b>${esc(m.author || "—")}</b>${m.when ? ", " + esc(m.when) : ""}</div>${md(m.text)}</div>`;
-  }).join("");
+  if (!it) { view.innerHTML = `<p class="empty">${id ? "Такой задачи больше нет: закрыта или переименована." : "Выберите задачу в списке."}</p>`; return; }
+  const tier = tierOf(it), who = whoOf(it), t = splitTitle(it.title), opts = optionsOf(it);
+  const mine = ["blocker", "owner", "route"].includes(tier);
+  const pick = it.pick ? it.pick.replace(/^(Предложение[^:]*|Мой выбор)\s*[:—-]\s*/i, "") : "";
+  const body = String(it.pick ? String(it.body).replace(it.pick, "") : it.body || "").trim();
+  const paras = body.split(/\n\s*\n/), long = body.length > 480;
+  const lead = long ? paras[0].split(/(?<=[.!?])\s+(?=[A-ZА-ЯЁ«"])/).slice(0, 2).join(" ") : "";
+  const last = (it.thread || []).slice(-1)[0];
   const tag = `${projLabel(it.project)} ${it.code || "вопрос"}`;
-  view.innerHTML = `<article id="t-${it.id}" data-item="${esc(tag)}" data-comment-target>
-    <div class="meta"><span>${esc(projLabel(it.project))}</span>${it.code ? `<span class="code">${esc(it.code)}</span>` : ""}${it.priority ? `<span>${esc(it.priority)}</span>` : ""}<span class="pill s-${tierOf(it)}">${LABEL[tierOf(it)] || it.state}</span></div>
-    <h1 id="h-${it.id}">${inline(it.title)}</h1>
-    ${themeOf(it) && tierOf(it) === "next" ? `<p class="why"><b>Тема ${themeOf(it).n}:</b> ${esc(themeOf(it).name)}. ${esc(themeOf(it).why || "")}</p>` : ""}
-    <p class="who-line s-${tierOf(it)}"><b>На ком:</b> ${esc(whoOf(it)[0])} · ${linkCodes(esc(whoOf(it)[1]))}</p>
-    ${triage[it.id] ? `<p class="triage t-${tierOf(it)}">${esc(triage[it.id].note)}</p>` : ""}
-    ${it.why ? `<p class="why"><b>Зачем:</b> ${inline(it.why)}</p>` : ""}
-    <div class="body">${md(it.pick ? String(it.body).replace(it.pick, "") : it.body)}${shots(it.id)}${it.pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(it.pick.replace(/^Предложение[^:]*:\s*/i, ""))}</p>` : ""}</div>
-    ${thread ? `<section class="thread"><h4>Ветка</h4>${thread}</section>` : ""}
+  const th = themeOf(it);
+  view.innerHTML = `<article id="t-${it.id}" class="task" data-item="${esc(tag)}" data-comment-target>
+    <div class="meta">${it.code ? `<span class="code">${esc(it.code)}</span>` : ""}<span>${esc(projLabel(it.project))}</span>${it.priority ? `<span>${esc(it.priority)}</span>` : ""}${t.date ? `<span>с ${esc(t.date)}</span>` : ""}${last && last.when ? `<span>последний ответ ${esc(last.when)}</span>` : ""}</div>
+    <h1 id="h-${it.id}">${inline(t.title)}</h1>
+    <p class="state"><span class="pill s-${tier}">${LABEL[tier] || it.state}</span> <span><b>Ход:</b> ${esc(who[0])}${["others", "later"].includes(tier) ? " · " + linkCodes(esc(who[1])) : ""}</span></p>
+    ${mine || triage[it.id] || pick ? `<section class="expect${mine ? " mine" : ""}">
+      ${mine ? `<h4>Что нужно от вас</h4>` : ""}
+      ${triage[it.id] ? `<p class="triage-note">${esc(triage[it.id].note)}</p>` : ""}
+      ${opts.length ? `<ol class="opts">${opts.map(([c, x]) => `<li><b>${c})</b> ${inline(x)}</li>`).join("")}</ol>` : ""}
+      ${pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(pick)}</p>` : ""}
+    </section>` : ""}
     <div class="howto"><h4>Ответить или спросить · ${esc(tag)}</h4>
-      <button class="ask" id="ask" type="button" hidden>Написать про этот тикет</button>
-      <span class="ask-hint" id="ask-hint">Можно сначала выделить фразу: вопрос придёт вместе с ней. В окне комментария нажми «Send to Claude»: отвечу в этой же ветке и запишу твои слова под пункт в ${esc(it.doc)} проекта ${esc(projLabel(it.project))}.</span></div>
+      <button class="ask" id="ask" type="button" hidden>Написать про эту задачу</button>
+      <span class="ask-hint" id="ask-hint">Можно сначала выделить фразу: вопрос придёт вместе с ней. В окне комментария нажмите «Send to Claude»: ответ придёт в эту же ветку и ляжет под пункт в ${esc(it.doc)} проекта ${esc(projLabel(it.project))}.</span></div>
+    ${th && tier === "next" ? `<p class="why"><b>Тема ${th.n}:</b> ${esc(th.name)}. ${esc(th.why || "")}</p>` : ""}
+    ${it.why ? `<p class="why"><b>Зачем:</b> ${inline(it.why)}</p>` : ""}
+    ${body || (docs.images || {})[it.id] ? `<section class="body-sec"><h4>Описание</h4>
+      ${long ? `<p class="lead">${inline(lead)}</p><details class="fold"><summary>Полное описание</summary><div class="body">${md(body)}${shots(it.id)}</div></details>`
+        : `<div class="body">${md(body)}${shots(it.id)}</div>`}</section>` : ""}
+    ${(it.thread || []).length ? `<section class="thread">${threadHtml(it.thread)}</section>` : ""}
+    <p class="tech">Источник: ${esc(it.doc || "")}${it.section ? ` · раздел «${esc(it.section)}»` : ""} · ${esc(it.id)} · состояние в хранилище: ${esc(it.state)}</p>
   </article>`;
-  document.title = `${it.code || "Вопрос"} · Тикеты Данияра`;
+  document.title = `${it.code || "Вопрос"} · Задачи`;
   wireAsk();
   window.scrollTo({ top: 0 });
 }
@@ -318,7 +363,7 @@ function wireAsk() {
       await comments.openComposer(range ? { range } : { element: art });
     } catch (e) {
       btn.hidden = true;
-      document.getElementById("ask-hint").textContent = "Комментарии здесь недоступны: открой страницу в Claude и оставь комментарий через значок чата вверху, начав с номера тикета.";
+      document.getElementById("ask-hint").textContent = "Комментарии здесь недоступны: откройте страницу в Claude и оставьте комментарий через значок чата вверху, начав с номера задачи.";
     }
   };
 }
@@ -340,7 +385,7 @@ function renderDoc(key) {
     <div class="doc">${html}</div>
     <div class="howto"><h4>Спросить про документ · ${esc(path)}</h4>
       <button class="ask" id="ask" type="button" hidden>Написать про этот документ</button>
-      <span class="ask-hint" id="ask-hint">Выдели фразу и нажми кнопку: вопрос придёт вместе с ней. Это снимок документа на момент обновления страницы.</span></div>
+      <span class="ask-hint" id="ask-hint">Выделите фразу и нажмите кнопку: вопрос придёт вместе с ней. Это снимок документа на момент обновления страницы.</span></div>
   </article>`;
   view.querySelectorAll(".doc table").forEach(t => { const w = document.createElement("div"); w.className = "tbl"; t.replaceWith(w); w.append(t); });
   view.querySelectorAll(".doc a[href]").forEach(a => { if (!a.getAttribute("href").startsWith("#")) { a.target = "_blank"; a.rel = "noopener"; } });
@@ -361,7 +406,7 @@ async function start() {
     const r = await fetch("tickets.json", { cache: "no-store" });
     data = await r.json();
   } catch (e) {
-    document.getElementById("view").innerHTML = '<p class="empty">Не загрузился список тикетов. Обнови страницу.</p>';
+    document.getElementById("view").innerHTML = '<p class="empty">Не загрузился список задач. Обновите страницу.</p>';
     return;
   }
   try { const t = await fetch("triage.json", { cache: "no-store" }); if (t.ok) triage = await t.json(); } catch (e) {}
