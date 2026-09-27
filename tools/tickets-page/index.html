@@ -91,6 +91,10 @@ code { font-family: var(--mono); font-size: .86em; background: var(--quote); bor
 .doc th, .doc td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
 .doc th { background: var(--quote); font-weight: 600; }
 .doc pre { background: var(--quote); border-radius: 8px; padding: 10px 12px; overflow-x: auto; } .doc pre code { padding: 0; }
+.shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.shots figure { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.shots img { width: 100%; max-height: 420px; object-fit: contain; object-position: top; background: var(--quote); border: 1px solid var(--line); border-radius: 8px; }
+.shots figcaption { font-size: 12.5px; color: var(--ink-3); }
 .tref { color: var(--accent); font-weight: 500; text-underline-offset: 2px; }
 .thread { display: flex; flex-direction: column; gap: 10px; }
 .thread h4, .howto h4 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
@@ -165,6 +169,13 @@ const tierOf = i => { const t = (triage[i.id] || {}).tier; return t === "decide"
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 let curProject = "", docs = { refs: {}, files: {} };
+function shots(id) {
+  const list = (docs.images || {})[id] || [];
+  if (!list.length) return "";
+  const label = n => /(^|[-_])(bylo|was|before|sejchas|now)([-_]|$)/i.test(n) ? "было · " : /(^|[-_])(stanet|stalo|after|will|new)([-_]|$)/i.test(n) ? "станет · " : "";
+  return `<div class="shots">` + list.map(p => `<figure><a href="${esc(p.src)}" target="_blank" rel="noopener"><img src="${esc(p.src)}" alt="${esc(p.name)}" loading="lazy"></a>` +
+    `<figcaption>${label(p.name)}${esc(p.name.replace(/[-_]+/g, " "))}</figcaption></figure>`).join("") + `</div>`;
+}
 const docId = key => "doc-" + key.replace(/[^\w.-]+/g, "-");
 function linkDocs(h) {
   return h.replace(/<code>([^<\s]+\.md)<\/code>/g, (m, ref) => {
@@ -273,7 +284,7 @@ function renderItem() {
     <p class="who-line s-${tierOf(it)}"><b>На ком:</b> ${esc(whoOf(it)[0])} · ${linkCodes(esc(whoOf(it)[1]))}</p>
     ${triage[it.id] ? `<p class="triage t-${tierOf(it)}">${esc(triage[it.id].note)}</p>` : ""}
     ${it.why ? `<p class="why"><b>Зачем:</b> ${inline(it.why)}</p>` : ""}
-    <div class="body">${md(it.pick ? String(it.body).replace(it.pick, "") : it.body)}${it.pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(it.pick.replace(/^Предложение[^:]*:\s*/i, ""))}</p>` : ""}</div>
+    <div class="body">${md(it.pick ? String(it.body).replace(it.pick, "") : it.body)}${shots(it.id)}${it.pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(it.pick.replace(/^Предложение[^:]*:\s*/i, ""))}</p>` : ""}</div>
     ${thread ? `<section class="thread"><h4>Ветка</h4>${thread}</section>` : ""}
     <div class="howto"><h4>Ответить или спросить · ${esc(tag)}</h4>
       <button class="ask" id="ask" type="button" hidden>Написать про этот тикет</button>

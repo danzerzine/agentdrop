@@ -3594,6 +3594,24 @@ def collect_items(root: Path, cfg: dict) -> tuple[dict, list[dict]]:
     return proj, items
 
 
+IMG_EXT = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def page_image(src: Path, out_dir: Path) -> str:
+    """A copy of a screenshot for the tickets page: JPEG, at most 1600 px on the long side (sips on a Mac, else as is)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    name = f"{sha(str(src.resolve()).encode())[:10]}.jpg"
+    dst = out_dir / name
+    if not dst.exists() or dst.stat().st_mtime < src.stat().st_mtime:
+        if shutil.which("sips"):
+            subprocess.run(["sips", "-s", "format", "jpeg", "-s", "formatOptions", "80", "--resampleHeightWidthMax", "1600",
+                            str(src), "--out", str(dst)], capture_output=True)
+        if not dst.exists():
+            name = f"{sha(str(src.resolve()).encode())[:10]}{src.suffix.lower()}"
+            shutil.copyfile(src, out_dir / name)
+    return f"img/{name}"
+
+
 def cmd_tickets(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="agentdrop tickets",
                                 description="Every ticket and question for the owner, with full text and thread, "
@@ -3619,6 +3637,21 @@ def cmd_tickets(argv: list[str]) -> int:
                     real = f"{proj['key']}:{f.relative_to(root).as_posix()}"
                     docs["refs"][f"{proj['key']}:{ref}"] = real
                     docs["files"].setdefault(real, f.read_text(encoding="utf-8", errors="replace"))
+            if a.docs and it["state"] != "done":   # screenshots it names, a file or a folder of them, shown inline
+                pics = []
+                for ref in re.findall(r"`([^`\s]+)`", text) + re.findall(r"[\w./-]+\.(?:png|jpe?g|webp)\b", text, re.I):
+                    for base in (root, root / "docs"):
+                        p = base / ref
+                        if p.is_dir():
+                            pics += sorted(x for x in p.iterdir() if x.suffix.lower() in IMG_EXT)
+                            break
+                        if p.is_file() and p.suffix.lower() in IMG_EXT:
+                            pics.append(p)
+                            break
+                pics = list(dict.fromkeys(pics))[:8]
+                if pics:
+                    docs.setdefault("images", {})[it["id"]] = [
+                        {"src": page_image(x, Path(a.docs).parent / "img"), "name": x.stem} for x in pics]
     if a.docs:
         Path(a.docs).write_text(json.dumps(docs, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(out, ensure_ascii=False, indent=1))
