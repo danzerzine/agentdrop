@@ -3426,8 +3426,7 @@ def cmd_accept(argv: list[str]) -> int:
     save_run(runf, run)
     if store:
         src.judged(tid, v["verdict"], v["summary"], final=True)
-        if v["verdict"] == "PASS":
-            drop_claim(root, tid, None)
+        drop_claim(root, tid, None)   # PASS is done; a last REJECT waits for the owner, not for the agent
     # a PASS shows up on the board and in the pass-end brief; the owner is messaged only when the ticket needs them
     # (accept_tell_pass = yes brings the PASS messages back)
     tell = v["verdict"] != "PASS" or str(cfg.get("accept_tell_pass", "")).lower() in ("1", "yes", "true")
