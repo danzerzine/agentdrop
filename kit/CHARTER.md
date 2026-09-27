@@ -14,7 +14,7 @@
 | `docs/PITFALLS.md` | traps we already fell into |
 | `docs/OPERATIONS.md` | run, deploy, servers, access; names and paths only, no secrets |
 | `docs/STATE.md` | what works, half-done, broken; rewrite whole when the picture changes |
-| `docs/TODO.md` | tickets `B<n>` with P0–P3 (now / next / later): only what remains and its source; done → `LOG.md`, history → spec; numbers never reused |
+| `docs/TODO.md` | tickets `B<n>` with P0–P3 (now / next / later): only what remains and its source; done → `LOG.md`, history → spec; numbers never reused. A ticket that can start only when another is done says so in its first paragraph: `После: B12` / `After: B12`. `[автономно]` / `[autonomous]` after the code: an unattended run may do it; `[с человеком]` / `[with owner]`: only together with the owner |
 | `docs/QUESTIONS.md` | questions for the owner or others; agent decisions the owner may revert; closed items kept a week, then deleted |
 | `docs/LOG.md` | one 3–5 line entry per finished pass, newest on top |
 | `docs/specs/B<n>-<name>.md` | spec for a multi-pass task; report appended at the end |

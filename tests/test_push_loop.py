@@ -124,6 +124,51 @@ class PushLoop(Project):
         self.assertEqual([t["id"] for t in s["next"]["blocked"]], ["B12"])
         self.assertIn("waiting for other people: Plan for the client (B12)", self.run_ad("status").stdout)
 
+    def test_a_ticket_after_an_open_one_waits_for_it(self):
+        todo = self.root / "docs" / "TODO.md"
+        todo.write_text(TODO.replace("## Next\n", "## Next\n\n- B12 P1 — Share the export. After: B9.\n"
+                                     "- B13 P1 — Print the export. After: B4 (done).\n"), encoding="utf-8")
+        s = self.status()
+        nxt = [t["id"] for t in s["next"]["tickets"] + s["next"]["rest"]]
+        self.assertNotIn("B12", nxt)
+        self.assertIn("B13", nxt)   # B4 left TODO, so B13 is on the frontier
+        self.assertEqual([(t["id"], t["after_open"]) for t in s["next"]["after"]], [("B12", ["B9"])])
+        self.assertIn("waiting for other tickets: Share the export (B12 ← B9)", self.run_ad("status").stdout)
+
+    def test_pack_takes_the_frontier_but_not_tickets_marked_with_owner(self):
+        todo = self.root / "docs" / "TODO.md"
+        todo.write_text(TODO.replace("- **B10. Dark theme.**", "- **B10. Dark theme.** [with owner]")
+                        .replace("- B11 P3 — Old reports cleanup.", "- B11 P3 [autonomous] — Old reports cleanup."),
+                        encoding="utf-8")
+        modes = {t["id"]: t["mode"] for t in self.status()["next"]["tickets"]}
+        self.assertEqual((modes["B10"], modes["B11"], modes["B7"]), ("human", "auto", ""))
+        r = self.run_ad("pack")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("1. Fix login on Safari (B7, P1)", r.stdout)
+        self.assertIn("2. export to CSV (B9, P2)", r.stdout)
+        self.assertNotIn("(B10", r.stdout)
+        self.assertIn("(B11, P3)", r.stdout)
+        self.assertIn("(B10, P2; with you)", self.run_ad("status").stdout)
+        only = self.run_ad("pack", "--only", "B11,B7").stdout
+        self.assertLess(only.index("(B11"), only.index("(B7"))
+        self.assertEqual(self.run_ad("pack", "--only", "B99").returncode, 2)
+
+    def test_pack_last_reads_the_run(self):
+        self.assertEqual(self.run_ad("pack", "--last").returncode, 1)
+        runs = self.root / "docs" / ".runs" / "pack"
+        runs.mkdir(parents=True)
+        (runs / "20260927-1200.jsonl").write_text(
+            '{"type":"system","subtype":"init"}\n'
+            '{"type":"assistant","message":{"content":[{"type":"text","text":"Working on B7."}]}}\n', encoding="utf-8")
+        r = self.run_ad("pack", "--last")
+        self.assertIn("stopped without a result", r.stdout)   # no pid file: nothing is running it
+        self.assertIn("Working on B7.", r.stdout)
+        with (runs / "20260927-1200.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write('{"type":"result","result":"B7 done (accepted).","total_cost_usd":3.5,"duration_ms":600000}\n')
+        r = self.run_ad("pack", "--last")
+        self.assertIn("finished, $3.50, 10 min", r.stdout)
+        self.assertIn("B7 done (accepted).", r.stdout)
+
     def test_waiting_for_owner(self):
         w = self.status()["waiting"]
         titles = [q["title"] for q in w["questions"]]

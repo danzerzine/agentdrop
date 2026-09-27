@@ -1130,6 +1130,9 @@ LABELS = {
                   "сессий без захваченного тикета, активных за {m} мин: {n}"),
     "open_rest": ("open tickets left: {counts}", "ещё открытых тикетов: {counts}"),
     "blocked": ("waiting for other people: {items}", "ждут других людей: {items}"),
+    "after_open": ("waiting for other tickets: {items}", "ждут других тикетов: {items}"),
+    "mode_auto": ("on its own", "сам"),
+    "mode_human": ("with you", "с тобой"),
     "branch": ("branch {b}", "ветка {b}"),
     "dirty": ("{n} files changed", "изменено файлов: {n}"),
     "ahead": ("{n} commits not pushed", "не запушено коммитов: {n}"),
@@ -1143,6 +1146,10 @@ WHY_RE = re.compile(r"(?:Зачем|Why):\s*(«[^»]*»(?:\s*\([^)]*\))?|\"[^\"]
 WAITS_RE = re.compile(r"(?i)(?<!\w)(жд[её]т|жд[её]м|ждем|waiting (?:for|on)|blocked (?:by|on)|(?:только )?после (?:ответа|OK)\b)"
                       r"(?:[^.;]|\.(?=\d)){0,200}")   # 26.09 does not end it
 DEFERRED_RE = re.compile(r"(?i)(?<!\w)(?:отложен[оаы]?|deferred|parked|on hold)(?!\w)")
+# «После: B94, B95» / "After: B12": the ticket waits for those tickets; it joins the frontier once they leave TODO
+AFTER_RE = re.compile(r"(?i)(?<!\w)(?:после|after)\s*:?\s*(B\d+(?:\s*(?:,|и|and)\s*B\d+)*)")
+# the other side of [autonomous]: a ticket only worked together with the owner, never by an unattended run
+HUMAN_RE = re.compile(r"(?i)\[(?:с человеком|с владельцем|with (?:the )?owner|with human)\]")
 RECO_RE = re.compile(r"(?i)(?:^|(?<=[.!?]\s))[^.!?]*(?:рекоменд|предлага|предложение|мой выбор|моя ставка|"
                      r"recommend|i suggest|my pick|proposal)[^.!?]*[.!?]?")
 COMMENT_RE = re.compile(r"^\s*>\s*\*\*([^,*]+?)(?:,[^*]*)?:\*\*")
@@ -1274,8 +1281,10 @@ def parse_todo(root: Path, cfg: dict) -> list[dict]:
             sent = re.match(r"(.{20,}?[.!?])\s", title, re.S)
             if sent:
                 title, body = sent.group(1), title[sent.end():] + body
+        title = re.sub(r"(?i)\s*(?:После|After):\s*B\d+(?:\s*(?:,|и|and)\s*B\d+)*[^.]*\.?", "", title)   # a field, not the title
         why = WHY_RE.search(first)
         waits = WAITS_RE.search(text)
+        after = [x for g in AFTER_RE.findall(first) for x in re.findall(r"B\d+", g) if x != m.group(2)]
         comments = [(c.group(1).strip(), line) for line in text.splitlines() if (c := COMMENT_RE.match(line))]
         out.append({
             "id": m.group(2), "priority": m.group(1) or m.group(3) or section[1],
@@ -1290,6 +1299,8 @@ def parse_todo(root: Path, cfg: dict) -> list[dict]:
             # the owner wrote last under the ticket: the agent's move, whatever the ticket says it waits for
             "owner_last": bool(comments and by_owner(comments[-1][0], words)),
             "deferred": bool(DEFERRED_RE.search(text.split("\n\n", 1)[0])),
+            "after": list(dict.fromkeys(after)),
+            "mode": "auto" if AUTONOMOUS_RE.search(first) else "human" if HUMAN_RE.search(first) else "",
             "last": clip(re.sub(r"^\s*>\s*", "", comments[-1][1]), 400) if comments else "",
         })
     return out
@@ -1499,6 +1510,12 @@ def collect_status(root: Path) -> dict:
     blocked = [t for t in open_ if t["waits"] and not t["waits_owner"]]
     free = [t for t in open_ if not t["waits"]]
     free.sort(key=lambda t: (t["priority"], t["order"]))
+    # the frontier: a ticket whose «После: B…» are still in TODO waits for them, it is not next yet
+    in_todo = {t["id"] for t in tickets}
+    for t in free:
+        t["after_open"] = [x for x in t["after"] if x in in_todo]
+    queued = [t for t in free if t["after_open"]]
+    free = [t for t in free if not t["after_open"]]
 
     entries = log_entries(root)
     seen = seen_state().get(str(root))
@@ -1519,7 +1536,7 @@ def collect_status(root: Path) -> dict:
         "running": {"claims": claims, "unclaimed_active_sessions": active, "active_minutes": ACTIVE_MINUTES},
         "done": {"since_seen": bool(seen), "seen_at": seen.get("at") if seen else None, "entries": done},
         "next": {"tickets": free[:SHOW["next"]], "rest": free[SHOW["next"]:], "blocked": blocked,
-                 "deferred": deferred},
+                 "after": queued, "deferred": deferred},
         "git": git_summary(root),
     }
 
@@ -1598,7 +1615,8 @@ def render_status(s: dict) -> str:
     n = s["next"]
     out += ["", f"## {L('next')}"]
     for t in n["tickets"]:
-        out.append(f"- {t['title']} ({t['id']}, {t['priority']})")
+        mode = f"; {L('mode_' + t['mode'])}" if t.get("mode") else ""
+        out.append(f"- {t['title']} ({t['id']}, {t['priority']}{mode})")
         if t["why"]:
             out.append(f"  {L('why')}: {t['why']}")
         elif t["context"]:
@@ -1612,6 +1630,9 @@ def render_status(s: dict) -> str:
         for t in n["rest"]:
             counts[t["priority"]] = counts.get(t["priority"], 0) + 1
         out.append("· " + L("open_rest", counts=", ".join(f"{p} {counts[p]}" for p in sorted(counts))))
+    if n.get("after"):
+        out.append("· " + L("after_open", items="; ".join(
+            f"{clip(t['title'], 60)} ({t['id']} ← {', '.join(t['after_open'])})" for t in n["after"])))
     if n.get("blocked"):
         out.append("· " + L("blocked", items="; ".join(f"{clip(t['title'], 60)} ({t['id']})" for t in n["blocked"])))
     return "\n".join(out)
@@ -3511,6 +3532,140 @@ def cmd_dispatch(argv: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# `agentdrop pack`: a dense autonomous run the owner asked for. The frontier (open, unclaimed, waiting
+# for nobody and for no open ticket, not marked [with owner]) in priority order, as one headless session
+# that outlives the terminal and the chat that started it. Python picks the tickets; the model does them.
+
+PACK_WORKER = "claude -p --permission-mode bypassPermissions"
+PACK_DIR = RUNS / "pack"             # <stamp>.prompt.md, .jsonl (the session), .err, .pid
+
+
+def pack_tickets(s: dict, n: int) -> list[dict]:
+    return [t for t in s["next"]["tickets"] + s["next"]["rest"] if t.get("mode") != "human"][:n]
+
+
+def pack_prompt(s: dict, tickets: list[dict], budget: float, name: str) -> str:
+    lines = [f"Autonomous run in the project in this directory ({s['project']}), started by `agentdrop pack` "
+             f"at {name}'s request. Nobody is watching: you can't ask {name} anything. Anything that needs their "
+             "decision or other people goes to docs/QUESTIONS.md as its own item (the question, the options, your "
+             "pick); then carry on with a reversible default.", "",
+             "First read AGENTS.md, docs/STATE.md, docs/TODO.md and docs/PITFALLS.md, and run `agentdrop status`. "
+             "Skip a ticket another session has claimed.", "",
+             "The tickets, in this order; each is its own pass by the charter (claim → work → commit → "
+             "`agentdrop accept` → LOG, TODO, release):"]
+    for k, t in enumerate(tickets, 1):
+        lines.append(f"{k}. {t['title']} ({t['id']}, {t['priority']})" + (f". Why: {t['why']}" if t["why"] else ""))
+    lines += ["When a ticket runs into missing data or access, write what is missing under it and go on. If time "
+              "and budget remain, take the next tickets from «Next up» in `agentdrop status` the same way, "
+              "skipping those marked [with owner] / [с человеком].", "",
+              "`agentdrop accept` takes up to half an hour: run it in the background and go on to the next ticket, "
+              "but wait for every accept before the final brief. Exit 1: fix what it printed and run it again. "
+              f"Exit 3: leave the ticket to {name} and go on.", "",
+              f"Budget: ${budget:g} for the whole session. Do bulk work (labelling, crawls, checking many items) with "
+              "scripts, local models or cheaper subagents; spend the strongest model only on spot checks of "
+              "disputed cases.", "",
+              "Never deploy, never send anything to anyone (mail, chats, Telegram), never push, never publish "
+              "anything outside. Commit only your own files, no AI attribution. The project's rules in AGENTS.md "
+              "hold throughout.", "",
+              f"The last message is one brief for {name}'s phone, in the language of the docs: per ticket its "
+              "meaning and the key number in a line or two (the code in parentheses), what waits for "
+              f"{name} (with your pick), what is left undone, what was spent."]
+    return "\n".join(lines)
+
+
+def last_pack(root: Path) -> dict | None:
+    runs = sorted((root / PACK_DIR).glob("*.jsonl"))
+    if not runs:
+        return None
+    f = runs[-1]
+    pid = f.with_suffix(".pid")
+    text = f.read_text(encoding="utf-8", errors="replace")
+    res = claude_result(text)
+    res = res if isinstance(res, dict) and res.get("type") == "result" else None
+    out = {"stamp": f.stem, "log": str(f), "running": not res and pid.exists() and pid_alive(pid.read_text())}
+    if res:
+        out.update(result=res.get("result", ""), cost_usd=res.get("total_cost_usd"),
+                   minutes=round(res.get("duration_ms", 0) / 60000))
+    else:   # still going (or died): the last thing it said
+        texts = []
+        for line in text.splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:   # the line being written
+                continue
+            if isinstance(e, dict) and e.get("type") == "assistant":
+                texts += [c.get("text", "") for c in e.get("message", {}).get("content", []) if c.get("type") == "text"]
+        out["last"] = clip(texts[-1], 400) if texts else ""
+    return out
+
+
+def cmd_pack(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="agentdrop pack",
+                                description="A dense autonomous run: the frontier tickets (not waiting for anyone "
+                                            "or for another open ticket, not marked [with owner]) in priority order "
+                                            "as one prompt; --run starts it as a headless session in the background.")
+    p.add_argument("path", nargs="?", default=".", help="Project directory (default: here)")
+    p.add_argument("-n", type=int, default=5, help="How many tickets (default 5)")
+    p.add_argument("--only", help="These tickets instead of the frontier, in this order: B6,B108")
+    p.add_argument("--budget", type=float, default=30, help="Dollar cap for the session (default 30)")
+    p.add_argument("--run", action="store_true", help="Start it now, detached; prints where it writes")
+    p.add_argument("--last", action="store_true", help="How the latest run in this project is doing, or its brief")
+    a = p.parse_args(argv)
+    root, cfg = find_root(Path(os.path.expanduser(a.path))), load_config()
+    prev = last_pack(root)
+    if a.last:
+        if not prev:
+            print("· no pack runs here yet")
+            return 1
+        state = "running" if prev["running"] else "finished" if "result" in prev else "stopped without a result"
+        print(f"{prev['stamp']}: {state}" + (f", ${prev['cost_usd']:.2f}, {prev['minutes']} min"
+                                             if prev.get("cost_usd") is not None else "") + f" — {prev['log']}")
+        print(prev.get("result") or prev.get("last", ""))
+        return 0
+    s = collect_status(root)
+    if a.only:
+        by_id = {t["id"]: t for t in parse_todo(root, cfg)}
+        want = [ticket_id(x) for x in a.only.split(",") if x.strip()]
+        missing = [x for x in want if x not in by_id]
+        if missing:
+            print(f"agentdrop pack: not in TODO: {', '.join(missing)}", file=sys.stderr)
+            return 2
+        tickets = [by_id[x] for x in want]
+    else:
+        tickets = pack_tickets(s, a.n)
+    if not tickets:
+        print("· nothing on the frontier: every open ticket waits for someone or for another ticket")
+        return 1
+    prompt = pack_prompt(s, tickets, a.budget, owner_name(cfg, s["ru"]))
+    if not a.run:
+        print(prompt)
+        return 0
+    if prev and prev["running"]:
+        print(f"agentdrop pack: a run is still going ({prev['stamp']}); `agentdrop pack --last`", file=sys.stderr)
+        return 2
+    import shlex
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
+    d = root / PACK_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    pf = d / f"{stamp}.prompt.md"
+    pf.write_text(prompt, encoding="utf-8")
+    cmd = shlex.split(os.path.expanduser(cfg.get("pack_worker", PACK_WORKER)))
+    if Path(cmd[0]).name == "claude":
+        cmd += ["--output-format", "stream-json", "--verbose", "--max-budget-usd", f"{a.budget:g}",
+                "-n", f"pack-{root.name}-{stamp}"]
+    # its own session/process group: closing the chat or the terminal that started it doesn't stop it
+    detach = ({"creationflags": 0x00000008 | 0x00000200} if platform.system() == "Windows"
+              else {"start_new_session": True})
+    with pf.open(encoding="utf-8") as inp, (d / f"{stamp}.jsonl").open("w") as out, \
+            (d / f"{stamp}.err").open("w") as err:
+        proc = subprocess.Popen(cmd, cwd=root, stdin=inp, stdout=out, stderr=err, **detach)
+    (d / f"{stamp}.pid").write_text(str(proc.pid))
+    print(f"· started: {', '.join(t['id'] for t in tickets)}, cap ${a.budget:g}, pid {proc.pid}")
+    print(f"· session {d / f'{stamp}.jsonl'}; progress and the brief: `agentdrop pack --last`")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # `agentdrop tickets`: every ticket and every question for the owner across projects, with full
 # text and thread, as JSON for a page where the owner opens one item and answers it.
 
@@ -3540,7 +3695,8 @@ def collect_items(root: Path, cfg: dict) -> tuple[dict, list[dict]]:
     proj = {"key": prefix, "label": label, "root": str(root), "ru": s["ru"]}
     state = {}
     for key, ts in (("owner", s["waiting"]["tickets"]), ("turn", s["waiting"]["turn_tickets"]),
-                    ("next", s["next"]["tickets"] + s["next"]["rest"]), ("others", s["next"]["blocked"]),
+                    ("next", s["next"]["tickets"] + s["next"]["rest"] + s["next"]["after"]),
+                    ("others", s["next"]["blocked"]),
                     ("later", s["next"]["deferred"])):
         for t in ts:
             state.setdefault(t["id"], key)
@@ -3664,7 +3820,7 @@ def cmd_tickets(argv: list[str]) -> int:
 
 COMMANDS = {"status": cmd_status, "claim": cmd_claim, "release": cmd_release, "brief": cmd_brief,
             "replies": cmd_replies, "accept": cmd_accept,
-            "dispatch": cmd_dispatch, "tickets": cmd_tickets}
+            "dispatch": cmd_dispatch, "pack": cmd_pack, "tickets": cmd_tickets}
 
 
 def main() -> None:
