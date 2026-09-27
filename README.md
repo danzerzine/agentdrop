@@ -109,7 +109,21 @@ agentdrop store check       # and show where the store and the markdown differ
 
 Claims live in `docs/.claims/`, one small JSON per ticket, ignored by git. A second session that tries to claim the same ticket is refused, so two agents don't work on it unknowingly. The charter tells agents to check status and claim before editing, and to end every pass with a brief you can read on a phone: what happened, the key number or draft, options with the agent's pick, and what happens if you don't answer.
 
-The task store is where tickets are moving: one SQLite file on this machine, `~/.agentdrop/tasks.sqlite3` (`AGENTDROP_STORE` points elsewhere). Projects still live in their markdown for now, and every other command reads the markdown. `agentdrop store import` copies a project in: open tickets with their text, why, priority, theme (`**B94 (P0) [model].**`), `[autonomous]` mark, `After:` links and thread; tickets closed in `LOG.md`; every question in `QUESTIONS.md` as a task "Decide: …" («Решить: …» in a Russian project) that waits for you, unless you answered last, it is deferred or closed. Each task gets one of seven states: queued, running, waiting for you, waiting for another task, in acceptance, done, deferred. Every change is written to an append-only journal of events with its time and author. Importing again changes only what changed in the files, so it can run as often as you like. `agentdrop store check` compares the two and exits 1 when they differ.
+The task store is where tickets are moving: one SQLite file on this machine, `~/.agentdrop/tasks.sqlite3` (`AGENTDROP_STORE` points elsewhere). A project lives in its markdown until the config moves it (below). `agentdrop store import` copies a project in: open tickets with their text, why, priority, theme (`**B94 (P0) [model].**`), `[autonomous]` mark, `After:` links and thread; tickets closed in `LOG.md`; every question in `QUESTIONS.md` as a task "Decide: …" («Решить: …» in a Russian project) that waits for you, unless you answered last, it is deferred or closed, or it is for other people. Each task gets one of eight states: queued, running, waiting for you, waiting for another task, waiting for other people, in acceptance, done, deferred. Every change is written to an append-only journal of events with its time and author. Importing again changes only what changed in the files, so it can run as often as you like. `agentdrop store check` compares the two and exits 1 when they differ.
+
+A line `tasks.<folder> = store` in `~/.agentdrop/config` moves a project to the store: `status`, `tickets`, `brief`, `pack`, `dispatch`, `claim`, `release` and `accept` then read and write the store, and the project's `TODO.md` and `QUESTIONS.md` are no longer read (import first; after the move `store import` refuses, since the markdown would undo newer changes). Agents work through `agentdrop task`:
+
+```bash
+agentdrop task where                 # store or markdown
+agentdrop task take [B12]            # claim one task (default: the next one) and print it: text, thread, links, files it names
+agentdrop task comment B12 "…"       # add to its thread
+agentdrop task ask B12 "…"           # a question for you; the task waits for you, the run lets go
+agentdrop task state B12 waiting_others "The editors: the layout"   # or any state, by key or glossary name
+agentdrop task handin B12            # to acceptance; then `agentdrop accept B12`, which marks it done on a PASS
+agentdrop task new "Title" --why "«…»" --priority P1 [--after B9] [--question]
+```
+
+A take is decided under the store's write lock and respects claims made with `agentdrop claim`, so two sessions never get the same task. Every change is journaled with its author: the session, `judge`, or `--as Name`.
 
 Telegram delivery (`brief --send`, `replies`, `dispatch`) is frozen since 27.09: a bot with fixed message formats read like an alert feed and needed debugging like a project of its own. Talking to the agent in a Claude Code session works better, so the morning run there is a Claude Code task that writes its summary in prose. The commands below still work.
 

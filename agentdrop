@@ -13,6 +13,9 @@ Usage:
   agentdrop release B41        Release it at the end of the pass
   agentdrop store import       Copy this project's tickets and questions into the task store
   agentdrop store check        Show where the task store and the project's markdown differ
+  agentdrop task take [B12]    In a project whose tasks live in the store (`tasks.<folder> = store`
+                               in the config): take one task; also `task show|state|ask|comment|
+                               handin|new|where`
 
 Project skeleton (docs/, charter, review-intake skill, docs guard) lives at:
   ~/.agentdrop/kit/   — CHARTER.md goes into AGENTS.md, other files are copied if missing
@@ -32,6 +35,7 @@ The master rules live at:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -1603,9 +1607,16 @@ class MarkdownTasks:
         return out
 
 
-def tasks_of(root: Path, cfg: dict | None = None) -> MarkdownTasks:
-    """Where a project's tickets and questions live. Markdown for every project for now."""
-    return MarkdownTasks(root, cfg)
+def in_store(root: Path, cfg: dict | None = None) -> bool:
+    """The project's tasks live in the store: `tasks.<folder> = store` in the config."""
+    cfg = load_config() if cfg is None else cfg
+    return cfg.get(f"tasks.{root.name}", "").lower() == "store"
+
+
+def tasks_of(root: Path, cfg: dict | None = None) -> MarkdownTasks | StoreTasks:
+    """Where a project's tickets and questions live: the store for a project the config moves there
+    (`tasks.<folder> = store`), its markdown for every other one."""
+    return StoreTasks(root, cfg) if in_store(root, cfg) else MarkdownTasks(root, cfg)
 
 
 def parse_asks(root: Path) -> dict | None:
@@ -1975,16 +1986,7 @@ def cmd_claim(argv: list[str]) -> int:
     if ticket is None:
         print(f"! {tid} нет в docs/TODO.md — захватываю всё равно" if ru
               else f"! {tid} is not in docs/TODO.md — claiming anyway", file=sys.stderr)
-    branch = git(root, "branch", "--show-current").stdout.strip() if (root / ".git").exists() else ""
-    head = git(root, "rev-parse", "HEAD").stdout.strip() if branch else ""
-    d.mkdir(parents=True, exist_ok=True)
-    ignore = d / ".gitignore"
-    if not ignore.exists():
-        ignore.write_text("# agentdrop claims: local to this machine, never committed\n*\n", encoding="utf-8")
-    data = {"ticket": tid, "title": ticket["title"] if ticket else "", "session": sid, "agent": agent_name(),
-            "started": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-            "branch": branch, "head": head, "host": platform.node()}
-    f.write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    write_claim(root, tid, ticket["title"] if ticket else "", sid)
     print(f"✓ {tid} захвачен ({sid[:8]})" if ru else f"✓ {tid} claimed ({sid[:8]})")
     return 0
 
@@ -1992,7 +1994,8 @@ def cmd_claim(argv: list[str]) -> int:
 def cmd_release(argv: list[str]) -> int:
     a = claim_parser("release", "Release a ticket at the end of a pass.").parse_args(argv)
     root, tid, sid = find_root(Path(a.root)), ticket_id(a.ticket), session_id(a.session)
-    ru = tasks_of(root).russian()
+    src = tasks_of(root)
+    ru = src.russian()
     f = root / CLAIMS / f"{tid}.json"
     if not f.exists():
         print(f"· {tid} не был захвачен" if ru else f"· {tid} was not claimed")
@@ -2007,6 +2010,8 @@ def cmd_release(argv: list[str]) -> int:
               file=sys.stderr)
         return 1
     f.unlink()
+    if isinstance(src, StoreTasks):
+        src.released(tid, f"{agent_name()} {sid}")
     print(f"✓ {tid} отпущен" if ru else f"✓ {tid} released")
     return 0
 
@@ -3345,6 +3350,8 @@ def cmd_accept(argv: list[str]) -> int:
         if s["exit"] != 0:
             run["state"] = "checks_failed"
             save_run(runf, run)
+            if isinstance(src, StoreTasks):   # back to work
+                src.judged(tid, "REJECT", "", final=False)
             why = ("не уложилась в {} мин" if ru else "timed out after {} min").format(int(timeout // 60)) \
                 if s.get("timeout") else f"exit {s['exit']}"
             print(f"✗ {cmd}: {why}\n{tail(root / s['log'])}\n")
@@ -3403,9 +3410,12 @@ def cmd_accept(argv: list[str]) -> int:
     limit = int(cfg.get("accept_rejects", ACCEPT_REJECTS))
     print(f"\n{v['verdict']}")
     print_findings(v, ru)
+    store = isinstance(src, StoreTasks)
     if v["verdict"] == "REJECT" and rejects < limit:
         run["state"] = "rejected"
         save_run(runf, run)
+        if store:
+            src.judged(tid, "REJECT", v["summary"], final=False)
         print((f"\nСудья отклонил ({rejects} из {limit}; на {limit}-й раз тикет уйдёт владельцу). Почини блокеры "
                f"и запусти `agentdrop accept {tid}` снова.") if ru else
               (f"\nRejected ({rejects} of {limit}; the {limit}th time the ticket goes to the owner). Fix the "
@@ -3414,6 +3424,10 @@ def cmd_accept(argv: list[str]) -> int:
     fresh_verdict = not (done and not a.fresh)
     run["state"] = "accepted" if v["verdict"] == "PASS" else "owner"
     save_run(runf, run)
+    if store:
+        src.judged(tid, v["verdict"], v["summary"], final=True)
+        if v["verdict"] == "PASS":
+            drop_claim(root, tid, None)
     # a PASS shows up on the board and in the pass-end brief; the owner is messaged only when the ticket needs them
     # (accept_tell_pass = yes brings the PASS messages back)
     tell = v["verdict"] != "PASS" or str(cfg.get("accept_tell_pass", "")).lower() in ("1", "yes", "true")
@@ -3421,12 +3435,24 @@ def cmd_accept(argv: list[str]) -> int:
         print(notify_owner(root, cfg, accept_message(root, cfg, run, v, ru), ru))
         run["told"] = fp
         save_run(runf, run)
+    if v["verdict"] == "PASS" and store:
+        print(("\nПринято: задача в базе «Готово», захват снят. Дальше по уставу: запись в LOG.md, STATE.md если "
+               "картина изменилась, коммит.") if ru else
+              ("\nAccepted: the task is done in the store and its claim released. Then, as the charter says: a LOG.md "
+               "entry, STATE.md if the picture changed, commit."))
+        return 0
     if v["verdict"] == "PASS":
         print(("\nПринято. Дальше по уставу: запись в LOG.md, STATE.md если картина изменилась, убрать тикет из "
                f"TODO.md, `agentdrop release {tid}`, коммит.") if ru else
               ("\nAccepted. Then, as the charter says: a LOG.md entry, STATE.md if the picture changed, remove the "
                f"ticket from TODO.md, `agentdrop release {tid}`, commit."))
         return 0
+    if store:
+        print(("\nЗадача ушла владельцу (в базе «Ждёт вас»). Не чини дальше вслепую: его ответ придёт в ветку задачи "
+               f"(`agentdrop task show {tid}`).") if ru else
+              ("\nThe task went to the owner (waits for you, in the store). Don't keep repairing blind: their answer "
+               f"comes in the task's thread (`agentdrop task show {tid}`)."))
+        return 3
     print(("\nТикет ушёл владельцу. Не чини дальше вслепую: жди его ответа под тикетом в TODO.md "
            "(`agentdrop status` его заберёт).") if ru else
           ("\nThe ticket went to the owner. Don't keep repairing blind: wait for their answer under the ticket "
@@ -3482,25 +3508,38 @@ def dispatch_projects(cfg: dict) -> list[Path]:
     return out
 
 
-def tidy_prompt(s: dict) -> str:
+STORE_RULE = ("This project's tasks live in agentdrop's task store, not in docs/TODO.md or docs/QUESTIONS.md: never "
+              "read or edit those two files. `agentdrop task take B<n>` takes a task and prints it with its thread, links "
+              "and the files it names; `agentdrop task comment|ask|state|handin|new` change it (`agentdrop task -h`).")
+
+
+def tidy_prompt(s: dict, store: bool = False) -> str:
     turn, nxt = s["waiting"]["turn_tickets"], s["next"]["tickets"] + s["next"]["rest"]
     lines = [f"Morning tidy of the project in this directory ({s['project']}), started by agentdrop's dispatcher.",
-             "Read AGENTS.md, docs/STATE.md and docs/TODO.md first and follow the project's charter. "
-             "This pass changes only the project's docs: no code, no product work.", "", HANDS_OFF, ""]
+             ("Read AGENTS.md and docs/STATE.md first and follow the project's charter. " + STORE_RULE + " "
+              if store else "Read AGENTS.md, docs/STATE.md and docs/TODO.md first and follow the project's charter. ")
+             + f"This pass changes only the project's docs{' and tasks' if store else ''}: no code, no product work.",
+             "", HANDS_OFF, ""]
     if turn or s["waiting"]["your_turn"]:
         lines += ["1. The owner wrote last under these items; it is the agent's move:"]
-        lines += [f"- {t['title']} ({t['id']}, docs/TODO.md). The owner's last words: «{t['last']}»" for t in turn]
-        lines += [f"- {q} (docs/QUESTIONS.md)" for q in s["waiting"]["your_turn"][:len(s["waiting"]["your_turn"]) - len(turn)]]
+        lines += [f"- {t['title']} ({t['id']}{'' if store else ', docs/TODO.md'}). The owner's last words: «{t['last']}»"
+                  for t in turn]
+        lines += [f"- {q}{'' if store else ' (docs/QUESTIONS.md)'}" for q in s["waiting"]["your_turn"][:len(s["waiting"]["your_turn"]) - len(turn)]]
         lines += ["For each, do what the answer settles within the docs: close a ticket that is done (LOG line, "
-                  "remove it from TODO), record a choice the owner made the way the charter says (with their quote), "
-                  "mark what now waits for someone and for whom, and answer under the owner's comment in the thread "
-                  "format saying what you did or what happens next. If the answer asks for code or product work, "
+                  + ("`agentdrop task state B<n> done`" if store else "remove it from TODO")
+                  + "), record a choice the owner made the way the charter says (with their quote), "
+                  "mark what now waits for someone and for whom, and answer under the owner's comment "
+                  + ("with `agentdrop task comment`" if store else "in the thread format")
+                  + " saying what you did or what happens next. If the answer asks for code or product work, "
                   "keep the ticket, reply what will be done, and don't do the work now.", ""]
     lines += [f"{2 if s['waiting']['your_turn'] else 1}. Check that these tickets from «Next» are still true, each against `git log`, "
               "the code and LOG:"]
     lines += [f"- {t['id']}: {t['title']}" for t in nxt[:TIDY_NEXT]]
-    lines += ["Done already: close it. Text out of date: fix the text, keep what is still open. Blocked on other "
-              "people: add a phrase «Ждёт <кого>: …» (or «Waiting for <whom>: …» in English docs). "
+    lines += [("Done already: close it (`agentdrop task state B<n> done`). Blocked on other people: `agentdrop task "
+               "state B<n> waiting_others \"<whom>: …\"`. Text out of date: say what changed with `agentdrop task "
+               "comment`. " if store else
+               "Done already: close it. Text out of date: fix the text, keep what is still open. Blocked on other "
+               "people: add a phrase «Ждёт <кого>: …» (or «Waiting for <whom>: …» in English docs). ") +
               "When you can't tell from the evidence, leave it as it is: never guess a ticket closed.", "",
               "At the end: one commit with the docs you changed.", "",
               "Then the report for the owner, who reads it on a phone and answers by pointing at one line. "
@@ -3516,8 +3555,22 @@ def tidy_prompt(s: dict) -> str:
     return "\n".join(lines)
 
 
-def autonomous_prompt(t: dict) -> str:
+def autonomous_prompt(t: dict, store: bool = False) -> str:
     tid = t["id"]
+    if store:
+        return "\n".join([
+            f"Do task {tid} («{t['title']}») in the project in this directory, started by agentdrop's dispatcher. "
+            "The owner marked it [autonomous]: you may do it without asking.",
+            "Read AGENTS.md and docs/STATE.md first and follow the project's charter. " + STORE_RULE,
+            "", HANDS_OFF, "",
+            f"1. `agentdrop task take {tid} --session dispatcher`: it prints the task. If it is refused, stop.",
+            "2. Do the work and commit it.",
+            f"3. `agentdrop task handin {tid} --session dispatcher`, then `agentdrop accept {tid}`. Exit 1: fix what "
+            "it printed and run accept again. Exit 3: stop, the task went to the owner. Exit 0: accepted, done in the store.",
+            "4. Finish as the charter says: LOG entry (say that deploying waits for the owner, if the project deploys), "
+            f"STATE if the picture changed, commit. When you stop halfway, `agentdrop release {tid} --session dispatcher`.",
+            "Answer in one or two sentences: what happened and the exit code of the last `agentdrop accept`.",
+        ])
     return "\n".join([
         f"Do ticket {tid} («{t['title']}») in the project in this directory, started by agentdrop's dispatcher. "
         "The owner marked it [autonomous]: you may do it without asking.",
@@ -3617,7 +3670,7 @@ def dispatch_one(root: Path, cfg: dict, dry: bool, log, pending: list, verbose: 
     try:
         log(f"{root.name}: " + ("утренний разбор — сессия Claude, до {} мин" if s["ru"] else
                                 "morning tidy — a Claude session, up to {} min").format(int(float(cfg.get("tidy_timeout_min", 30)))))
-        r = run_worker(root, cfg, "tidy", tidy_prompt(s), float(cfg.get("tidy_timeout_min", 30)), TIDY_SCHEMA, verbose)
+        r = run_worker(root, cfg, "tidy", tidy_prompt(s, isinstance(src, StoreTasks)), float(cfg.get("tidy_timeout_min", 30)), TIDY_SCHEMA, verbose)
     finally:
         claim.unlink(missing_ok=True)
     if r.get("report"):
@@ -3630,7 +3683,7 @@ def dispatch_one(root: Path, cfg: dict, dry: bool, log, pending: list, verbose: 
                  if AUTONOMOUS_RE.search(src.ticket_text(t["id"]))), None)
     if auto and not busy(root, s):
         log(f"{root.name}: {auto['id']} [autonomous] — {auto['title']}")
-        r = run_worker(root, cfg, f"auto-{auto['id']}", autonomous_prompt(auto),
+        r = run_worker(root, cfg, f"auto-{auto['id']}", autonomous_prompt(auto, isinstance(src, StoreTasks)),
                        float(cfg.get("autonomous_timeout_min", 120)), verbose=verbose)
         log(f"{root.name}: {auto['id']} exit {r['exit']}" + (f", ${r['cost_usd']}" if "cost_usd" in r else "")
             + f" — {clip(r.get('notes', ''), 200)}")
@@ -3773,29 +3826,36 @@ def pack_tickets(s: dict, n: int) -> list[dict]:
 
 
 def pack_prompt(s: dict, tickets: list[dict], budget: float, name: str,
-                lane: tuple[int, int] = (1, 1), others: list[dict] | None = None) -> str:
+                lane: tuple[int, int] = (1, 1), others: list[dict] | None = None, store: bool = False) -> str:
     k, n = lane
+    ask = ("goes under its task: `agentdrop task ask B<n> \"…\"` (the question, the options, your pick), or "
+           "`agentdrop task state B<n> waiting_others \"<whom>: …\"`" if store else
+           "goes to docs/QUESTIONS.md as its own item (the question, the options, your pick)")
     lines = [f"Autonomous run in the project in this directory ({s['project']}), started by `agentdrop pack` "
              f"at {name}'s request. Nobody is watching: you can't ask {name} anything. Anything that needs their "
-             "decision or other people goes to docs/QUESTIONS.md as its own item (the question, the options, your "
-             "pick); then carry on with a reversible default.", "",
-             "First read AGENTS.md, docs/STATE.md, docs/TODO.md and docs/PITFALLS.md, and run `agentdrop status`. "
-             "Skip a ticket another session has claimed.", ""]
+             f"decision or other people {ask}; then carry on with a reversible default.", "",
+             ("First read AGENTS.md, docs/STATE.md and docs/PITFALLS.md, and run `agentdrop status`. " + STORE_RULE + " "
+              if store else "First read AGENTS.md, docs/STATE.md, docs/TODO.md and docs/PITFALLS.md, and run "
+              "`agentdrop status`. ") + "Skip a ticket another session has claimed.", ""]
     if n > 1:
         lines += [f"You are one of {n} sessions of this run working in this folder at the same time (lane {k}). "
                   "The others do: " + "; ".join(f"{t['title']} ({t['id']})" for t in others or []) + ". Don't touch "
-                  "their tickets or files. The docs (TODO.md, LOG.md, STATE.md, QUESTIONS.md) are shared: edit only "
+                  f"their tickets or files. The docs ({'LOG.md, STATE.md' if store else 'TODO.md, LOG.md, STATE.md, QUESTIONS.md'}) are shared: edit only "
                   "your own items, never revert another session's edits; committing a shared doc that also holds "
                   "their uncommitted lines is fine. If `agentdrop accept` or git trips over files another session "
                   "changed and hasn't committed yet, don't commit or undo them: wait a few minutes and run it "
                   "again.", ""]
-    lines += ["The tickets, in this order; each is its own pass by the charter (claim → work → commit → "
-              "`agentdrop accept` → LOG, TODO, release):"]
+    lines += ["The tickets, in this order; each is its own pass by the charter (" + (
+        "`agentdrop task take B<n>` → work → commit → `agentdrop task handin B<n>` → `agentdrop accept B<n>` → LOG):"
+        if store else "claim → work → commit → `agentdrop accept` → LOG, TODO, release):")]
     for i, t in enumerate(tickets, 1):
         lines.append(f"{i}. {t['title']} ({t['id']}, {t['priority']})" + (f". Why: {t['why']}" if t["why"] else ""))
-    lines += ["When a ticket runs into missing data or access, write what is missing under it and go on. If time "
-              "and budget remain, take the next tickets from «Next up» in `agentdrop status` the same way (claim "
-              "first; refused means another session has it), skipping those marked [with owner] / [с человеком].", "",
+    lines += [("When a ticket runs into missing data or access, say what is missing with `agentdrop task comment` and "
+               "go on. If time and budget remain, `agentdrop task take` with no number gives the next one (refused "
+               "means another session has it)." if store else
+               "When a ticket runs into missing data or access, write what is missing under it and go on. If time "
+               "and budget remain, take the next tickets from «Next up» in `agentdrop status` the same way (claim "
+               "first; refused means another session has it), skipping those marked [with owner] / [с человеком]."), "",
               "`agentdrop accept` takes up to half an hour: run it in the background and go on to the next ticket, "
               "but wait for every accept before the final brief: this session ends when you stop answering, and the "
               "background jobs die with it, so before the brief block on them in the foreground (a loop that sleeps "
@@ -3895,7 +3955,8 @@ def cmd_pack(argv: list[str]) -> int:
     lanes = [tickets[k::j] for k in range(j)]   # dealt in priority order: lane 1 gets the 1st, (j+1)th, …
     budget = a.budget / j
     name = owner_name(cfg, s["ru"])
-    prompts = [pack_prompt(s, lane, budget, name, (k + 1, j), [t for t in tickets if t not in lane])
+    store = isinstance(tasks_of(root, cfg), StoreTasks)
+    prompts = [pack_prompt(s, lane, budget, name, (k + 1, j), [t for t in tickets if t not in lane], store)
                for k, lane in enumerate(lanes)]
     if not a.run:
         print("\n\n---\n\n".join(prompts))
@@ -3957,7 +4018,7 @@ def collect_items(root: Path, cfg: dict) -> tuple[dict, list[dict]]:
                       "images": t["images"], "doc": t["doc"]})
     for x in src.questions(full=True)["items"]:
         code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)", x["key"])
-        items.append({"id": f"{prefix}-q{sha(x['key'].encode())[:6]}", "project": prefix,
+        items.append({"id": f"{prefix}-{x.get('id') or 'q' + sha(x['key'].encode())[:6]}", "project": prefix,
                       "code": code.group(1) if code else "", "kind": "question", "title": x["title"],
                       "priority": "", "section": "QUESTIONS", "state": x["state"], "why": "", "waits": "",
                       "pick": x["pick"], "body": x["body"], "thread": x["thread"],
@@ -4135,15 +4196,16 @@ def cmd_limits(argv: list[str]) -> int:
 # live in markdown for now: `import` copies one into the store and `check` shows where the two
 # differ. Every change the store takes is written to an append-only journal of events.
 
-STORE_STATES = ("queued", "running", "waiting_you", "waiting_task", "accepting", "done", "deferred")
+STORE_STATES = ("queued", "running", "waiting_you", "waiting_task", "waiting_others", "accepting", "done", "deferred")
+STATE_NAMES = {   # the glossary's names, English and Russian; `agentdrop task state` takes any of them
+    "queued": ("Queued", "В очереди"), "running": ("Running", "В работе"), "waiting_you": ("Waits for you", "Ждёт вас"),
+    "waiting_task": ("Waits for another task", "Ждёт другую задачу"),
+    "waiting_others": ("Waits for other people", "Ждёт других людей"),
+    "accepting": ("In acceptance", "На приёмке"), "done": ("Done", "Готово"), "deferred": ("Deferred", "Отложена")}
 STORE_FIELDS = ("kind", "title", "text", "source", "state", "priority", "theme", "mode", "waits",
                 "section", "position")
-STORE_SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS projects (
-  name TEXT PRIMARY KEY,
-  root TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS tasks (
+STORE_TASKS = f"""
+CREATE TABLE IF NOT EXISTS {{name}} (
   project TEXT NOT NULL REFERENCES projects(name),
   id TEXT NOT NULL,                      -- B12, or q1a2b3c for a question turned into a task
   kind TEXT NOT NULL CHECK (kind IN ('ticket', 'question')),
@@ -4161,6 +4223,13 @@ CREATE TABLE IF NOT EXISTS tasks (
   updated TEXT NOT NULL,
   PRIMARY KEY (project, id)
 );
+"""
+STORE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS projects (
+  name TEXT PRIMARY KEY,
+  root TEXT NOT NULL
+);
+""" + STORE_TASKS.format(name="tasks") + """
 CREATE TABLE IF NOT EXISTS links (       -- task runs after the other one is done
   project TEXT NOT NULL,
   task TEXT NOT NULL,
@@ -4184,8 +4253,8 @@ CREATE TABLE IF NOT EXISTS events (      -- append-only: every change, when and 
   author TEXT NOT NULL,
   project TEXT NOT NULL,
   task TEXT NOT NULL,
-  what TEXT NOT NULL,                    -- created, changed, links, comment, thread
-  detail TEXT NOT NULL DEFAULT '{{}}'
+  what TEXT NOT NULL,                    -- created, changed, links, comment, thread, state, taken, …
+  detail TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS events_by_task ON events (project, task, id);
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
@@ -4203,24 +4272,29 @@ def store_path() -> Path:
 def store_open() -> sqlite3.Connection:
     path = store_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
+    old = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'").fetchone()
+    if old and "'waiting_others'" not in old[0]:   # a store from before the eighth state: widen its CHECK
+        conn.executescript("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;" + STORE_TASKS.format(name="tasks_new")
+                           + "INSERT INTO tasks_new SELECT * FROM tasks; DROP TABLE tasks;"
+                           " ALTER TABLE tasks_new RENAME TO tasks; COMMIT;")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(STORE_SCHEMA)
     return conn
 
 
 def markdown_records(root: Path, cfg: dict) -> list[dict]:
-    """A project's tasks as the store keeps them, read from its markdown through `tasks_of`: open
-    tickets with their state, every question as a task «Решить: …», and tickets closed in the log."""
-    src = tasks_of(root, cfg)
+    """A project's tasks as the store keeps them, read from its markdown: open tickets with their
+    state, every question as a task «Решить: …», and tickets closed in the log."""
+    src = MarkdownTasks(root, cfg)
     ru = src.russian()
     tickets = src.tickets(full=True)
     claimed = {c.get("ticket") for c in read_claims(root)}
     state = {t["id"]: "running" for t in tickets if t["id"] in claimed}
     board = sort_tickets(tickets, claimed)
     for key, st in (("turn", "queued"), ("deferred", "deferred"), ("owner", "waiting_you"),
-                    ("blocked", "waiting_you"), ("after", "waiting_task"), ("free", "queued")):
+                    ("blocked", "waiting_others"), ("after", "waiting_task"), ("free", "queued")):
         for t in board[key]:
             state[t["id"]] = st
     thread = lambda th: [{"author": c["author"], "at": c["when"], "text": c["text"]} for c in th]
@@ -4230,8 +4304,9 @@ def markdown_records(root: Path, cfg: dict) -> list[dict]:
                     "state": state[t["id"]], "priority": t["priority"], "theme": t["theme"], "mode": t["mode"],
                     "waits": t["waits"], "section": t["section"], "position": t["order"][1],
                     "after": sorted(t["after"]), "thread": thread(t["thread"])})
-    # a question the owner answered last is the agent's move; one closed is done; the rest wait for the owner
-    q_state = {"turn": "queued", "deferred": "deferred", "closed": "done"}
+    # a question the owner answered last is the agent's move; one closed is done; one for others waits for them;
+    # the rest wait for the owner
+    q_state = {"turn": "queued", "deferred": "deferred", "closed": "done", "people": "waiting_others"}
     for i, q in enumerate(src.question_items()):
         body, th = split_thread(q["body"])
         out.append({"id": "q" + sha((q["key"] or q["text"].split("\n", 1)[0]).encode())[:6], "kind": "question",
@@ -4252,12 +4327,12 @@ def markdown_records(root: Path, cfg: dict) -> list[dict]:
     return out
 
 
-def store_records(conn: sqlite3.Connection, project: str) -> list[dict]:
-    """A project's tasks in the store, in the shape `markdown_records` gives."""
+def store_records(conn: sqlite3.Connection, project: str, tid: str | None = None) -> list[dict]:
+    """A project's tasks in the store (or the one task `tid`), in the shape `markdown_records` gives."""
     out = []
-    for row in conn.execute("SELECT * FROM tasks WHERE project = ? ORDER BY kind DESC, state = 'done', position",
-                            (project,)):
-        r = {"id": row["id"], **{f: row[f] for f in STORE_FIELDS}}
+    for row in conn.execute("SELECT * FROM tasks WHERE project = ? AND (? IS NULL OR id = ?) "
+                            "ORDER BY kind DESC, state = 'done', position", (project, tid, tid)):
+        r = {"id": row["id"], **{f: row[f] for f in STORE_FIELDS}, "updated": row["updated"]}
         r["after"] = [x[0] for x in conn.execute(
             "SELECT after FROM links WHERE project = ? AND task = ? ORDER BY after", (project, row["id"]))]
         r["thread"] = [dict(x) for x in conn.execute(
@@ -4362,12 +4437,19 @@ def cmd_store(argv: list[str]) -> int:
                        ("check", "Compare the store with the project's markdown; exit 1 when they differ")):
         sp = sub.add_parser(name, help=text, description=text)
         sp.add_argument("path", nargs="?", default=".", help="Project directory (default: the current one)")
+        if name == "import":
+            sp.add_argument("--force", action="store_true", help="Import even into a project that works from the store")
     a = p.parse_args(argv)
-    root = find_root(Path(a.path))
-    if not tasks_of(root).present():
+    root, cfg = find_root(Path(a.path)), load_config()
+    if not MarkdownTasks(root, cfg).present():
         print(f"agentdrop store: no docs/TODO.md in {root} or above", file=sys.stderr)
         return 2
-    project, records = root.name, markdown_records(root, load_config())
+    if a.action == "import" and in_store(root, cfg) and not a.force:
+        print(f"agentdrop store: {root.name} already works from the store (tasks.{root.name} = store), so its "
+              "markdown is out of date; importing it would undo the changes made since. --force to do it anyway",
+              file=sys.stderr)
+        return 2
+    project, records = root.name, markdown_records(root, cfg)
     conn = store_open()
     try:
         if a.action == "import":
@@ -4388,9 +4470,693 @@ def cmd_store(argv: list[str]) -> int:
         conn.close()
 
 
+# A project whose tasks live in the store (`tasks.<folder> = store` in the config) reads and changes them
+# through `StoreTasks`, the same interface `MarkdownTasks` gives, so status, tickets, brief, pack, dispatch
+# and accept work on it unchanged; agents use `agentdrop task …` instead of editing TODO.md and QUESTIONS.md.
+
+STORE_DOC = "store"   # where an item lives, for the page and the messages (TODO.md / QUESTIONS.md in markdown)
+Q_PREFIX = re.compile(r"^(?:Решить|Decide):\s*")
+HOLDS = ("running", "accepting")   # the states in which a session keeps its claim on a task
+
+
+def section_rank(section: str) -> int:
+    return next((order for rx, order, _ in SECTION_ORDER if rx.search(section)), 1)
+
+
+def thread_head(c: dict) -> str:
+    """A comment's first line as the markdown thread writes it: the board's "last"."""
+    who = c["author"] + (f", {c['at']}" if c["at"] else "")
+    return clip(f"**{who}:** " + (c["text"].splitlines() or [""])[0], 400)
+
+
+def question_key(title: str) -> str:
+    """"Which chart library (Q-2)" → "Q-2. Which chart library": the code in front, as QUESTIONS.md writes it."""
+    m = re.match(r"(.*?)\s*\(([A-ZА-ЯЁ]{1,3}-\d+)\)$", title)
+    return f"{m.group(2)}. {m.group(1)}" if m else title
+
+
+def state_of(raw: str) -> str | None:
+    """A state from its key or its glossary name in either language: "waiting_you", "Ждёт вас", "done"."""
+    low = raw.strip().lower().replace("ё", "е")
+    for key, names in STATE_NAMES.items():
+        if low in (key, *(n.lower().replace("ё", "е") for n in names)):
+            return key
+    return None
+
+
+def write_claim(root: Path, tid: str, title: str, sid: str) -> None:
+    """docs/.claims/<tid>.json for this session, with where the work starts (the judge's base)."""
+    d = root / CLAIMS
+    branch = git(root, "branch", "--show-current").stdout.strip() if (root / ".git").exists() else ""
+    head = git(root, "rev-parse", "HEAD").stdout.strip() if branch else ""
+    d.mkdir(parents=True, exist_ok=True)
+    ignore = d / ".gitignore"
+    if not ignore.exists():
+        ignore.write_text("# agentdrop claims: local to this machine, never committed\n*\n", encoding="utf-8")
+    data = {"ticket": tid, "title": title, "session": sid, "agent": agent_name(),
+            "started": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "branch": branch, "head": head, "host": platform.node()}
+    (d / f"{tid}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+
+
+def drop_claim(root: Path, tid: str, sid: str | None) -> bool:
+    """Remove the claim on `tid` if this session holds it (any session's when `sid` is None)."""
+    f = root / CLAIMS / f"{tid}.json"
+    c = load_run(f) if f.is_file() else None
+    if c is None or (sid is not None and c.get("session") not in (None, sid)):
+        return False
+    f.unlink(missing_ok=True)
+    return True
+
+
+class StoreTasks:
+    """A project's tasks in the store, with the interface of `MarkdownTasks`: the same records for
+    the board, the tickets page and the brief, derived from the store's fields; writes go to the
+    store at once, each with an event naming its author. Every read opens the store afresh.
+
+    Beyond that interface: `record` and `show` read one task, and `take`, `set_state`, `add_comment`,
+    `ask`, `handin` and `new` change it (the `agentdrop task` commands); `released` and `judged` are
+    what `release` and `accept` tell it."""
+
+    def __init__(self, root: Path, cfg: dict | None = None):
+        self.root, self._cfg, self.project = root, cfg, root.name
+
+    @property
+    def cfg(self) -> dict:
+        if self._cfg is None:
+            self._cfg = load_config()
+        return self._cfg
+
+    # --- reading ---------------------------------------------------------------------------------
+
+    def records(self, tid: str | None = None) -> list[dict]:
+        if not store_path().is_file():
+            return []
+        conn = store_open()
+        try:
+            return store_records(conn, self.project, tid)
+        finally:
+            conn.close()
+
+    def present(self) -> bool:
+        """The store has this project."""
+        if not store_path().is_file():
+            return False
+        conn = store_open()
+        try:
+            return conn.execute("SELECT 1 FROM projects WHERE name = ?", (self.project,)).fetchone() is not None
+        finally:
+            conn.close()
+
+    def russian(self, records: list[dict] | None = None) -> bool:
+        recs = self.records() if records is None else records
+        sample = " ".join(f"{r['title']} {r['text']}" for r in recs if r["kind"] == "ticket")[:3000] \
+            or doc(self.root, "../AGENTS.md")[:3000]
+        return len(re.findall(r"[а-яё]", sample, re.I)) > len(re.findall(r"[a-z]", sample, re.I))
+
+    def _images(self, r: dict) -> list[str]:
+        return item_images(self.root, "\n".join([r["title"], r["source"], r["text"], *(c["text"] for c in r["thread"])]))
+
+    def _board(self, r: dict, words: list[str], ru: bool, full: bool) -> dict:
+        """A ticket as `MarkdownTasks.tickets` gives it: which group it is in comes from its state."""
+        first = r["text"].split("\n\n", 1)[0]
+        said = [c for c in r["thread"] if c["author"]]
+        state, waits = r["state"], r["waits"]
+        if state in ("waiting_you", "waiting_others") and not waits:
+            waits = STATE_NAMES[state][ru]
+        t = {
+            "id": r["id"], "priority": r["priority"], "section": r["section"],
+            "order": (section_rank(r["section"]), r["position"]), "title": r["title"], "why": r["source"],
+            "context": "" if r["source"] else clip(first, 200), "waits": waits,
+            "waits_owner": state == "waiting_you" if state in ("waiting_you", "waiting_others")
+            else bool(waits and by_owner(waits, words)),
+            "detail": clip(((f"{'Зачем' if ru else 'Why'}: {r['source']}. " if r["source"] else "") + first).strip(), 700),
+            "images": self._images(r),
+            "owner_last": bool(said and by_owner(said[-1]["author"], words)),
+            "deferred": state == "deferred", "after": list(r["after"]), "mode": r["mode"],
+            "last": thread_head(said[-1]) if said else "",
+        }
+        if full:
+            t.update(body=r["text"], thread=[{"author": c["author"], "when": c["at"], "text": c["text"]} for c in r["thread"]],
+                     doc=STORE_DOC, theme=r["theme"])
+        return t
+
+    def tickets(self, full: bool = False, records: list[dict] | None = None) -> list[dict]:
+        """The open tickets (every state but done) in their order, with the board's fields."""
+        recs = self.records() if records is None else records
+        words, ru = owner_words(self.cfg), self.russian(recs)
+        return [self._board(r, words, ru, full) for r in recs if r["kind"] == "ticket" and r["state"] != "done"]
+
+    def ticket_text(self, tid: str) -> str:
+        """The task in full, written as a markdown item (the judge reads it); "" when there is none."""
+        r = self.record(tid)
+        return self.render(r) if r else ""
+
+    def render(self, r: dict) -> str:
+        ru = self.russian()
+        marks = {"auto": "[автономно]" if ru else "[autonomous]", "human": "[с человеком]" if ru else "[with owner]"}
+        if r["kind"] == "ticket":
+            head = r["id"] + (f" ({r['priority']})" if r["priority"] else "") + (f" [{r['theme']}]" if r["theme"] else "")
+            head += f" {marks[r['mode']]}" if r["mode"] else ""
+            first = f"**{head}. {r['title']}.**"
+        else:
+            first = f"**{r['title']}.**"
+        if r["source"]:
+            first += f" {'Зачем' if ru else 'Why'}: {r['source']}."
+        if r["after"]:
+            first += f" {'После' if ru else 'After'}: {', '.join(r['after'])}."
+        if r["waits"]:
+            first += f" {r['waits']}"
+        lines = [first] + (["", r["text"]] if r["text"] else [])
+        if r["thread"]:
+            lines.append("")
+        for c in r["thread"]:
+            if not c["author"]:
+                lines.append(f"_{c['text']}_")
+                continue
+            head, *rest = c["text"].split("\n") or [""]
+            lines.append(f"> **{c['author']}" + (f", {c['at']}" if c["at"] else "") + f":** {head}")
+            lines += [f"> {x}" for x in rest]
+        return "\n".join(lines)
+
+    def question_items(self, records: list[dict] | None = None) -> list[dict]:
+        """Every question with its group, as `MarkdownTasks.question_items` gives them: "closed" (done),
+        "people" (waits for others), "revertible", "deferred", "turn" (the agent's move) or "owner"."""
+        recs = self.records() if records is None else records
+        words, out = owner_words(self.cfg), []
+        for r in recs:
+            if r["kind"] != "question":
+                continue
+            said = [c for c in r["thread"] if c["author"]]
+            state = r["state"]
+            if state == "done":
+                group = "closed"
+            elif state == "waiting_others":
+                group = "people"
+            elif REVERT_RE.search(r["section"]) or REVERT_RE.search(r["text"][:300]):
+                group = "revertible"
+            elif state == "deferred":
+                group = "deferred"
+            elif state in ("queued", *HOLDS) or (said and by_owner(said[-1]["author"], words)):
+                group = "turn"
+            else:
+                group = "owner"
+            title = Q_PREFIX.sub("", r["title"])
+            out.append({"group": group, "path": r["section"], "key": question_key(title), "title": title,
+                        "text": self.render(r), "body": r["text"], "comments": [(c["author"], thread_head(c)) for c in said],
+                        "id": r["id"], "record": r})
+        return out
+
+    def questions(self, full: bool = False) -> dict:
+        """The owner's open questions, as `MarkdownTasks.questions` gives them."""
+        recs = self.records()
+        res = {"waiting": [], "your_turn": [], "revertible": 0, "people": 0, "deferred": 0}
+        pages = []
+        for q in self.question_items(recs):
+            group, r, title = q["group"], q["record"], q["title"]
+            if group in ("people", "revertible", "deferred"):
+                res[group] += 1
+                continue
+            if group not in ("turn", "owner"):
+                continue
+            said = [c for c in r["thread"] if c["author"]]
+            thread = [{"author": c["author"], "when": c["at"], "text": c["text"]} for c in r["thread"]]
+            page = {"key": q["key"], "id": r["id"], "state": group, "title": title, "pick": "",
+                    "images": self._images(r), "body": r["text"], "thread": thread, "doc": STORE_DOC}
+            if group == "turn":
+                res["your_turn"].append(clip(title.rstrip(". "), 90))
+                pages.append(page)
+                continue
+            reco = RECO_RE.search(r["text"]) or RECO_RE.search("\n".join(c["text"] for c in said))
+            para = re.split(r"\n\s*\n|\n\s*>", r["text"], maxsplit=1)[0]
+            item = {"title": clip(title.rstrip(". "), 160), "context": clip(para, 220),
+                    "pick": clip(reco.group(0), 200) if reco else "", "thread": len(said),
+                    "doc": STORE_DOC, "key": f"**{q['key']}**", "detail": clip(r["text"], 700),
+                    "last": thread_head(said[-1]) if said else "", "images": page["images"]}
+            res["waiting"].append(item)
+            pages.append({**page, "title": item["title"], "pick": item["pick"]})
+        if full:   # the waiting ones first, then those the agent has to act on, as the markdown page lists them
+            res["items"] = [p for p in pages if p["state"] == "owner"] + [p for p in pages if p["state"] == "turn"]
+        return res
+
+    def done(self) -> list[dict]:
+        """Tickets done: those accepted in the store, newest first, then those imported from the log."""
+        out = []
+        for r in self.records():
+            if r["kind"] != "ticket" or r["state"] != "done":
+                continue
+            m = re.match(r"LOG\.md (\S+)", r["source"])
+            when = parse_time(r["updated"]) or dt.datetime.now().astimezone()
+            out.append((bool(m), -when.timestamp() if not m else 0, r["position"],
+                        {"id": r["id"], "title": r["title"], "day": m.group(1) if m else when.strftime("%d.%m"),
+                         "text": r["text"]}))
+        return [x[-1] for x in sorted(out, key=lambda x: x[:3])]
+
+    def record(self, tid: str) -> dict | None:
+        """One task by its id ("B12", "12", "q1a2b3c") or a question's key or title."""
+        want = tid.strip().strip("*").strip()
+        recs = self.records()
+        for r in recs:
+            if r["id"] in (want, ticket_id(want)):
+                return r
+        for r in recs:
+            title = Q_PREFIX.sub("", r["title"])
+            if r["kind"] == "question" and want.rstrip(". ") in (title, question_key(title), r["title"]):
+                return r
+        return None
+
+    def show(self, r: dict) -> dict:
+        """A task with what an agent needs to work on it: its links both ways, the files it names, its events."""
+        conn = store_open()
+        try:
+            events = [dict(e) for e in conn.execute(
+                "SELECT at, author, what, detail FROM events WHERE project = ? AND task = ? ORDER BY id",
+                (self.project, r["id"]))]
+            before = [x[0] for x in conn.execute("SELECT task FROM links WHERE project = ? AND after = ? ORDER BY task",
+                                                 (self.project, r["id"]))]
+            brief = lambda i: next(({"id": x["id"], "title": x["title"], "state": x["state"]}
+                                    for x in store_records(conn, self.project, i)), {"id": i, "title": "", "state": ""})
+            after, before = [brief(i) for i in r["after"]], [brief(i) for i in before]
+        finally:
+            conn.close()
+        text = "\n".join([r["title"], r["source"], r["text"], *(c["text"] for c in r["thread"])])
+        docs = []
+        for name in re.findall(r"[\w./-]+\.(?:md|txt|json|csv|py|js|html)\b", text):
+            for base in (self.root, self.root / "docs"):
+                f = (base / name).resolve()
+                if f.is_file() and self.root.resolve() in f.parents:
+                    rel = f.relative_to(self.root.resolve()).as_posix()
+                    if rel not in docs:
+                        docs.append(rel)
+                    break
+        images = [Path(x).relative_to(self.root.resolve()).as_posix() for x in self._images(r)]
+        return {**r, "after": after, "before": before, "docs": docs + images, "events": events}
+
+    # --- writing ---------------------------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def _write(self):
+        """One transaction that holds the store's write lock from the start, so two sessions never
+        decide on the same state at once."""
+        conn = store_open()
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            yield conn
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
+    def _event(self, conn, tid: str, author: str, what: str, detail: dict) -> None:
+        conn.execute("INSERT INTO events (at, author, project, task, what, detail) VALUES (?, ?, ?, ?, ?, ?)",
+                     (dt.datetime.now().astimezone().isoformat(timespec="seconds"), author, self.project, tid, what,
+                      json.dumps(detail, ensure_ascii=False)))
+
+    def _one(self, conn, tid: str) -> dict | None:
+        return next(iter(store_records(conn, self.project, tid)), None)
+
+    def _state(self, conn, r: dict, state: str, author: str, waits: str | None = None) -> None:
+        waits = r["waits"] if waits is None else waits
+        if state == r["state"] and waits == r["waits"]:
+            return
+        conn.execute("UPDATE tasks SET state = ?, waits = ?, updated = ? WHERE project = ? AND id = ?",
+                     (state, waits, dt.datetime.now().astimezone().isoformat(timespec="seconds"), self.project, r["id"]))
+        detail = {"state": [r["state"], state]}
+        if waits != r["waits"]:
+            detail["waits"] = [r["waits"], waits]
+        self._event(conn, r["id"], author, "state", detail)
+        r["state"], r["waits"] = state, waits
+
+    def _comment(self, conn, tid: str, author: str, text: str, when: str | None = None, event_author: str | None = None) -> int:
+        n = conn.execute("SELECT COALESCE(MAX(n) + 1, 0) FROM comments WHERE project = ? AND task = ?",
+                         (self.project, tid)).fetchone()[0]
+        c = {"author": author, "at": when or dt.datetime.now().strftime("%d.%m %H:%M"), "text": text.strip()}
+        conn.execute("INSERT INTO comments (project, task, n, author, at, text) VALUES (?, ?, ?, ?, ?, ?)",
+                     (self.project, tid, n, c["author"], c["at"], c["text"]))
+        conn.execute("UPDATE tasks SET updated = ? WHERE project = ? AND id = ?",
+                     (dt.datetime.now().astimezone().isoformat(timespec="seconds"), self.project, tid))
+        self._event(conn, tid, event_author or author, "comment", c)
+        return n
+
+    def _resolve(self, tid: str) -> str:
+        r = self.record(tid)
+        return r["id"] if r else ticket_id(tid)
+
+    def take(self, tid: str | None, sid: str, author: str, force: bool = False) -> tuple[dict | None, str]:
+        """Claim one task for this session and put it in work: `tid`, or the first one that is the agent's
+        move (the owner answered) or next up. Refused when another session's claim holds it. Checked
+        and written under the store's write lock, so of two sessions taking at once only one gets it."""
+        stale_h = float(self.cfg.get("stale_hours", STALE_HOURS))
+        with self._write() as conn:
+            claims = {c.get("ticket"): c for c in read_claims(self.root)}
+            held = {t for t, c in claims.items() if c.get("session") != sid}
+            if tid is None:
+                recs = store_records(conn, self.project)
+                b = sort_tickets(self.tickets(records=recs), held)
+                pick = next((t for t in b["turn"] + b["free"] if t["mode"] != "human"), None)
+                if pick is None:
+                    return None, "nothing to take: every open task waits for someone, for another task, or is held"
+                tid = pick["id"]
+            else:
+                tid = self._resolve(tid)
+            r = self._one(conn, tid)
+            if r is None:
+                return None, f"no task {tid} in {self.project}"
+            if r["state"] == "done":
+                return None, f"{tid} is done already"
+            other = claims.get(tid)
+            if other and other.get("session") not in (None, sid) and not force:
+                idle = claim_activity(self.root, other)
+                started = other.get("started", "?")[:16].replace("T", " ")
+                note = " (stale: --force takes it over)" if idle > stale_h * 3600 else ""
+                return None, (f"{tid} is held by {other.get('agent', '')} {other.get('session', '')[:8]} since {started}, "
+                              f"last activity {age(idle, False)} ago{note}. Take another task.")
+            write_claim(self.root, tid, r["title"], sid)
+            self._state(conn, r, "running", author, "")
+            self._event(conn, tid, author, "taken", {"session": sid})
+        return self.record(tid), ""
+
+    def set_state(self, tid: str, state: str, author: str, note: str = "", after: list[str] | None = None,
+                  who: str | None = None) -> dict:
+        """Move a task to `state`. A note says whom or what a waiting task waits for (else it goes in the thread)."""
+        with self._write() as conn:
+            r = self._one(conn, self._resolve(tid))
+            if r is None:
+                raise KeyError(tid)
+            if after:
+                new = [x for x in dict.fromkeys(ticket_id(a) for a in after) if x not in r["after"] and x != r["id"]]
+                conn.executemany("INSERT INTO links (project, task, after) VALUES (?, ?, ?)",
+                                 [(self.project, r["id"], x) for x in new])
+                if new:
+                    self._event(conn, r["id"], author, "links", {"after": [r["after"], sorted(r["after"] + new)]})
+            waiting = state in ("waiting_you", "waiting_others")
+            waits = (clip(note, 110) if note else r["waits"] or STATE_NAMES[state][self.russian()]) if waiting else ""
+            if note and not waiting:
+                self._comment(conn, r["id"], who or author, note, event_author=author)
+            self._state(conn, r, state, author, waits)
+        return self.record(r["id"])
+
+    def add_comment(self, tid: str, author: str, text: str, event_author: str | None = None,
+                    when: str | None = None) -> dict:
+        """A comment in the task's thread; the owner's answer to a task that waits for them makes it the agent's move."""
+        with self._write() as conn:
+            r = self._one(conn, self._resolve(tid))
+            if r is None:
+                raise KeyError(tid)
+            self._comment(conn, r["id"], author, text, when, event_author=event_author)
+            if by_owner(author, owner_words(self.cfg)) and r["state"] == "waiting_you":   # answered: the agent's move
+                self._state(conn, r, "queued", event_author or author, "")
+        return self.record(r["id"])
+
+    def ask(self, tid: str, author: str, text: str, event_author: str | None = None) -> dict:
+        """A question for the owner under the task: it goes in the thread and the task waits for them."""
+        with self._write() as conn:
+            r = self._one(conn, self._resolve(tid))
+            if r is None:
+                raise KeyError(tid)
+            self._comment(conn, r["id"], author, text, event_author=event_author)
+            self._state(conn, r, "waiting_you", event_author or author, clip(text, 110))
+        return self.record(r["id"])
+
+    def handin(self, tid: str, author: str, note: str = "", event_author: str | None = None) -> dict:
+        with self._write() as conn:
+            r = self._one(conn, self._resolve(tid))
+            if r is None:
+                raise KeyError(tid)
+            if note:
+                self._comment(conn, r["id"], author, note, event_author=event_author)
+            self._state(conn, r, "accepting", event_author or author, "")
+        return self.record(r["id"])
+
+    def new(self, title: str, author: str, kind: str = "ticket", text: str = "", why: str = "", priority: str = "",
+            theme: str = "", mode: str = "", after: list[str] | None = None, section: str = "",
+            state: str | None = None, top: bool = False) -> dict:
+        """File a new task: the next free B-number (never reused), or a question «Решить: …» for the owner."""
+        ru = self.russian()
+        after = list(dict.fromkeys(ticket_id(a) for a in after or []))
+        now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        with self._write() as conn:
+            conn.execute("INSERT OR IGNORE INTO projects (name, root) VALUES (?, ?)", (self.project, str(self.root)))
+            ids = [x[0] for x in conn.execute("SELECT id FROM tasks WHERE project = ?", (self.project,))]
+            if kind == "ticket":
+                n = max([int(m.group(1)) for i in ids if (m := re.match(r"B(\d+)", i))] + [0]) + 1
+                tid, priority = f"B{n}", priority or "P2"
+                state = state or ("waiting_task" if after else "queued")
+                if not section:
+                    k = {"P0": 0, "P1": 0, "P2": 1}.get(priority, 2)
+                    section = [("Now", "Сейчас"), ("Next", "Дальше"), ("Later", "Потом")][k][ru]
+            else:
+                title = ("Решить: " if ru else "Decide: ") + Q_PREFIX.sub("", title).rstrip(". ")
+                tid, k = "q" + sha(title.encode())[:6], 1
+                while tid in ids:
+                    k += 1
+                    tid = f"q{sha(title.encode())[:6]}-{k}"
+                state = state or "waiting_you"
+            pos = conn.execute(f"SELECT COALESCE({'MIN(position) - 1' if top else 'MAX(position) + 1'}, 0) FROM tasks "
+                               "WHERE project = ? AND kind = ?", (self.project, kind)).fetchone()[0]
+            rec = {"kind": kind, "title": clip(title.rstrip(". "), 160), "text": text.strip(), "source": why.strip(),
+                   "state": state, "priority": priority if kind == "ticket" else "", "theme": theme, "mode": mode,
+                   "waits": "", "section": section, "position": pos}
+            conn.execute(f"INSERT INTO tasks (project, id, {', '.join(STORE_FIELDS)}, created, updated) "
+                         f"VALUES (?, ?, {', '.join('?' * len(STORE_FIELDS))}, ?, ?)",
+                         (self.project, tid, *(rec[f] for f in STORE_FIELDS), now, now))
+            conn.executemany("INSERT INTO links (project, task, after) VALUES (?, ?, ?)", [(self.project, tid, x) for x in after])
+            self._event(conn, tid, author, "created", {**rec, "after": after})
+        return self.record(tid)
+
+    def released(self, tid: str, author: str) -> None:
+        """`agentdrop release`: a task still in work goes back to the queue when its session lets go."""
+        with self._write() as conn:
+            r = self._one(conn, self._resolve(tid))
+            if r and r["state"] == "running":
+                self._state(conn, r, "queued", author)
+
+    def judged(self, tid: str, verdict: str, summary: str, final: bool) -> None:
+        """`agentdrop accept`'s verdict: PASS is done, a reject goes back to work, the last reject or
+        a judge who can't decide go to the owner. The judge's summary goes in the thread."""
+        with self._write() as conn:
+            r = self._one(conn, self._resolve(tid))
+            if r is None:
+                return
+            said = f"{verdict}: {summary}"
+            if summary and not (r["thread"] and r["thread"][-1]["text"] == said):   # the same verdict again: once
+                self._comment(conn, r["id"], "judge", said)
+            if verdict == "PASS":
+                self._state(conn, r, "done", "judge", "")
+            elif verdict == "REJECT" and not final:
+                self._state(conn, r, "running", "judge", "")
+            else:
+                self._state(conn, r, "waiting_you", "judge", clip(summary, 110) if summary else None)
+
+    # --- the owner's answers from Telegram (`MarkdownTasks.comment`) -------------------------------
+
+    def comment(self, ref: dict, author: str, when: str, text: str) -> dict:
+        """The owner's words under the task, or as a new question on top of the open ones (ref kind
+        "brief" or "project", or the task is done or gone). An answer to a task that waits for the
+        owner puts it back in the queue: the agent's move."""
+        r = self.record(ref.get("key", "")) if ref["kind"] not in ("brief", "project") else None
+        if r and r["state"] != "done":
+            after = self.add_comment(r["id"], author, text, when=when)
+            return {"how": "saved", "path": f"{self.root}/{r['id']}", "lines": [], "task": r["id"],
+                    "n": len(after["thread"]) - 1, "was": r["state"] if after["state"] != r["state"] else "", "next": ref}
+        ru = bool(ref.get("ru"))
+        if ref["kind"] in ("brief", "project"):
+            title = (BRIEF["about_item"][ru].format(title=clip(ref["title"], 60), when=when)
+                     if ref["kind"] == "project" and ref.get("item_title") else BRIEF["brief_item"][ru].format(when=when))
+            how = "noted"
+        else:
+            title, how = BRIEF["new_item"][ru].format(title=ref["title"]), "moved"
+        q = self.new(title, author, kind="question", state="queued", top=True)   # the owner wrote last: the agent's move
+        with self._write() as conn:
+            n = self._comment(conn, q["id"], author, text, when)
+        return {"how": how, "path": f"{self.root}/{q['id']}", "lines": [], "task": q["id"], "n": n, "created": True,
+                "next": {**ref, "kind": "question", "doc": STORE_DOC, "key": f"**{q['id']}**", "code": "",
+                         "title": q["title"]}}
+
+    def take_back(self, placed: dict) -> bool:
+        """Remove what `comment` added, if it is still the last word there."""
+        tid, n = placed.get("task"), placed.get("n")
+        if tid is None:
+            return False
+        with self._write() as conn:
+            last = conn.execute("SELECT MAX(n) FROM comments WHERE project = ? AND task = ?", (self.project, tid)).fetchone()[0]
+            if last != n:
+                return False
+            conn.execute("DELETE FROM comments WHERE project = ? AND task = ? AND n = ?", (self.project, tid, n))
+            r = self._one(conn, tid)
+            if placed.get("was") and r and r["state"] == "queued":   # the answer had made it the agent's move
+                self._state(conn, r, placed["was"], "agentdrop")
+            if placed.get("created") and n == 0:
+                conn.execute("DELETE FROM links WHERE project = ? AND task = ?", (self.project, tid))
+                conn.execute("DELETE FROM tasks WHERE project = ? AND id = ?", (self.project, tid))
+            self._event(conn, tid, "agentdrop", "taken back", {"comment": n, "task_removed": bool(placed.get("created"))})
+        return True
+
+
+def print_task(t: dict, ru: bool) -> None:
+    """A task as `agentdrop task take` and `show` print it: what an agent needs, not the backlog."""
+    name = lambda s: f"{s} ({STATE_NAMES[s][ru]})" if s in STATE_NAMES else s
+    head = t["id"] + (f", {t['priority']}" if t["priority"] else "") + (f", [{t['theme']}]" if t["theme"] else "")
+    print(f"{t['title']} ({head})")
+    print(f"state: {name(t['state'])}" + (f"; waits: {t['waits']}" if t["waits"] else "")
+          + (f"; mode: {t['mode']}" if t["mode"] else ""))
+    if t["source"]:
+        print(f"why: {t['source']}")
+    for key, word in (("after", "after (waits for)"), ("before", "before (these wait for it)")):
+        if t[key]:
+            print(f"{word}: " + "; ".join(f"{x['id']} {clip(x['title'], 60)} [{name(x['state'])}]" for x in t[key]))
+    if t["docs"]:
+        print("files it names: " + ", ".join(t["docs"]))
+    if t["text"]:
+        print("\n" + t["text"])
+    if t["thread"]:
+        print("\nthread:")
+        for c in t["thread"]:
+            print(f"- {c['author']}, {c['at']}: {c['text']}" if c["author"] else f"- {c['text']}")
+    ev = t["events"][-8:]
+    if ev:
+        print("\nhistory" + (f" (last {len(ev)} of {len(t['events'])})" if len(t["events"]) > len(ev) else "") + ":")
+        for e in ev:
+            d = json.loads(e["detail"] or "{}")
+            what = e["what"] + (f" {d['state'][0]} → {d['state'][1]}" if e["what"] == "state" else "")
+            print(f"- {e['at'][:16].replace('T', ' ')} {e['author']}: {what}")
+
+
+def cmd_task(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="agentdrop task",
+                                description="The tasks of a project that lives in the store (`tasks.<folder> = store` "
+                                            "in ~/.agentdrop/config): take one, change its state, ask the owner, hand "
+                                            "it in, file a new one. Every change is journaled with its author.")
+    sub = p.add_subparsers(dest="action", required=True)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--root", default=".", help="Project directory (default: the current one)")
+    common.add_argument("--session", help="Session id (default: $AGENTDROP_SESSION, $CLAUDE_CODE_SESSION_ID, …)")
+    common.add_argument("--as", dest="author", help="Who writes, in the thread and the journal (default: this agent)")
+    common.add_argument("--json", action="store_true", help="Machine-readable output")
+    sub.add_parser("where", parents=[common], help="Where this project's tasks live: the store or docs/TODO.md")
+    sp = sub.add_parser("take", parents=[common], help="Take one task for this session: the one named, or the next "
+                                                        "that is the agent's move; prints it with its thread, links and files")
+    sp.add_argument("task", nargs="?", help="B12, or a question's id; default: the next one")
+    sp.add_argument("--force", action="store_true", help="Take over another session's stale claim")
+    sp = sub.add_parser("show", parents=[common], help="Print one task without taking it")
+    sp.add_argument("task")
+    sp = sub.add_parser("state", parents=[common], help="Move a task to another state")
+    sp.add_argument("task")
+    sp.add_argument("state", help="queued, running, waiting_you, waiting_task, waiting_others, accepting, done, "
+                                  "deferred (or their names: «Ждёт других людей», …)")
+    sp.add_argument("note", nargs="?", default="", help="For a waiting state: whom or what it waits for; else a comment")
+    sp.add_argument("--after", action="append", default=[], help="With waiting_task: the task it waits for (repeatable)")
+    sp = sub.add_parser("ask", parents=[common], help="A question for the owner under the task; it then waits for them")
+    sp.add_argument("task")
+    sp.add_argument("text")
+    sp = sub.add_parser("comment", parents=[common], help="Add to the task's thread")
+    sp.add_argument("task")
+    sp.add_argument("text")
+    sp = sub.add_parser("handin", parents=[common], help="The work is done and committed: to acceptance "
+                                                          "(then run `agentdrop accept`)")
+    sp.add_argument("task")
+    sp.add_argument("note", nargs="?", default="", help="What was done, for the thread")
+    sp = sub.add_parser("new", parents=[common], help="File a new task (or --question for the owner); prints its id")
+    sp.add_argument("title")
+    sp.add_argument("--text", default="", help="The body: what exactly, the source, the numbers")
+    sp.add_argument("--why", default="", help="Why, in the owner's words, quoted")
+    sp.add_argument("--priority", default="", choices=["", "P0", "P1", "P2", "P3"])
+    sp.add_argument("--theme", default="")
+    sp.add_argument("--mode", default="", choices=["", "auto", "human"], help="auto: an unattended run may do it; "
+                                                                             "human: only with the owner")
+    sp.add_argument("--after", action="append", default=[], help="A task it waits for (repeatable)")
+    sp.add_argument("--question", action="store_true", help="A question for the owner, not a ticket")
+    a = p.parse_args(argv)
+    root, cfg = find_root(Path(a.root)), load_config()
+    src = tasks_of(root, cfg)
+    if a.action == "where":
+        store = isinstance(src, StoreTasks)
+        info = {"project": root.name, "root": str(root), "tasks": "store" if store else "markdown",
+                "store": str(store_path()) if store else None, "present": src.present()}
+        if a.json:
+            print(json.dumps(info, ensure_ascii=False))
+        elif store:
+            print(f"{root.name}: tasks live in the store ({store_path()}); work through `agentdrop task`, "
+                  "never edit docs/TODO.md or docs/QUESTIONS.md"
+                  + ("" if info["present"] else f". The store has no {root.name} yet: `agentdrop store import --force`"))
+        else:
+            print(f"{root.name}: tasks live in docs/TODO.md and docs/QUESTIONS.md")
+        return 0 if store else 1
+    if not isinstance(src, StoreTasks):
+        print(f"agentdrop task: {root.name} keeps its tasks in docs/TODO.md (no `tasks.{root.name} = store` in the "
+              f"config); use `agentdrop claim` and the docs", file=sys.stderr)
+        return 2
+    if not src.present():
+        print(f"agentdrop task: the store {store_path()} has no project {root.name}; "
+              f"`agentdrop store import --force {root}` first", file=sys.stderr)
+        return 2
+    sid = session_id(a.session)
+    who = a.author or agent_name()
+    author = who if a.author else f"{who} {sid}"   # the journal names the session; the thread, the agent
+    ru = src.russian()
+
+    def out(t: dict | None) -> int:
+        full = src.show(t)
+        if a.json:
+            print(json.dumps(full, ensure_ascii=False, indent=1))
+        else:
+            print_task(full, ru)
+        return 0
+
+    try:
+        if a.action == "take":
+            t, why = src.take(a.task, sid, author, force=a.force)
+            if t is None:
+                print(f"agentdrop task take: {why}", file=sys.stderr)
+                return 1
+            return out(t)
+        if a.action == "show":
+            t = src.record(a.task)
+            if t is None:
+                raise KeyError(a.task)
+            return out(t)
+        if a.action == "new":
+            t = src.new(a.title, author, kind="question" if a.question else "ticket", text=a.text, why=a.why,
+                        priority=a.priority, theme=a.theme, mode=a.mode, after=a.after)
+            if a.json:
+                print(json.dumps(src.show(t), ensure_ascii=False, indent=1))
+            else:
+                print(f"✓ {t['id']}: {t['title']} [{STATE_NAMES[t['state']][ru]}]")
+            return 0
+        if a.action == "state":
+            state = state_of(a.state)
+            if state is None:
+                print(f"agentdrop task state: no state «{a.state}»; one of {', '.join(STORE_STATES)}", file=sys.stderr)
+                return 2
+            t = src.set_state(a.task, state, author, a.note, a.after, who=who)
+        elif a.action == "ask":
+            t = src.ask(a.task, who, a.text, event_author=author)
+        elif a.action == "comment":
+            t = src.add_comment(a.task, who, a.text, event_author=author)
+        else:
+            t = src.handin(a.task, who, a.note, event_author=author)
+    except KeyError:
+        print(f"agentdrop task: no task {a.task} in {root.name}", file=sys.stderr)
+        return 2
+    if t["state"] not in HOLDS:   # the run lets go of a task that now waits, or is done
+        drop_claim(root, t["id"], sid)
+    if a.json:
+        print(json.dumps(src.show(t), ensure_ascii=False, indent=1))
+    else:
+        print(f"✓ {t['id']}: {STATE_NAMES[t['state']][ru]}" + (f" — {t['waits']}" if t["waits"] else ""))
+        if a.action == "handin":
+            print(f"next: `agentdrop accept {t['id']}` (checks, then a fresh judge)")
+    return 0
+
+
 COMMANDS = {"status": cmd_status, "claim": cmd_claim, "release": cmd_release, "brief": cmd_brief,
             "replies": cmd_replies, "accept": cmd_accept,
-            "dispatch": cmd_dispatch, "pack": cmd_pack, "tickets": cmd_tickets, "limits": cmd_limits, "store": cmd_store}
+            "dispatch": cmd_dispatch, "pack": cmd_pack, "tickets": cmd_tickets, "limits": cmd_limits, "store": cmd_store,
+            "task": cmd_task}
 
 
 def main() -> None:

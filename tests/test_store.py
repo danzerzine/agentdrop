@@ -128,7 +128,7 @@ class Store(unittest.TestCase):
                          {"Decide: Which chart library (Q-2)": "waiting_you",
                           "Decide: Keep the beta open?": "queued",
                           "Decide: Old question": "done",
-                          "Decide: Design (B9):": "waiting_you"})
+                          "Decide: Design (B9):": "waiting_others"})   # a question for other people
         self.assertIn("I recommend Recharts", qs["Decide: Which chart library (Q-2)"]["text"])
         self.assertEqual(len(self.rows("SELECT * FROM events WHERE what = 'created'")), 11)
 
