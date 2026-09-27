@@ -1141,7 +1141,7 @@ LABELS = {
 }
 UNITS = {"min": ("min", "мин"), "h": ("h", "ч"), "d": ("d", "дн")}
 
-ITEM_TICKET = re.compile(r"^(?:(P[0-3]):?\s+)?(B\d+)\b\s*(?:\(?(P[0-3])\)?)?\s*(?:\[[^\]]*\])?\s*[.:—–-]*\s*")
+ITEM_TICKET = re.compile(r"^(?:(P[0-3]):?\s+)?(B\d+)\b\s*(?:\(?(P[0-3])\)?)?\s*(?:\[([^\]]*)\])?\s*[.:—–-]*\s*")
 WHY_RE = re.compile(r"(?:Зачем|Why):\s*(«[^»]*»(?:\s*\([^)]*\))?|\"[^\"]*\"(?:\s*\([^)]*\))?|[^.]*\.)")
 WAITS_RE = re.compile(r"(?i)(?<!\w)(жд[её]т|жд[её]м|ждем|waiting (?:for|on)|blocked (?:by|on)|(?:только )?после (?:ответа|OK)\b)"
                       r"(?:[^.;]|\.(?=\d)){0,200}")   # 26.09 does not end it
@@ -1279,7 +1279,8 @@ class MarkdownTasks:
     so another store can take the place of markdown without touching the commands.
 
     Reads parse the files afresh on every call and return new records the caller may change.
-    `full=True` adds each item's body and thread, for the tickets page. Writes go to the files
+    `full=True` adds each item's body and thread, for the tickets page; `question_items` gives
+    every question with its group, `done` the tickets closed in docs/LOG.md. Writes go to the files
     at once: `comment` puts the owner's words under an item or as a new question and returns the
     placement, `take_back` removes a placement again if it is still there untouched."""
 
@@ -1352,6 +1353,8 @@ class MarkdownTasks:
             if full:
                 t["body"], t["thread"] = self._ticket_page(text_by_id[t["id"]], t)
                 t["doc"] = "TODO.md"
+                tag = (m.group(4) or "").strip()   # **B94 (P0) [model].** the theme, unless it is a mark
+                t["theme"] = "" if AUTONOMOUS_RE.search(f"[{tag}]") or HUMAN_RE.search(f"[{tag}]") else tag
             out.append(t)
         return out
 
@@ -1375,54 +1378,70 @@ class MarkdownTasks:
                 return text
         return ""
 
-    def questions(self, full: bool = False) -> dict:
-        """The owner's open questions: "waiting" for their answer, "your_turn" (titles the owner
-        answered last), and counts of the "revertible", "people" (for others) and "deferred" ones.
-        `full` adds "items": the waiting ones, then those the owner answered, each with its key,
-        state ("owner" or "turn"), title, pick, images, body and thread."""
-        root, words = self.root, owner_words(self.cfg)
-        res = {"waiting": [], "your_turn": [], "revertible": 0, "people": 0, "deferred": 0}
-        text_all = doc(root, "QUESTIONS.md")
+    def question_items(self, text_all: str | None = None) -> list[dict]:
+        """Every item of QUESTIONS.md in file order with its "group": "closed", "people" (for
+        others), "revertible", "deferred", "turn" (the owner answered last) or "owner" (waits for
+        the owner's answer); and its section "path", bold "key", "title", "body" (the text after
+        the key) and "comments" (author, line) in order. Items above the first section are left out."""
+        text_all = doc(self.root, "QUESTIONS.md") if text_all is None else text_all
+        words, out = owner_words(self.cfg), []
         sections = [h for h in re.findall(r"(?m)^## (.+)$", text_all)
                     if not re.search(r"(?i)закрыт|closed|resolved", h)]
         # the owner's section: the one that names them, else the first one (the kit puts it first)
         owner_section = next((h for h in sections if by_owner(h, words)), sections[0] if sections else "")
         for heads, text in md_items(text_all):
             path = " / ".join(heads[1:])
-            if not path or re.search(r"(?i)закрыт|closed|resolved", path) or CLOSED_RE.search(text):
-                continue
-            to_owner = len(heads) > 1 and heads[1].strip() == owner_section.strip()
-            if not to_owner:
-                res["people"] += 1
+            if not path:
                 continue
             key, body = bold_title(text)
             title = key
-            if REVERT_RE.search(path) or REVERT_RE.search(body[:300]):
-                res["revertible"] += 1
-                continue
-            if DEFERRED_RE.search(re.split(r"\n\s*>", body, maxsplit=1)[0][:400]):
-                res["deferred"] += 1
-                continue
             code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)\.\s*", title)
             if code:
                 title = f"{title[code.end():].rstrip('. ')} ({code.group(1)})"
             comments = [(m.group(1).strip(), line) for line in text.splitlines() if (m := COMMENT_RE.match(line))]
-            authors = [a for a, _ in comments]
-            if authors and by_owner(authors[-1], words):
+            if re.search(r"(?i)закрыт|closed|resolved", path) or CLOSED_RE.search(text):
+                group = "closed"
+            elif not (len(heads) > 1 and heads[1].strip() == owner_section.strip()):
+                group = "people"
+            elif REVERT_RE.search(path) or REVERT_RE.search(body[:300]):
+                group = "revertible"
+            elif DEFERRED_RE.search(re.split(r"\n\s*>", body, maxsplit=1)[0][:400]):
+                group = "deferred"
+            elif comments and by_owner(comments[-1][0], words):
+                group = "turn"
+            else:
+                group = "owner"
+            out.append({"group": group, "path": path, "key": key, "title": title, "text": text,
+                        "body": body, "comments": comments})
+        return out
+
+    def questions(self, full: bool = False) -> dict:
+        """The owner's open questions: "waiting" for their answer, "your_turn" (titles the owner
+        answered last), and counts of the "revertible", "people" (for others) and "deferred" ones.
+        `full` adds "items": the waiting ones, then those the owner answered, each with its key,
+        state ("owner" or "turn"), title, pick, images, body and thread."""
+        root = self.root
+        res = {"waiting": [], "your_turn": [], "revertible": 0, "people": 0, "deferred": 0}
+        text_all = doc(root, "QUESTIONS.md")
+        for q in self.question_items(text_all):
+            group, key, body, title, comments = q["group"], q["key"], q["body"], q["title"], q["comments"]
+            if group in ("people", "revertible", "deferred"):
+                res[group] += 1
+            elif group == "turn":
                 res["your_turn"].append(clip(title.rstrip(". "), 90))
-                continue
-            para = re.split(r"\n\s*\n|\n\s*>", body, maxsplit=1)[0]
-            reco = RECO_RE.search(body)
-            res["waiting"].append({
-                "title": clip(title.rstrip(". "), 160),
-                "context": clip(para, 220),
-                "pick": clip(reco.group(0), 200) if reco else "",
-                "thread": len(authors),
-                "doc": "QUESTIONS.md", "key": f"**{key}**" if key else text.split("\n", 1)[0][:80],
-                "detail": clip(re.split(r"\n\s*>", body, maxsplit=1)[0], 700),
-                "last": clip(re.sub(r"^\s*>\s*", "", comments[-1][1]), 400) if comments else "",
-                "images": item_images(root, text),
-            })
+            elif group == "owner":
+                para = re.split(r"\n\s*\n|\n\s*>", body, maxsplit=1)[0]
+                reco = RECO_RE.search(body)
+                res["waiting"].append({
+                    "title": clip(title.rstrip(". "), 160),
+                    "context": clip(para, 220),
+                    "pick": clip(reco.group(0), 200) if reco else "",
+                    "thread": len(comments),
+                    "doc": "QUESTIONS.md", "key": f"**{key}**" if key else q["text"].split("\n", 1)[0][:80],
+                    "detail": clip(re.split(r"\n\s*>", body, maxsplit=1)[0], 700),
+                    "last": clip(re.sub(r"^\s*>\s*", "", comments[-1][1]), 400) if comments else "",
+                    "images": item_images(root, q["text"]),
+                })
         if full:
             res["items"] = self._question_pages(text_all, res)
         return res
@@ -1477,6 +1496,22 @@ class MarkdownTasks:
     def take_back(self, placed: dict) -> bool:
         """Remove what `comment` added, if it is still there untouched."""
         return remove_block(placed)
+
+    def done(self) -> list[dict]:
+        """Tickets closed in docs/LOG.md, once each in log order: id, title, the day ("27.09") and
+        the entry's text. Only `## 27.09 — B12 …` entries count."""
+        out, seen = [], set()
+        for head, body in re.findall(r"(?m)^## (.+)\n((?:(?!## ).*\n?)*)", doc(self.root, "LOG.md")):
+            m = re.match(r"(\d{1,2}\.\d{2})\s*[—-]\s*(.*)", head.strip())
+            if not m:
+                continue
+            title = re.sub(r"^B\d+\b[\s:—-]*|\s*\((?:B\d+[,\s]*)+\)", "", m.group(2)).strip()
+            for code in re.findall(r"\bB\d+\b", m.group(2)):
+                if code not in seen:
+                    seen.add(code)
+                    out.append({"id": code, "title": (title[:1].upper() + title[1:]) or code,
+                                "day": m.group(1), "text": body.strip()})
+        return out
 
 
 def tasks_of(root: Path, cfg: dict | None = None) -> MarkdownTasks:
@@ -1607,6 +1642,26 @@ def git_summary(root: Path) -> dict:
     return info
 
 
+def sort_tickets(tickets: list[dict], claimed: set) -> dict:
+    """The open tickets by whose move it is: "turn" (the owner wrote last), "deferred", "owner"
+    (waits for the owner), "blocked" (waits for other people), "after" (waits for tickets still
+    open) and "free" (next up, by priority then file order). Claimed tickets are in none."""
+    turn = [t for t in tickets if t["owner_last"] and t["id"] not in claimed]
+    deferred = [t for t in tickets if t["deferred"] and t["id"] not in claimed and not t["owner_last"]]
+    open_ = [t for t in tickets if t["id"] not in claimed and not t["owner_last"] and not t["deferred"]]
+    owner_tickets = [t for t in open_ if t["waits_owner"]]
+    # a ticket blocked on someone else (a client's answer) is nobody's next step: counted, not listed
+    blocked = [t for t in open_ if t["waits"] and not t["waits_owner"]]
+    free = [t for t in open_ if not t["waits"]]
+    free.sort(key=lambda t: (t["priority"], t["order"]))
+    # the frontier: a ticket whose «После: B…» are still in TODO waits for them, it is not next yet
+    in_todo = {t["id"] for t in tickets}
+    for t in free:
+        t["after_open"] = [x for x in t["after"] if x in in_todo]
+    return {"turn": turn, "deferred": deferred, "owner": owner_tickets, "blocked": blocked,
+            "after": [t for t in free if t["after_open"]], "free": [t for t in free if not t["after_open"]]}
+
+
 def collect_status(root: Path) -> dict:
     cfg = load_config()
     src = tasks_of(root, cfg)
@@ -1634,20 +1689,9 @@ def collect_status(root: Path) -> dict:
         active = sum(1 for f in cdir.glob("*.jsonl") if f.stat().st_mtime > cutoff and f.stem not in claimed_sessions)
 
     q = src.questions()
-    turn = [t for t in tickets if t["owner_last"] and t["id"] not in claimed]
-    deferred = [t for t in tickets if t["deferred"] and t["id"] not in claimed and not t["owner_last"]]
-    open_ = [t for t in tickets if t["id"] not in claimed and not t["owner_last"] and not t["deferred"]]
-    owner_tickets = [t for t in open_ if t["waits_owner"]]
-    # a ticket blocked on someone else (a client's answer) is nobody's next step: counted, not listed
-    blocked = [t for t in open_ if t["waits"] and not t["waits_owner"]]
-    free = [t for t in open_ if not t["waits"]]
-    free.sort(key=lambda t: (t["priority"], t["order"]))
-    # the frontier: a ticket whose «После: B…» are still in TODO waits for them, it is not next yet
-    in_todo = {t["id"] for t in tickets}
-    for t in free:
-        t["after_open"] = [x for x in t["after"] if x in in_todo]
-    queued = [t for t in free if t["after_open"]]
-    free = [t for t in free if not t["after_open"]]
+    b = sort_tickets(tickets, claimed)
+    turn, deferred, owner_tickets, blocked, queued, free = (
+        b["turn"], b["deferred"], b["owner"], b["blocked"], b["after"], b["free"])
 
     entries = log_entries(root)
     seen = seen_state().get(str(root))
@@ -3830,18 +3874,11 @@ def collect_items(root: Path, cfg: dict) -> tuple[dict, list[dict]]:
                       "pick": x["pick"], "body": x["body"], "thread": x["thread"],
                       "images": x["images"], "doc": x["doc"]})
     have = {i["code"] for i in items}
-    for head, body in re.findall(r"(?m)^## (.+)\n((?:(?!## ).*\n?)*)", doc(root, "LOG.md")):
-        m = re.match(r"(\d{1,2}\.\d{2})\s*[—-]\s*(.*)", head.strip())
-        if not m:   # closed tickets, so a link from another ticket opens something
-            continue
-        title = re.sub(r"^B\d+\b[\s:—-]*|\s*\((?:B\d+[,\s]*)+\)", "", m.group(2)).strip()
-        for code in re.findall(r"\bB\d+\b", m.group(2)):
-            if code in have:
-                continue
-            have.add(code)
-            items.append({"id": f"{prefix}-{code}", "project": prefix, "code": code, "kind": "ticket",
-                          "title": (title[:1].upper() + title[1:]) or code, "priority": "", "section": "LOG", "state": "done",
-                          "why": "", "waits": "", "body": f"Сделано {m.group(1)}.\n\n{body.strip()}",
+    for d in src.done():   # closed tickets, so a link from another ticket opens something
+        if d["id"] not in have:
+            items.append({"id": f"{prefix}-{d['id']}", "project": prefix, "code": d["id"], "kind": "ticket",
+                          "title": d["title"], "priority": "", "section": "LOG", "state": "done",
+                          "why": "", "waits": "", "body": f"Сделано {d['day']}.\n\n{d['text']}",
                           "thread": [], "images": [], "doc": "LOG.md"})
     return proj, items
 
