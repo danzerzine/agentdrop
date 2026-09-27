@@ -3600,14 +3600,27 @@ def cmd_tickets(argv: list[str]) -> int:
                                             "as JSON (for a page that opens one item).")
     p.add_argument("paths", nargs="*", help="Project directories (default: `projects` in the config, or every "
                                             "project whose board was looked at)")
+    p.add_argument("--docs", metavar="FILE", help="Also write the project .md files the items mention in backticks "
+                                                   "(`docs/HYPOTHESES.md`), so the page can open them")
     a = p.parse_args(argv)
     cfg = load_config()
     roots = [find_root(Path(os.path.expanduser(x))) for x in a.paths] or dispatch_projects(cfg)
     out = {"generated": dt.datetime.now().astimezone().isoformat(timespec="minutes"), "projects": [], "items": []}
+    docs = {"refs": {}, "files": {}}   # refs: "sd:specs/x.md" -> "sd:docs/specs/x.md"; files: that -> text
     for root in roots:
         proj, items = collect_items(root, cfg)
         out["projects"].append(proj)
         out["items"] += items
+        for it in items:
+            text = " ".join([it["body"], it.get("why", ""), *(m["text"] for m in it["thread"])])
+            for ref in re.findall(r"`([^`\s]+\.md)`", text):
+                f = next((root / c for c in (ref, f"docs/{ref}") if (root / c).is_file()), None)
+                if f:
+                    real = f"{proj['key']}:{f.relative_to(root).as_posix()}"
+                    docs["refs"][f"{proj['key']}:{ref}"] = real
+                    docs["files"].setdefault(real, f.read_text(encoding="utf-8", errors="replace"))
+    if a.docs:
+        Path(a.docs).write_text(json.dumps(docs, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(out, ensure_ascii=False, indent=1))
     return 0
 

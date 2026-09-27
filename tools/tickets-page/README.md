@@ -6,7 +6,10 @@ the owner answers by commenting on the page; a comment sent to Claude reaches th
 
 Artifact: https://claude.ai/artifact/JgBHHXBkfeRNxJ5dQk9BXM (private). Refresh:
 
-    agentdrop tickets > tools/tickets-page/tickets.json
+    agentdrop tickets --docs tools/tickets-page/docs.json > tools/tickets-page/tickets.json
 
-then publish `tools/tickets-page/index.html` to the artifact's URL with `tickets.json` as a file beside it.
-`tickets.json` is generated and not committed.
+then publish `tools/tickets-page/index.html` to the artifact's URL with `tickets.json`, `triage.json` and
+`docs.json` as files beside it. `docs.json` holds the project .md files the items mention in backticks, so a
+path like `docs/HYPOTHESES.md` in a ticket opens that document on the page (`#doc-sd-docs-HYPOTHESES.md`).
+Closed tickets come from LOG.md so a code in any ticket links somewhere. The json files are generated and
+not committed (the repo is public).
