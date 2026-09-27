@@ -3970,6 +3970,26 @@ def pack_history(root: Path, tid: str) -> list[str]:
     return out
 
 
+def unread_words(src: "StoreTasks", tid: str, cfg: dict) -> list[dict]:
+    """The owner's comments in a task's thread since its last run started: no agent has read them yet."""
+    out, words = [], owner_words(cfg)
+    for e in src.show(src.record(tid))["events"]:
+        if e["what"] == "run started":
+            out = []
+        elif e["what"] == "comment" and by_owner(e["author"], words):
+            out.append(json.loads(e["detail"]))
+    return out
+
+
+def reply_lines(tid: str, name: str, words: list[dict]) -> list[str]:
+    return [f"{name} wrote in the thread of {tid} (the task's thread in the store), newest last:", "",
+            *(f"> [{c['at']}] " + c["text"].replace("\n", "\n> ") for c in words), "",
+            f"Answer {name} in the thread first, before any other work: `agentdrop task comment {tid} \"…\"`, what you "
+            "understood and what you will do; then go on with the task with their words in mind, and answer again "
+            f"in the thread with the result (or `agentdrop task ask {tid}` if you need their decision). The thread is "
+            f"where {name} reads you; the final brief is still the last message."]
+
+
 def pack_stop(root: Path, cfg: dict, run: str, by: str) -> int:
     """Stop one run: its own process group only; the tasks it holds go back to the queue, noted in their history."""
     import signal
@@ -4030,6 +4050,9 @@ def cmd_pack(argv: list[str]) -> int:
     p.add_argument("--stop", metavar="RUN", help="Stop this run (its log's name, 20260927-1307): only its own "
                                                  "processes; the tasks it holds go back to the queue")
     p.add_argument("--by", help="Who stops it, for the tasks' history (default: the owner's name)")
+    p.add_argument("--reply", metavar="TASK", help="Deliver the owner's new words in this task's thread: continue the "
+                                                    "session of its latest run with them (or a fresh run if it had "
+                                                    "none); exit 1 when there is nothing unread, 2 while a run holds it")
     a = p.parse_args(argv)
     root, cfg = find_root(Path(os.path.expanduser(a.path))), load_config()
     if a.stop:
@@ -4048,8 +4071,26 @@ def cmd_pack(argv: list[str]) -> int:
             print(lane.get("result") or lane.get("last", ""))
         return 0
     s = collect_status(root)
+    src = tasks_of(root, cfg)
+    store = isinstance(src, StoreTasks)
+    resume = ""
+    if a.reply:
+        r = src.record(a.reply) if store else None
+        if r is None:
+            print(f"agentdrop pack --reply: no task {a.reply} in {root.name}'s store", file=sys.stderr)
+            return 2
+        words = unread_words(src, r["id"], cfg)
+        if not words:
+            print(f"· nothing new from {owner_name(cfg, s['ru'])} in {r['id']}'s thread")
+            return 1
+        mine = [f for f in sorted((root / PACK_DIR).glob("*.jsonl"), key=lambda f: f.stat().st_mtime)
+                if r["id"] in pack_tickets_of(f)]
+        resume = pack_session(mine[-1]) if mine else ""
+        a.only, a.j = r["id"], 1
     if a.only:
-        by_id = {t["id"]: t for t in tasks_of(root, cfg).tickets()}
+        by_id = {t["id"]: t for t in src.tickets()}
+        if a.reply and r["id"] not in by_id:   # a finished task they wrote about goes back to work
+            by_id[r["id"]] = {"id": r["id"], "title": r["title"], "priority": r["priority"], "why": "", "mode": r["mode"]}
         want = [ticket_id(x) for x in a.only.split(",") if x.strip()]
         missing = [x for x in want if x not in by_id]
         if missing:
@@ -4065,12 +4106,20 @@ def cmd_pack(argv: list[str]) -> int:
     lanes = [tickets[k::j] for k in range(j)]   # dealt in priority order: lane 1 gets the 1st, (j+1)th, …
     budget = a.budget / j
     name = owner_name(cfg, s["ru"])
-    src = tasks_of(root, cfg)
-    store = isinstance(src, StoreTasks)
-    past = {t["id"]: pack_history(root, t["id"]) for t in tickets} if a.only else {}
-    prompts = [pack_prompt(s, lane, budget, name, (k + 1, j), [t for t in tickets if t not in lane], store,
-                           [x for t in lane for x in past.get(t["id"], [])])
-               for k, lane in enumerate(lanes)]
+    if resume:   # the same session goes on: it already has the charter and what it did, it only needs their words
+        t = tickets[0]
+        prompts = ["\n".join([f"This continues your run on the task below, in the same project ({s['project']}).",
+                               f"1. {t['title']} ({t['id']}, {t['priority']})", "",
+                               *reply_lines(t["id"], name, words), "",
+                               f"First `agentdrop task take {t['id']}` again: the run you were in has let go of it. "
+                               "Everything the first prompt said still holds: nobody is watching live, the budget "
+                               f"(${budget:g} now), never deploy or send anything, commit only your own files."])]
+    else:
+        past = {t["id"]: pack_history(root, t["id"]) for t in tickets} if a.only else {}
+        prompts = [pack_prompt(s, lane, budget, name, (k + 1, j), [t for t in tickets if t not in lane], store,
+                               [x for t in lane for x in past.get(t["id"], [])])
+                   + ("\n\n" + "\n".join(reply_lines(lane[0]["id"], name, words)) if a.reply else "")
+                   for k, lane in enumerate(lanes)]
     if not a.run:
         print("\n\n---\n\n".join(prompts))
         return 0
@@ -4100,16 +4149,19 @@ def cmd_pack(argv: list[str]) -> int:
         pf = d / f"{name_k}.prompt.md"
         pf.write_text(prompt, encoding="utf-8")
         cmd = shlex.split(os.path.expanduser(cfg.get("pack_worker", PACK_WORKER)))
+        if resume:
+            cmd += ["--resume", resume]
         if Path(cmd[0]).name == "claude":
             cmd += ["--output-format", "stream-json", "--verbose", "--max-budget-usd", f"{budget:g}",
-                    "--effort", effort, "-n", f"pack-{root.name}-{name_k}"]
+                    "--effort", effort] + ([] if resume else ["-n", f"pack-{root.name}-{name_k}"])
         with pf.open(encoding="utf-8") as inp, (d / f"{name_k}.jsonl").open("w") as out, \
                 (d / f"{name_k}.err").open("w") as err:
             proc = subprocess.Popen(cmd, cwd=root, stdin=inp, stdout=out, stderr=err, **detach)
         (d / f"{name_k}.pid").write_text(str(proc.pid))
         if store:
             for t in lane:
-                src.journal(t["id"], "agentdrop pack", "run started", {"run": name_k, "pid": proc.pid})
+                src.journal(t["id"], "agentdrop pack", "run started", {"run": name_k, "pid": proc.pid}
+                            | ({"reply": len(words), "resumed": resume} if a.reply else {}))
         print(f"· started{f' lane {k}' if j > 1 else ''}: {', '.join(t['id'] for t in lane)}, cap ${budget:g}, "
               f"effort {effort}, pid {proc.pid}")
     print(f"· sessions in {d}; progress and the briefs: `agentdrop pack --last`")

@@ -271,7 +271,7 @@ class MarkdownUntouched(StoreProject):
 
 WORKER = """import json, os, re, subprocess, sys, time, uuid
 prompt = sys.stdin.read()   # as `claude -p` gets it
-sid = str(uuid.uuid4())
+sid = sys.argv[sys.argv.index("--resume") + 1] if "--resume" in sys.argv else str(uuid.uuid4())
 print(json.dumps({"type": "system", "subtype": "init", "session_id": sid}), flush=True)
 tid = re.search(r"^1\\. .*\\((B\\d+), ", prompt, re.M).group(1)
 subprocess.run([sys.executable, AGENTDROP_PATH, "task", "take", tid], env=dict(os.environ, AGENTDROP_SESSION=sid),
@@ -351,6 +351,37 @@ class Runs(StoreProject):
         self.assertIn("run stopped", self.ok("task", "show", "B7"))   # and the task's history shows the runs
         self.ok("pack", "--only", "B7", "--run")
         self.wait(lambda: self.state("B7") == "running" and len(list(runs.glob("*.prompt.md"))) == 3, "the next B7 run")
+
+    def test_the_owners_reply_continues_the_session_of_the_last_run(self):
+        runs = self.root / "docs" / ".runs" / "pack"
+        self.assertEqual(self.run_ad("pack", "--reply", "B7").returncode, 1)   # nothing written yet
+        self.ok("pack", "--only", "B7", "--run")
+        self.wait(lambda: (self.root / "child-B7.pid").exists(), "the B7 run")
+        first = self.run_of("B7").name.split(".")[0]
+        sid = json.loads((runs / f"{first}.jsonl").read_text().splitlines()[0])["session_id"]
+        self.ok("task", "comment", "B7", "--as", "Owner", "Use the March numbers, not April.")
+        self.assertEqual(self.run_ad("pack", "--reply", "B7", "--run").returncode, 2)   # waits for the run to end
+        self.ok("pack", "--stop", first)
+
+        prompt = self.ok("pack", "--reply", "B7")
+        self.assertIn("This continues your run", prompt)
+        self.assertIn("] Use the March numbers, not April.", prompt)
+        self.assertRegex(prompt, r"(?m)^1\. .*\(B7, ")
+        self.ok("pack", "--reply", "B7", "--run")
+        self.wait(lambda: self.state("B7") == "running" and len(list(runs.glob("*.prompt.md"))) == 2, "the reply run")
+        second = self.run_of("B7").name.split(".")[0]
+        self.assertEqual(json.loads((runs / f"{second}.jsonl").read_text().splitlines()[0])["session_id"], sid)
+        started = [json.loads(e["detail"]) for e in self.rows(
+            "SELECT detail FROM events WHERE task = 'B7' AND what = 'run started' ORDER BY id")]
+        self.assertEqual((started[-1]["reply"], started[-1]["resumed"]), (1, sid))
+        self.ok("pack", "--stop", second)
+        self.assertEqual(self.run_ad("pack", "--reply", "B7").returncode, 1)   # delivered: nothing unread
+
+    def test_a_reply_to_a_task_never_run_starts_a_fresh_run_with_it(self):
+        self.ok("task", "comment", "B9", "--as", "Owner", "Start with the cheap half.")
+        prompt = self.ok("pack", "--reply", "B9")
+        self.assertIn("Autonomous run", prompt)
+        self.assertIn("] Start with the cheap half.", prompt)
 
 
 class OldStore(StoreProject):
