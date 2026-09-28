@@ -4447,7 +4447,8 @@ def cmd_tickets(argv: list[str]) -> int:
     a = p.parse_args(argv)
     cfg = load_config()
     roots = [find_root(Path(os.path.expanduser(x))) for x in a.paths] or dispatch_projects(cfg)
-    out = {"generated": dt.datetime.now().astimezone().isoformat(timespec="minutes"), "projects": [], "items": []}
+    out = {"generated": dt.datetime.now().astimezone().isoformat(timespec="minutes"), "projects": [], "items": [],
+           "owner": owner_words(cfg), "title": cfg.get("page_title") or "Тикеты"}   # the page's title and who «me» is
     docs = {"refs": {}, "files": {}}   # refs: "sd:specs/x.md" -> "sd:docs/specs/x.md"; files: that -> text
     for root in roots:
         proj, items = collect_items(root, cfg)

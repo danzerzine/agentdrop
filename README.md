@@ -141,7 +141,7 @@ An answer to an item is written under it as a thread comment (`> **Your Name, 27
 
 Telegram settings go in `~/.agentdrop/telegram.env` (keep it `chmod 600`): `TG_BOT_TOKEN` and `TG_CHAT_ID`, plus `TG_RELAY_URL` and `TG_RELAY_KEY` on a machine that can't reach `api.telegram.org` (a relay that forwards `/bot<token>/<method>` when the `x-relay-key` header matches). Only agentdrop may read the bot's updates: a second reader, or a webhook, takes replies before agentdrop sees them. The bot can still send other things, such as server alerts. Without Telegram, `notify = <command>` in the config gets each message on stdin, one run per message (replies then need another way back).
 
-Settings for this machine go in `~/.agentdrop/config`, one `key = value` per line: `owner = Your Name` (how your comments are signed in the docs; the first section of `QUESTIONS.md` counts as yours otherwise), `stale_hours = 4`, `brief_items = 5` and `brief_resend_hours = 24`.
+Settings for this machine go in `~/.agentdrop/config`, one `key = value` per line: `owner = Your Name` (how your comments are signed in the docs; the first section of `QUESTIONS.md` counts as yours otherwise), `page_title = My tickets` (the tickets page's title), `stale_hours = 4`, `brief_items = 5` and `brief_resend_hours = 24`.
 
 ## What a project gets
 

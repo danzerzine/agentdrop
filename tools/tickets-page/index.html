@@ -1,5 +1,5 @@
 <meta charset="utf-8">
-<title>Тикеты Данияра</title>
+<title>Тикеты</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
 <style>
@@ -333,7 +333,7 @@ const askShown = (a, chosen, it) => window.askView ? window.askView(a, chosen, i
 // A thread: the last two messages in view, the earlier ones folded. A message that asked a question in parts shows the
 // parts, with the option the next answer chose.
 function threadHtml(thread, it) {
-  const all = thread || [], me = m => /данияр|владел/i.test(m.author);
+  const all = thread || [], me = m => (data.owner || ["владел", "owner"]).some(w => (m.author || "").toLowerCase().includes(w));
   const answerTo = m => { const k = all.indexOf(m), r = all.slice(k + 1).find(x => x.author && x.author !== m.author); return r ? chosenIn(r.text) : -1; };
   const msg = m => `<div class="msg${me(m) ? " me" : ""}"><div class="who"><b>${esc(m.author || "—")}</b>${m.when ? ", " + esc(m.when) : ""}</div>${m.ask ? askShown(m.ask, answerTo(m), it) : md(m.text)}</div>`;
   const old = all.slice(0, -2), last = all.slice(-2);
@@ -434,7 +434,7 @@ function renderDoc(key) {
   </article>`;
   view.querySelectorAll(".doc table").forEach(t => { const w = document.createElement("div"); w.className = "tbl"; t.replaceWith(w); w.append(t); });
   view.querySelectorAll(".doc a[href]").forEach(a => { if (!a.getAttribute("href").startsWith("#")) { a.target = "_blank"; a.rel = "noopener"; } });
-  document.title = `${path} · Тикеты Данияра`;
+  document.title = `${path} · ${(window.PANEL && window.PANEL.title) || data.title || "Тикеты"}`;
   wireAsk();
   window.scrollTo({ top: 0 });
 }
@@ -450,6 +450,7 @@ async function start() {
   try {
     const r = await fetch("tickets.json", { cache: "no-store" });
     data = await r.json();
+    if (data.title && !window.PANEL) document.title = data.title;   // the panel names its own screens
   } catch (e) {
     document.getElementById("view").innerHTML = '<p class="empty">Не загрузился список задач. Обновите страницу.</p>';
     return;
