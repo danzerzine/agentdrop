@@ -4109,7 +4109,8 @@ def pack_lane(f: Path) -> dict:
                 e = json.loads(line)
             except ValueError:   # the line being written
                 continue
-            if isinstance(e, dict) and e.get("type") == "assistant":
+            # the session's own words: a subagent's (parent_tool_use_id set) are its working notes, not the run's
+            if isinstance(e, dict) and e.get("type") == "assistant" and not e.get("parent_tool_use_id"):
                 texts += [c.get("text", "") for c in e.get("message", {}).get("content", []) if c.get("type") == "text"]
         out["last"] = clip(texts[-1], 400) if texts else ""
     return out
