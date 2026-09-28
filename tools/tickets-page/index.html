@@ -125,6 +125,8 @@ article.task { gap: 14px; }
 .expect.mine .triage-note { color: var(--owner); }
 .expect .opts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
 .expect .pick { margin: 0; }
+.expect .q-ask { display: flex; flex-direction: column; gap: 8px; }
+.expect .ask-q { margin: 0; font-size: 17px; font-weight: 600; }
 .body-sec { display: flex; flex-direction: column; gap: 8px; }
 .body-sec h4 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
 .lead { margin: 0; max-width: 68ch; }
@@ -304,6 +306,15 @@ function optionsOf(it) {   // "Варианты: (а) …; (б) …" -> [["а", 
   for (let k = 0; k < parts.length; k += 2) out.push([parts[k], parts[k + 1].replace(/[;.,\s]+$/, "")]);
   return out;
 }
+// A question asked in parts (`agentdrop task ask`): the question, the options with the agent's pick, its pictures, the details folded
+function askHtml(a) {
+  const L = "абвг", pics = (a.pics || []).filter(p => p.src);
+  const cap = (p, k) => p.label.length === 1 ? `${L[k]} · ${a.options[k] || ""}` : ({ before: "было", after: "станет" }[p.label] || p.label);
+  return `<div class="q-ask"><p class="ask-q">${esc(a.q)}</p>
+    ${pics.length ? `<div class="shots">${pics.map((p, k) => `<figure><a href="${esc(p.src)}" target="_blank" rel="noopener"><img src="${esc(p.src)}" alt="${esc(cap(p, k))}" loading="lazy"></a><figcaption>${esc(cap(p, k))}</figcaption></figure>`).join("")}</div>` : ""}
+    <ol class="opts">${a.options.map((x, k) => `<li><b>${L[k]})</b> ${esc(x)}${k === a.pick ? " <em>— предложение агента</em>" : ""}</li>`).join("")}</ol>
+    ${a.details ? `<details class="fold"><summary>Подробнее</summary>${md(a.details)}</details>` : ""}</div>`;
+}
 // A thread: the last two messages in view, the earlier ones folded
 function threadHtml(thread) {
   const msg = m => `<div class="msg${/данияр|владел/i.test(m.author) ? " me" : ""}"><div class="who"><b>${esc(m.author || "—")}</b>${m.when ? ", " + esc(m.when) : ""}</div>${md(m.text)}</div>`;
@@ -334,11 +345,11 @@ function renderItem() {
     <div class="meta">${it.code ? `<span class="code">${esc(it.code)}</span>` : ""}<span>${esc(projLabel(it.project))}</span>${it.priority ? `<span>${esc(it.priority)}</span>` : ""}${t.date ? `<span>с ${esc(t.date)}</span>` : ""}${last && last.when ? `<span>последний ответ ${esc(last.when)}</span>` : ""}</div>
     <h1 id="h-${it.id}">${inline(t.title)}</h1>
     <p class="state"><span class="pill s-${tier}">${LABEL[tier] || it.state}</span> <span><b>Ход:</b> ${esc(who[0])}${["others", "later"].includes(tier) ? " · " + linkCodes(esc(who[1])) : ""}</span></p>
-    ${mine || triage[it.id] || pick ? `<section class="expect${mine ? " mine" : ""}">
+    ${mine || triage[it.id] || pick || it.ask ? `<section class="expect${mine ? " mine" : ""}">
       ${mine ? `<h4>Что нужно от вас</h4>` : ""}
       ${triage[it.id] ? `<p class="triage-note">${esc(triage[it.id].note)}</p>` : ""}
-      ${opts.length ? `<ol class="opts">${opts.map(([c, x]) => `<li><b>${c})</b> ${inline(x)}</li>`).join("")}</ol>` : ""}
-      ${pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(pick)}</p>` : ""}
+      ${it.ask ? askHtml(it.ask) : `${opts.length ? `<ol class="opts">${opts.map(([c, x]) => `<li><b>${c})</b> ${inline(x)}</li>`).join("")}</ol>` : ""}
+      ${pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(pick)}</p>` : ""}`}
     </section>` : ""}
     <div class="howto"><h4>Ответить или спросить · ${esc(tag)}</h4>
       <button class="ask" id="ask" type="button" hidden>Написать про эту задачу</button>
