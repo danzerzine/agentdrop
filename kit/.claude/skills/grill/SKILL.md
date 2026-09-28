@@ -13,6 +13,18 @@ The owner thinks faster than they write things down: an idea arrives as a paragr
 2. Read `docs/CONTEXT.md` (the glossary especially), the `docs/DECISIONS.md` entries in the area, and the code the topic touches.
 3. Look for contradictions yourself: between the brief and the code, the brief and a past decision, two asks. Each one is a question for round one.
 
+## Research projects
+
+When the project exists to find things out (a study, an audit, a market or data investigation) rather than to build something, its tickets close without telling the owner what was learned, and after a few autonomous days the findings reach them in scraps. Add these to round one, each with your pick like any other question:
+
+1. **Blocks.** What blocks of knowledge does the research split into, and what is the one main question of each? Propose the split from the brief and the existing docs; four to seven blocks is usual.
+2. **Key questions.** Which questions inside each block matter, and what counts as answered? A block's progress is the share of its key questions answered (a partial answer counts half), never the share of tickets closed.
+3. **Findings on close.** When a ticket closes, the agent writes one or two sentences on what was found out, with the numbers, and names the block it feeds. Propose where this line lives (the ticket's close note, `docs/LOG.md` or a findings file).
+4. **The map.** Where the map of blocks, questions and answers lives, and who updates it when a finding lands. Propose one file in `docs/` that agents keep current.
+5. **Briefing.** How the owner wants to hear about progress: a daily or evening briefing (what was found out, what waits for them, whether the course should change, how each block moved), an on-demand catch-up for a chosen period, or both.
+
+Write the answers into the spec and the charter's docs map, so later passes keep the map and the findings line going without being asked.
+
 ## Rounds
 
 Map the plan as a tree of decisions: each decision opens the ones that hang off it. The **frontier** is every decision whose prerequisites are settled. Ask the whole frontier in one round, usually 3–6 questions, then wait. A question whose answer depends on another question in the same round waits for the next round.
