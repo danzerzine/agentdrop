@@ -4453,8 +4453,10 @@ def cmd_tickets(argv: list[str]) -> int:
         out["projects"].append(proj)
         out["items"] += items
         for it in items:
-            text = " ".join([it["body"], it.get("why", ""), *(m["text"] for m in it["thread"])])
-            for ref in re.findall(r"`([^`\s]+\.md)`", text):
+            ask = it.get("ask") or {}
+            text = " ".join([it["body"], it.get("why", ""), ask.get("details", ""), *(m["text"] for m in it["thread"])])
+            # `docs/x.md` in backticks, or a bare path with a folder (an ask's details name files plainly)
+            for ref in set(re.findall(r"`([^`\s]+\.md)`", text) + re.findall(r"(?<![\w/.`-])((?:[\w.-]+/)+[\w.-]+\.md)\b", text)):
                 f = next((root / c for c in (ref, f"docs/{ref}") if (root / c).is_file()), None)
                 if f:
                     real = f"{proj['key']}:{f.relative_to(root).as_posix()}"
