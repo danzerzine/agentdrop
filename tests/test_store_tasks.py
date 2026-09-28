@@ -30,6 +30,7 @@ TODO = """# TODO — tickets
 ## Next
 
 - **B10 [autonomous]. Dark theme.** Follow the system setting.
+  Summary: The site turns dark when the phone does.
 - **B12 (P2). Share the export.** After: B9.
 - **B15 (P2). Tooltip copy.** Short text.
 
@@ -232,10 +233,29 @@ class StoreTasks(StoreProject):
         self.assertEqual(r.returncode, 1)
         self.assertIn("B9 is held by", r.stderr)
 
+    def test_summary_line(self):
+        """Every ticket carries a one-line summary: read from the markdown line, required and checked on
+        `task new`, set with `task summary`, given to the tickets page."""
+        self.to_store()
+        self.assertEqual(self.rows("SELECT summary FROM tasks WHERE id = 'B10'"),
+                         [{"summary": "The site turns dark when the phone does."}])
+        self.assertNotIn("Summary:", self.rows("SELECT text FROM tasks WHERE id = 'B10'")[0]["text"])
+        self.assertEqual(self.rows("SELECT summary FROM tasks WHERE id = 'B7'"), [{"summary": ""}])   # old ones load
+        for bad in ([], ["--summary", "Fix B12 in docs/specs/x.md"], ["--summary", "x" * 101]):
+            r = self.run_ad("task", "new", "Chart colours", *bad)
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("the task was not filed", r.stderr)
+        self.assertEqual(self.rows("SELECT id FROM tasks WHERE title = 'Chart colours'"), [])
+        self.ok("task", "new", "Which font", "--question")   # a question for the owner needs none
+        self.ok("task", "summary", "B7", "People can log in from an iPad again")
+        self.assertIn("summary: People can log in from an iPad again", self.ok("task", "show", "B7"))
+        self.assertEqual(self.run_ad("task", "summary", "B7", "see B9").returncode, 2)
+
     def test_new_task_states_by_name_and_no_reimport(self):
         self.to_store()
         self.assertIn("✓ B16: Share the chart [Waits for another task]",
-                      self.ok("task", "new", "Share the chart", "--after", "B12", "--priority", "P3"))
+                      self.ok("task", "new", "Share the chart", "--after", "B12", "--priority", "P3",
+                              "--summary", "People can send the chart to a colleague"))
         self.assertEqual(self.rows("SELECT after FROM links WHERE task = 'B16'"), [{"after": "B12"}])
         self.ok("task", "state", "B16", "Отложена")
         self.assertEqual(self.state("B16"), "deferred")

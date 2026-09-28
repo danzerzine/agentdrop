@@ -44,5 +44,5 @@ After each round, before the next one:
 The interview ends when the frontier is empty: every branch visited, nothing silently assumed. Say so, list the decisions you took yourself, and ask the owner to confirm the picture. Then:
 
 1. Write the spec to `docs/specs/B<n>-<name>.md`: the problem and the solution from the owner's side, a long numbered list of user stories ("As <who>, I want <what>, so that <why>"), the decisions (modules, interfaces, data, what is reused), how it will be tested (the highest seams that show real behavior, and the prior tests to copy), and what is out of scope. Use the glossary's terms throughout.
-2. Offer to cut it into tickets in `docs/TODO.md`: thin slices that each give something the owner can see or check, ordered with `После: B<n>` / `After: B<n>` where one waits for another, each with its "why" quote. Show the list first; file after the owner's OK.
+2. Offer to cut it into tickets in `docs/TODO.md`: thin slices that each give something the owner can see or check, ordered with `После: B<n>` / `After: B<n>` where one waits for another, each with its "why" quote and its one-line summary (plain words, at most 100 characters, no codes or paths). Show the list first; file after the owner's OK.
 3. The raw asks the spec covers get a line under them pointing to the spec, and close once the tickets exist.

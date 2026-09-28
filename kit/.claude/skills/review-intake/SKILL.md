@@ -26,7 +26,7 @@ Two passes: the first collects and proposes; the second files into docs, only af
    - **P2** — awkward but usable; tech debt that will bite soon.
    - **P3** — polish.
    Agreement of two or three sources raises one step, but not above P1 without verification. A single-source finding that wasn't reproduced stays at P2 or below.
-6. **Group into tickets.** P0 and P1: one ticket per finding. P2 and P3 of one theme: one ticket with a list. Name them as they'll appear in TODO: "new B11 (P2): table polish — 3, 5, 9".
+6. **Group into tickets.** P0 and P1: one ticket per finding. P2 and P3 of one theme: one ticket with a list. Name them as they'll appear in TODO: "new B11 (P2): table polish — 3, 5, 9", and give each its one-line summary (the charter's rule: plain words, at most 100 characters, no codes, paths or jargon).
 7. **Write the triage** to `docs/reviews/inbox/YYYY-MM-DD-triage.md`: proposed tickets by priority on top, then a table "# · gist in five words · who · status · priority · where · why", sorted the same way. Commit the inbox and moved files.
 8. **Show the owner** and stop.
 
@@ -36,7 +36,7 @@ If an unanswered triage already sits in the inbox and new reviews arrive, add th
 
 Runs on the owner's answer. Their edits to numbers and priorities override the proposal.
 
-1. Tickets → `docs/TODO.md`: P0–P1 in Now, P2 in Next, P3 in Later. Source: `archive/reviews/YYYY-MM-DD/<file>, #N`. For duplicates, add the source to the existing ticket.
+1. Tickets → `docs/TODO.md` (in a store project: `agentdrop task new … --summary …`): P0–P1 in Now, P2 in Next, P3 in Later, each with its `Summary: …` / `Коротко: …` line right under the title. Source: `archive/reviews/YYYY-MM-DD/<file>, #N`. For duplicates, add the source to the existing ticket.
 2. Questions → `docs/QUESTIONS.md`, "For the owner". New traps → `docs/PITFALLS.md`.
 3. Drop "(proposal)" from the triage title, set statuses as approved, `git mv` all inbox files to `docs/archive/reviews/YYYY-MM-DD/`. One `docs/LOG.md` entry: files, findings before and after merging, tickets, rejections.
 4. Check: `scripts/check_docs.sh` is silent, the inbox holds only `.gitkeep`. Commit only these files.

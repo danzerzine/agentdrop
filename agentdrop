@@ -1235,6 +1235,28 @@ LABELS = {
 UNITS = {"min": ("min", "мин"), "h": ("h", "ч"), "d": ("d", "дн")}
 
 ITEM_TICKET = re.compile(r"^(?:(P[0-3]):?\s+)?(B\d+)\b\s*(?:\(?(P[0-3])\)?)?\s*(?:\[([^\]]*)\])?\s*[.:—–-]*\s*")
+SUMMARY_MAX = 100   # a task's one-line summary: what it is about, for someone with no context
+# «Коротко: …» / «Summary: …» on its own line right under a ticket's title in docs/TODO.md (the line is not the body)
+SUMMARY_LINE = re.compile(r"(?im)^[ \t>*_-]*(?:Коротко|Summary)[*_]*:[*_]*[ \t]*(.+?)[ \t]*(?:\n|$)")
+
+
+def summary_problems(text: str) -> list[str]:
+    """What is wrong with a summary: it is one line of plain words, at most SUMMARY_MAX characters,
+    with no task codes, file paths or markup, so a person with no context understands it."""
+    x, out = text.strip(), []
+    if not x:
+        return ["the summary is empty: one line on what the task is about, in plain words"]
+    if "\n" in x:
+        out.append("the summary is one line")
+    if len(x) > SUMMARY_MAX:
+        out.append(f"the summary has {len(x)} characters; at most {SUMMARY_MAX}")
+    if re.search(r"(?<![\w-])(?:B\d+|q[0-9a-f]{6})(?![\w-])", x):
+        out.append("no task codes in the summary: name the thing itself")
+    if re.search(r"`|\*\*|\[[^\]]*\]\(|(?<![\d\s])/\S|\S/(?![\d\s])|\.(?:md|py|js|ts|json|html|css|sh|csv|sqlite3?)\b", x):
+        out.append("no file paths or markup in the summary")
+    return out
+
+
 WHY_RE = re.compile(r"(?:Зачем|Why):\s*(«[^»]*»(?:\s*\([^)]*\))?|\"[^\"]*\"(?:\s*\([^)]*\))?|[^.]*\.)")
 WAITS_RE = re.compile(r"(?i)(?<!\w)(жд[её]т|жд[её]м|ждем|waiting (?:for|on)|blocked (?:by|on)|(?:только )?после (?:ответа|OK)\b)"
                       r"(?:[^.;]|\.(?=\d)){0,200}")   # 26.09 does not end it
@@ -1561,6 +1583,9 @@ class MarkdownTasks:
         the title and the why) and "thread" (the comments under it)."""
         root, words, out, text_by_id = self.root, owner_words(self.cfg), [], {}
         for idx, (heads, text) in enumerate(md_items(doc(root, "TODO.md"))):
+            summ = SUMMARY_LINE.search(text)
+            if summ:
+                text = text[:summ.start()] + text[summ.end():]
             section = next(((order, prio) for rx, order, prio in SECTION_ORDER
                             if any(rx.search(h) for h in heads[1:])), None)
             head = text.replace("**", "", 1) if text.startswith("**") else text
@@ -1590,6 +1615,7 @@ class MarkdownTasks:
                 "section": heads[-1] if heads else "", "order": (section[0], idx),
                 "title": clip(title.rstrip(". "), 160),
                 "why": clip(why.group(1), 200) if why else "",
+                "summary": clip(summ.group(1).strip(), 200) if summ else "",
                 "context": "" if why else clip(body, 200),
                 "waits": clip(waits.group(0), 110) if waits else "",
                 "waits_owner": bool(waits and by_owner(waits.group(0), words)),
@@ -4371,6 +4397,7 @@ def collect_items(root: Path, cfg: dict) -> tuple[dict, list[dict]]:
         items.append({"id": f"{prefix}-{t['id']}", "project": prefix, "code": t["id"], "kind": "ticket",
                       "title": t["title"], "priority": t["priority"], "section": t["section"],
                       "state": state.get(t["id"], "next"), "why": t["why"], "waits": t["waits"],
+                      "summary": t.get("summary", ""),
                       "body": t["body"], "thread": t["thread"],
                       "images": t["images"], "doc": t["doc"], "ask": t.get("ask")})
     for x in src.questions(full=True)["items"]:
@@ -4576,7 +4603,7 @@ STATE_NAMES = {   # the glossary's names, English and Russian; `agentdrop task s
     "waiting_others": ("Waits for other people", "Ждёт других людей"),
     "accepting": ("In acceptance", "На приёмке"), "done": ("Done", "Готово"), "deferred": ("Deferred", "Отложена")}
 STORE_FIELDS = ("kind", "title", "text", "source", "state", "priority", "theme", "mode", "waits",
-                "section", "position")
+                "section", "position", "summary")
 STORE_TASKS = f"""
 CREATE TABLE IF NOT EXISTS {{name}} (
   project TEXT NOT NULL REFERENCES projects(name),
@@ -4655,6 +4682,12 @@ def store_open() -> sqlite3.Connection:
                            " ALTER TABLE tasks_new RENAME TO tasks; COMMIT;")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(STORE_SCHEMA)
+    if "summary" not in {c[1] for c in conn.execute("PRAGMA table_info(tasks)")}:   # a store from before summaries
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN summary TEXT NOT NULL DEFAULT ''")   # one line, plain words
+            conn.commit()
+        except sqlite3.OperationalError:   # another process added it first
+            pass
     if "ask" not in {c[1] for c in conn.execute("PRAGMA table_info(comments)")}:   # a store from before questions in parts
         try:
             conn.execute("ALTER TABLE comments ADD COLUMN ask TEXT NOT NULL DEFAULT ''")
@@ -4683,7 +4716,7 @@ def markdown_records(root: Path, cfg: dict) -> list[dict]:
         out.append({"id": t["id"], "kind": "ticket", "title": t["title"], "text": t["body"], "source": t["why"],
                     "state": state[t["id"]], "priority": t["priority"], "theme": t["theme"], "mode": t["mode"],
                     "waits": t["waits"], "section": t["section"], "position": t["order"][1],
-                    "after": sorted(t["after"]), "thread": thread(t["thread"])})
+                    "summary": t["summary"], "after": sorted(t["after"]), "thread": thread(t["thread"])})
     # a question the owner answered last is the agent's move; one closed is done; one for others waits for them;
     # the rest wait for the owner
     q_state = {"turn": "queued", "deferred": "deferred", "closed": "done", "people": "waiting_others"}
@@ -4693,12 +4726,12 @@ def markdown_records(root: Path, cfg: dict) -> list[dict]:
                     "title": ("Решить: " if ru else "Decide: ") + (q["title"] or clip(q["text"], 80)).rstrip(". "),
                     "text": body, "source": "", "state": q_state.get(q["group"], "waiting_you"),
                     "priority": "", "theme": "", "mode": "", "waits": "", "section": q["path"], "position": i,
-                    "after": [], "thread": thread(th)})
+                    "summary": "", "after": [], "thread": thread(th)})
     open_ids = {t["id"] for t in tickets}
     for i, d in enumerate(x for x in src.done() if x["id"] not in open_ids):
         out.append({"id": d["id"], "kind": "ticket", "title": d["title"], "text": d["text"],
                     "source": f"LOG.md {d['day']}", "state": "done", "priority": "", "theme": "", "mode": "",
-                    "waits": "", "section": "LOG", "position": i, "after": [], "thread": []})
+                    "waits": "", "section": "LOG", "position": i, "summary": "", "after": [], "thread": []})
     seen = {}
     for r in out:   # the same id twice in the files: the later one gets a suffix, so neither is lost
         n = seen[r["id"]] = seen.get(r["id"], 0) + 1
@@ -4985,7 +5018,7 @@ class StoreTasks:
         t = {
             "id": r["id"], "priority": r["priority"], "section": r["section"],
             "order": (section_rank(r["section"]), r["position"]), "title": r["title"], "why": r["source"],
-            "context": "" if r["source"] else clip(first, 200), "waits": waits,
+            "summary": r.get("summary", ""), "context": "" if r["source"] else clip(first, 200), "waits": waits,
             "waits_owner": state == "waiting_you" if state in ("waiting_you", "waiting_others")
             else bool(waits and by_owner(waits, words)),
             "detail": clip(((f"{'Зачем' if ru else 'Why'}: {r['source']}. " if r["source"] else "") + first).strip(), 700),
@@ -5303,7 +5336,7 @@ class StoreTasks:
 
     def new(self, title: str, author: str, kind: str = "ticket", text: str = "", why: str = "", priority: str = "",
             theme: str = "", mode: str = "", after: list[str] | None = None, section: str = "",
-            state: str | None = None, top: bool = False) -> dict:
+            state: str | None = None, top: bool = False, summary: str = "") -> dict:
         """File a new task: the next free B-number (never reused), or a question «Решить: …» for the owner."""
         ru = self.russian()
         after = list(dict.fromkeys(ticket_id(a) for a in after or []))
@@ -5329,13 +5362,26 @@ class StoreTasks:
                                "WHERE project = ? AND kind = ?", (self.project, kind)).fetchone()[0]
             rec = {"kind": kind, "title": clip(title.rstrip(". "), 160), "text": text.strip(), "source": why.strip(),
                    "state": state, "priority": priority if kind == "ticket" else "", "theme": theme, "mode": mode,
-                   "waits": "", "section": section, "position": pos}
+                   "waits": "", "section": section, "position": pos, "summary": summary.strip()}
             conn.execute(f"INSERT INTO tasks (project, id, {', '.join(STORE_FIELDS)}, created, updated) "
                          f"VALUES (?, ?, {', '.join('?' * len(STORE_FIELDS))}, ?, ?)",
                          (self.project, tid, *(rec[f] for f in STORE_FIELDS), now, now))
             conn.executemany("INSERT INTO links (project, task, after) VALUES (?, ?, ?)", [(self.project, tid, x) for x in after])
             self._event(conn, tid, author, "created", {**rec, "after": after})
         return self.record(tid)
+
+    def set_summary(self, tid: str, summary: str, author: str) -> dict:
+        """Give a task its one-line summary, or a better one."""
+        with self._write() as conn:
+            r = self._one(conn, self._resolve(tid))
+            if r is None:
+                raise KeyError(tid)
+            new = summary.strip()
+            if new != r["summary"]:
+                conn.execute("UPDATE tasks SET summary = ?, updated = ? WHERE project = ? AND id = ?",
+                             (new, dt.datetime.now().astimezone().isoformat(timespec="seconds"), self.project, r["id"]))
+                self._event(conn, r["id"], author, "changed", {"summary": [r["summary"], new]})
+        return self.record(r["id"])
 
     def journal(self, tid: str, author: str, what: str, detail: dict) -> None:
         """An event in the task's history that changes nothing else: a run started or stopped."""
@@ -5416,6 +5462,8 @@ def print_task(t: dict, ru: bool) -> None:
     name = lambda s: f"{s} ({STATE_NAMES[s][ru]})" if s in STATE_NAMES else s
     head = t["id"] + (f", {t['priority']}" if t["priority"] else "") + (f", [{t['theme']}]" if t["theme"] else "")
     print(f"{t['title']} ({head})")
+    if t.get("summary"):
+        print(f"summary: {t['summary']}")
     print(f"state: {name(t['state'])}" + (f"; waits: {t['waits']}" if t["waits"] else "")
           + (f"; mode: {t['mode']}" if t["mode"] else ""))
     if t["source"]:
@@ -5495,12 +5543,22 @@ def cmd_task(argv: list[str]) -> int:
                                                            "code or question id)")
     sp.add_argument("task")
     sp.add_argument("text")
+    sp = sub.add_parser("summary", parents=[common], help="Give a task its one-line summary, or a better one "
+                                                           "(in a markdown project: the «Коротко: …» / «Summary: …» "
+                                                           "line under the ticket's title in docs/TODO.md)")
+    sp.add_argument("task")
+    sp.add_argument("text", help=f"One line, at most {SUMMARY_MAX} characters, plain words; no codes or paths")
     sp = sub.add_parser("handin", parents=[common], help="The work is done and committed: to acceptance "
                                                           "(then run `agentdrop accept`)")
     sp.add_argument("task")
     sp.add_argument("note", nargs="?", default="", help="What was done, for the thread")
-    sp = sub.add_parser("new", parents=[common], help="File a new task (or --question for the owner); prints its id")
+    sp = sub.add_parser("new", parents=[common], help="File a new task (or --question for the owner); prints its id",
+                        epilog='example: agentdrop task new "Export the report to the new server" --summary "The weekly '
+                               'report moves to the new server so it stops failing at night" --why "«…»" --priority P1')
     sp.add_argument("title")
+    sp.add_argument("--summary", default="", help=f"Required for a ticket: one line, at most {SUMMARY_MAX} characters, "
+                                                  "on what the task is about, in plain words a person with no context "
+                                                  "understands; no task codes, file paths or jargon")
     sp.add_argument("--text", default="", help="The body: what exactly, the source, the numbers")
     sp.add_argument("--why", default="", help="Why, in the owner's words, quoted")
     sp.add_argument("--priority", default="", choices=["", "P0", "P1", "P2", "P3"])
@@ -5536,6 +5594,17 @@ def cmd_task(argv: list[str]) -> int:
             placed = src.ask(a.task, ask)
             print(f"✓ QUESTIONS.md: {placed['key'].strip('*')} [{STATE_NAMES['waiting_you'][src.russian()]}]")
             return 0
+    if a.action in ("new", "summary") and (a.action == "summary" or not a.question):   # the same check everywhere
+        bad = summary_problems(a.summary if a.action == "new" else a.text)
+        if bad:
+            print(f"agentdrop task {a.action}: {'the task was not filed' if a.action == 'new' else 'nothing changed'}; "
+                  "fix and run again:\n" + "\n".join(f"- {b}" for b in bad), file=sys.stderr)
+            return 2
+    if a.action == "summary" and not isinstance(src, StoreTasks):
+        print(f"agentdrop task summary: {root.name} keeps its tasks in docs/TODO.md; write the line "
+              f"«{'Коротко' if src.russian() else 'Summary'}: {a.text.strip()}» right under the ticket's title",
+              file=sys.stderr)
+        return 2
     if a.action == "comment" and not isinstance(src, StoreTasks):   # e.g. the owner's answer from the panel
         ref = markdown_ref(src, a.task)
         if ref is None:
@@ -5579,7 +5648,7 @@ def cmd_task(argv: list[str]) -> int:
             return out(t)
         if a.action == "new":
             t = src.new(a.title, author, kind="question" if a.question else "ticket", text=a.text, why=a.why,
-                        priority=a.priority, theme=a.theme, mode=a.mode, after=a.after)
+                        priority=a.priority, theme=a.theme, mode=a.mode, after=a.after, summary=a.summary)
             if a.json:
                 print(json.dumps(src.show(t), ensure_ascii=False, indent=1))
             else:
@@ -5593,6 +5662,8 @@ def cmd_task(argv: list[str]) -> int:
             t = src.set_state(a.task, state, author, a.note, a.after, who=who)
         elif a.action == "ask":
             t = src.ask(a.task, who, ask, event_author=author)
+        elif a.action == "summary":
+            t = src.set_summary(a.task, a.text, author)
         elif a.action == "comment":
             t = src.add_comment(a.task, who, a.text, event_author=author)
         else:
