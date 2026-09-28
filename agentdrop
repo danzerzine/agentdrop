@@ -4905,6 +4905,56 @@ def cmd_store(argv: list[str]) -> int:
         conn.close()
 
 
+def config_set(key: str, value: str) -> None:
+    """Set one `key = value` line in the config: the line is replaced where it is, or added at the end."""
+    lines = CONFIG.read_text(encoding="utf-8").splitlines() if CONFIG.is_file() else []
+    at = next((i for i, x in enumerate(lines) if "=" in x and not x.lstrip().startswith("#")
+               and x.split("=", 1)[0].strip() == key), None)
+    if at is None:
+        lines.append(f"{key} = {value}")
+    else:
+        lines[at] = f"{key} = {value}"
+    STATE.mkdir(parents=True, exist_ok=True)
+    CONFIG.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def cmd_plug(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="agentdrop plug",
+                                description="Put a project on the panel with one command: its tasks move to the store "
+                                            "(a docs/TODO.md board is imported first), the config says so, and the "
+                                            "tickets page and the panel list it. Running it again changes nothing.")
+    p.add_argument("path", nargs="?", default=".", help="Project directory (default: the current one)")
+    a = p.parse_args(argv)
+    root, cfg = find_root(Path(a.path)), load_config()
+    if not root.is_dir() or root in (Path.home().resolve(), Path(root.anchor)):
+        print(f"agentdrop plug: {root} is not a project directory", file=sys.stderr)
+        return 2
+    conn = store_open()
+    try:
+        if MarkdownTasks(root, cfg).present() and not in_store(root, cfg):
+            records = markdown_records(root, cfg)
+            store_import(conn, root.name, root, records)
+            if store_diff(records, store_records(conn, root.name)):
+                print(f"agentdrop plug: the store and {root.name}'s markdown still differ after the import; "
+                      f"`agentdrop store check {root}` shows how. Nothing else changed", file=sys.stderr)
+                return 1
+        with conn:
+            conn.execute("INSERT OR IGNORE INTO projects (name, root) VALUES (?, ?)", (root.name, str(root)))
+        n = conn.execute("SELECT count(*) FROM tasks WHERE project = ?", (root.name,)).fetchone()[0]
+    finally:
+        conn.close()
+    config_set(f"tasks.{root.name}", "store")
+    listed = [x.strip() for x in cfg.get("projects", "").split(",") if x.strip()]
+    if listed and root not in {Path(os.path.expanduser(x)).resolve() for x in listed}:
+        config_set("projects", ", ".join(listed + [str(root)]))
+    elif not listed and str(root) not in seen_state():
+        mark_seen(root)
+    label = project_label(root, cfg)
+    print(f"✓ {label} ({root}) is on the panel: {n} tasks in the store; agents work through `agentdrop task`"
+          + (", docs/TODO.md and docs/QUESTIONS.md are no longer read" if MarkdownTasks(root, cfg).present() else ""))
+    return 0
+
+
 # A project whose tasks live in the store (`tasks.<folder> = store` in the config) reads and changes them
 # through `StoreTasks`, the same interface `MarkdownTasks` gives, so status, tickets, brief, pack, dispatch
 # and accept work on it unchanged; agents use `agentdrop task …` instead of editing TODO.md and QUESTIONS.md.
@@ -5342,7 +5392,7 @@ class StoreTasks:
             theme: str = "", mode: str = "", after: list[str] | None = None, section: str = "",
             state: str | None = None, top: bool = False, summary: str = "") -> dict:
         """File a new task: the next free B-number (never reused), or a question «Решить: …» for the owner."""
-        ru = self.russian()
+        ru = self.russian(self.records() or [{"kind": "ticket", "title": title, "text": text}])   # the first task: its own words
         after = list(dict.fromkeys(ticket_id(a) for a in after or []))
         now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
         with self._write() as conn:
@@ -5656,7 +5706,7 @@ def cmd_task(argv: list[str]) -> int:
             if a.json:
                 print(json.dumps(src.show(t), ensure_ascii=False, indent=1))
             else:
-                print(f"✓ {t['id']}: {t['title']} [{STATE_NAMES[t['state']][ru]}]")
+                print(f"✓ {t['id']}: {t['title']} [{STATE_NAMES[t['state']][src.russian()]}]")
             return 0
         if a.action == "state":
             state = state_of(a.state)
@@ -5703,7 +5753,7 @@ def markdown_ref(src: "MarkdownTasks", task: str) -> dict | None:
 COMMANDS = {"status": cmd_status, "claim": cmd_claim, "release": cmd_release, "brief": cmd_brief,
             "replies": cmd_replies, "accept": cmd_accept,
             "dispatch": cmd_dispatch, "pack": cmd_pack, "tickets": cmd_tickets, "limits": cmd_limits, "store": cmd_store,
-            "task": cmd_task}
+            "task": cmd_task, "plug": cmd_plug}
 
 
 def main() -> None:
