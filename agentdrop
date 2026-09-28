@@ -4126,10 +4126,37 @@ def last_pack(root: Path) -> list[dict]:
 
 
 def pack_tickets_of(f: Path) -> list[str]:
-    """The tickets a run was given: the numbered lines of its prompt."""
+    """The tickets a run was given (the numbered lines of its prompt), then those it claimed on its own from
+    «Next up» (its `agentdrop claim B<n>` commands in the log)."""
     pf = f.with_suffix(".prompt.md")
     text = pf.read_text(encoding="utf-8") if pf.exists() else ""
-    return re.findall(r"^\d+\. .*\((B\d+), (?:P\d)?\)", text, re.M)
+    given = re.findall(r"^\d+\. .*\((B\d+), (?:P\d)?\)", text, re.M)
+    try:
+        key = (f, f.stat().st_mtime_ns)
+    except OSError:
+        return given
+    if _claimed_cache.get(f, (None,))[0] != key:
+        _claimed_cache[f] = (key, _claimed_in(f))
+    return list(dict.fromkeys(given + _claimed_cache[f][1]))
+
+
+_claimed_cache: dict[Path, tuple] = {}
+
+
+def _claimed_in(f: Path) -> list[str]:
+    out = []
+    with f.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if "agentdrop claim" not in line:
+                continue
+            try:
+                parts = json.loads(line).get("message", {}).get("content", [])
+            except (ValueError, AttributeError):
+                continue
+            for c in parts if isinstance(parts, list) else []:
+                if isinstance(c, dict) and c.get("type") == "tool_use":
+                    out += re.findall(r"\bagentdrop claim (B\d+)\b", str((c.get("input") or {}).get("command", "")))
+    return out
 
 
 def pack_session(f: Path) -> str:

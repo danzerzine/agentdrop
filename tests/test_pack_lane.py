@@ -21,7 +21,22 @@ def said(text, parent=None):
                        "message": {"content": [{"type": "text", "text": text}]}})
 
 
+def ran(command):
+    return json.dumps({"type": "assistant", "parent_tool_use_id": None, "message": {"content": [
+        {"type": "tool_use", "name": "Bash", "input": {"command": command}}]}})
+
+
 class PackLane(unittest.TestCase):
+    def test_tickets_include_those_the_run_claimed(self):
+        # a run given B173 that went on to «Next up» ran B174 and B170 too; its words about B9 are not a claim
+        d = Path(tempfile.mkdtemp())
+        f = d / "20260928-1538.jsonl"
+        (d / "20260928-1538.prompt.md").write_text("1. Как Google классифицирует (B173, P2). Why: …\n", encoding="utf-8")
+        f.write_text("\n".join([ran("agentdrop claim B173"), said("Беру agentdrop claim B9 позже."),
+                                 ran("cd /x && agentdrop claim B174 && git status"), ran("agentdrop claim B170"),
+                                 ran("agentdrop claim B174")]) + "\n", encoding="utf-8")
+        self.assertEqual(ad.pack_tickets_of(f), ["B173", "B174", "B170"])
+
     def test_last_skips_subagent_text(self):
         d = Path(tempfile.mkdtemp())
         f = d / "20260928-1538.jsonl"
