@@ -119,14 +119,14 @@ agentdrop task take [B12]            # claim one task (default: the next one) an
 agentdrop task comment B12 "…"       # add to its thread
 agentdrop task ask B12 "Which layout goes to the home page?" --context "New home page: both layouts built, one goes live" \
     --option "Two columns" --option "One list" --pick 1 \
-    [--details "…"] [--design --pic a.png --pic b.png | --before a.png --after b.png]
+    [--details "…"] [--design --pic a.png --pic b.png | --design --before a.png --after b.png | --no-design]
                                      # a question for you in parts; the task waits for you, the run lets go
 agentdrop task state B12 waiting_others "The editors: the layout"   # or any state, by key or glossary name
 agentdrop task handin B12            # to acceptance; then `agentdrop accept B12`, which marks it done on a PASS
 agentdrop task new "Title" --why "«…»" --priority P1 [--after B9] [--question]
 ```
 
-`task ask` takes a question in parts, so it reads in five seconds and is answered by one tap: the question, one line of up to 120 characters; the context, one line of up to 120 on what the task is for and where it stands now, shown under the task's name above the question; 2 to 4 options of up to 60; the agent's pick; and optional details of any length, the only place for file paths and ticket codes. `--design` marks a question about how something looks, which then needs its pictures, files inside the project: one per option or a before/after pair. A question that breaks the form is not asked, and the agent is told what to fix. In a markdown project the same form goes into `QUESTIONS.md` with a hidden `<!-- ask: … -->` line under the item; questions asked in free words before this still load as they were.
+`task ask` takes a question in parts, so it reads in five seconds and is answered by one tap: the question, one line of up to 120 characters; the context, one line of up to 120 on what the task is for and where it stands now, shown under the task's name above the question; 2 to 4 options of up to 60; the agent's pick; and optional details of any length, the only place for file paths and ticket codes. The question, the context and the options name things by what a person sees on the screen, not by internal names, files or other tasks' codes. `--design` marks a question about how something looks, which then needs its pictures, files inside the project: one per option or a before/after pair. In a project with a design doc (`DESIGN.md` or `DESIGN_SYSTEM.md` at the top, in `docs/`, `docs/design/` or a folder one level down) every question says `--design` or `--no-design`, so a question about a screen can't go out without its pictures. An answered question keeps its parts in the thread, and the tickets page shows it the same way, with the option chosen marked. A question that breaks the form is not asked, and the agent is told what to fix. In a markdown project the same form goes into `QUESTIONS.md` with a hidden `<!-- ask: … -->` line under the item; questions asked in free words before this still load as they were.
 
 A take is decided under the store's write lock and respects claims made with `agentdrop claim`, so two sessions never get the same task. Every change is journaled with its author: the session, `judge`, or `--as Name`.
 

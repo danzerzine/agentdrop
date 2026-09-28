@@ -100,6 +100,36 @@ class Ask(StoreProject):
         self.ok("task", "comment", "B7", "Согласен: (a) The new one", "--as", "Owner")
         items = {i["code"]: i for i in json.loads(self.ok("tickets", "."))["items"]}
         self.assertIsNone(items["B7"]["ask"])   # answered: no longer an open question
+        # answered, the question keeps its parts and its pictures in the thread, and they stay out of the screenshots
+        items = {i["code"]: i for i in json.loads(self.ok("tickets", ".", "--docs", str(page / "docs.json")))["items"]}
+        asked = [m for m in items["B7"]["thread"] if m.get("ask")]
+        self.assertEqual([m["ask"]["q"] for m in asked], ["Which login page goes live?"])
+        self.assertTrue(all((page / p["src"]).is_file() for p in asked[0]["ask"]["pics"]))
+        self.assertEqual(len(asked[0]["ask"]["pics"]), 2)
+        self.assertNotIn("p-B7", json.loads((page / "docs.json").read_text()).get("images", {}))
+        shown = json.loads(self.ok("task", "show", "B7", "--json"))
+        self.assertEqual([m["ask"]["q"] for m in shown["thread"] if m.get("ask")], ["Which login page goes live?"])
+
+    def test_a_project_with_screens_says_whether_a_question_is_about_how_it_looks(self):
+        self.to_store()
+        (self.root / "docs" / "design").mkdir()
+        (self.root / "docs" / "design" / "DESIGN.md").write_text("# Design\n", encoding="utf-8")
+        opts = ["--option", "Yes", "--option", "No", "--pick", "1"]
+        r = self.refused("Drop the old login page?", *opts, says="this project has screens (docs/design/DESIGN.md)")
+        self.assertIn("--no-design", r.stderr)
+        self.refused("Drop the old login page?", *opts, "--design", "--no-design",
+                     "--before", "docs/shots/before.png", "--after", "docs/shots/after.png", says="both --design and --no-design")
+        self.refused("Which layout?", *opts, "--design", says="needs pictures")
+        self.ok("task", "ask", "B7", "Drop the old login page?", *opts, "--no-design", *self.CTX, session="s1")
+        self.ok("task", "ask", "B7", "Which login page goes live?", *opts, "--design", *self.CTX,
+                "--before", "docs/shots/before.png", "--after", "docs/shots/after.png", session="s1")
+        # a design doc one folder down counts too; none at all asks nothing more
+        (self.root / "docs" / "design" / "DESIGN.md").unlink()
+        (self.root / "web").mkdir()
+        (self.root / "web" / "DESIGN_SYSTEM.md").write_text("# Design\n", encoding="utf-8")
+        self.refused("Drop the old login page?", *opts, says="(web/DESIGN_SYSTEM.md)")
+        (self.root / "web" / "DESIGN_SYSTEM.md").unlink()
+        self.ok("task", "ask", "B7", "Drop the old login page?", *opts, *self.CTX, session="s1")
 
     def test_a_store_from_before_questions_in_parts_gets_the_column(self):
         self.to_store()

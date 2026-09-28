@@ -125,9 +125,10 @@ article.task { gap: 14px; }
 .expect.mine .triage-note { color: var(--owner); }
 .expect .opts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
 .expect .pick { margin: 0; }
-.expect .q-ask { display: flex; flex-direction: column; gap: 8px; }
-.expect .ask-q { margin: 0; font-size: 17px; font-weight: 600; }
-.expect .ask-ctx { margin: 0; font-size: 13px; color: var(--ink-2); }
+.q-ask { display: flex; flex-direction: column; gap: 8px; }
+.q-ask .ask-q { margin: 0; font-size: 17px; font-weight: 600; }
+.q-ask .ask-ctx { margin: 0; font-size: 13px; color: var(--ink-2); }
+.q-ask .opts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
 .body-sec { display: flex; flex-direction: column; gap: 8px; }
 .body-sec h4 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
 .lead { margin: 0; max-width: 68ch; }
@@ -307,24 +308,35 @@ function optionsOf(it) {   // "Варианты: (а) …; (б) …" -> [["а", 
   for (let k = 0; k < parts.length; k += 2) out.push([parts[k], parts[k + 1].replace(/[;.,\s]+$/, "")]);
   return out;
 }
-// A question asked in parts (`agentdrop task ask`): the question, the options with the agent's pick, its pictures, the details folded
-function askHtml(a) {
+// A question asked in parts (`agentdrop task ask`): the question, the options with the agent's pick, its pictures, the details
+// folded; once answered, the option chosen is marked too (`chosen`, its number)
+function askHtml(a, chosen = -1) {
   const L = "абвг", pics = (a.pics || []).filter(p => p.src);
   const cap = (p, k) => p.label.length === 1 ? `${L[k]} · ${a.options[k] || ""}` : ({ before: "было", after: "станет" }[p.label] || p.label);
   return `<div class="q-ask">${a.context ? `<p class="ask-ctx">${esc(a.context)}</p>` : ""}<p class="ask-q">${esc(a.q)}</p>
     ${pics.length ? `<div class="shots">${pics.map((p, k) => `<figure><a href="${esc(p.src)}" target="_blank" rel="noopener"><img src="${esc(p.src)}" alt="${esc(cap(p, k))}" loading="lazy"></a><figcaption>${esc(cap(p, k))}</figcaption></figure>`).join("")}</div>` : ""}
-    <ol class="opts">${a.options.map((x, k) => `<li><b>${L[k]})</b> ${esc(x)}${k === a.pick ? " <em>— предложение агента</em>" : ""}</li>`).join("")}</ol>
+    <ol class="opts">${a.options.map((x, k) => `<li><b>${L[k]})</b> ${esc(x)}${k === chosen ? " <em>— ваш выбор</em>" : ""}${k === a.pick ? " <em>— предложение агента</em>" : ""}</li>`).join("")}</ol>
     ${a.details ? `<details class="fold"><summary>Подробнее</summary>${md(a.details)}</details>` : ""}</div>`;
 }
 // The thread without the open question's own message: the question is shown once, above, in parts
 function threadOf(it) {
   const q = it.ask && it.ask.q;
-  return (it.thread || []).filter(m => !q || !String(m.text || "").trim().startsWith(q));
+  return (it.thread || []).filter(m => !q || !(m.ask ? m.ask.q === q : String(m.text || "").trim().startsWith(q)));
 }
-// A thread: the last two messages in view, the earlier ones folded
-function threadHtml(thread) {
-  const msg = m => `<div class="msg${/данияр|владел/i.test(m.author) ? " me" : ""}"><div class="who"><b>${esc(m.author || "—")}</b>${m.when ? ", " + esc(m.when) : ""}</div>${md(m.text)}</div>`;
-  const all = thread || [], old = all.slice(0, -2), last = all.slice(-2);
+// The option an answer names: «Согласен: (а) …», «Выбираю: (б) …»; -1 for an answer in own words
+function chosenIn(text) {
+  const m = /^\s*(?:Согласен[^(:\n]*|Выбираю)\s*:?\s*\(([а-гa-d])\)/i.exec(String(text || ""));
+  return m ? "абвгabcd".indexOf(m[1].toLowerCase()) % 4 : -1;
+}
+// A question in parts is shown in parts wherever it is, answered or not; the local panel draws it with its own gallery
+const askShown = (a, chosen, it) => window.askView ? window.askView(a, chosen, it) : askHtml(a, chosen);
+// A thread: the last two messages in view, the earlier ones folded. A message that asked a question in parts shows the
+// parts, with the option the next answer chose.
+function threadHtml(thread, it) {
+  const all = thread || [], me = m => /данияр|владел/i.test(m.author);
+  const answerTo = m => { const k = all.indexOf(m), r = all.slice(k + 1).find(x => x.author && x.author !== m.author); return r ? chosenIn(r.text) : -1; };
+  const msg = m => `<div class="msg${me(m) ? " me" : ""}"><div class="who"><b>${esc(m.author || "—")}</b>${m.when ? ", " + esc(m.when) : ""}</div>${m.ask ? askShown(m.ask, answerTo(m), it) : md(m.text)}</div>`;
+  const old = all.slice(0, -2), last = all.slice(-2);
   if (!all.length) return "";
   return `<h4>Ветка · ${all.length}</h4>${old.length ? `<details class="fold"><summary>Ранее · ${old.length}</summary>${old.map(msg).join("")}</details>` : ""}${last.map(msg).join("")}`;
 }
@@ -355,7 +367,7 @@ function renderItem() {
     ${mine || triage[it.id] || pick || it.ask ? `<section class="expect${mine ? " mine" : ""}">
       ${mine ? `<h4>Что нужно от вас</h4>` : ""}
       ${triage[it.id] ? `<p class="triage-note">${esc(triage[it.id].note)}</p>` : ""}
-      ${it.ask ? askHtml(it.ask) : `${opts.length ? `<ol class="opts">${opts.map(([c, x]) => `<li><b>${c})</b> ${inline(x)}</li>`).join("")}</ol>` : ""}
+      ${it.ask ? askShown(it.ask, it.state === "owner" || it.kind !== "question" ? -1 : (it.thread || []).map(m => chosenIn(m.text)).filter(k => k >= 0).pop() ?? -1, it) : `${opts.length ? `<ol class="opts">${opts.map(([c, x]) => `<li><b>${c})</b> ${inline(x)}</li>`).join("")}</ol>` : ""}
       ${pick ? `<p class="pick"><b>Предложение агента:</b> ${inline(pick)}</p>` : ""}`}
     </section>` : ""}
     <div class="howto"><h4>Ответить или спросить · ${esc(tag)}</h4>
@@ -366,7 +378,7 @@ function renderItem() {
     ${body || (docs.images || {})[it.id] ? `<section class="body-sec"><h4>Описание</h4>
       ${long ? `<p class="lead">${inline(lead)}</p><details class="fold"><summary>Полное описание</summary><div class="body">${md(body)}${shots(it.id)}</div></details>`
         : `<div class="body">${md(body)}${shots(it.id)}</div>`}</section>` : ""}
-    ${threadOf(it).length ? `<section class="thread">${threadHtml(threadOf(it))}</section>` : ""}
+    ${threadOf(it).length ? `<section class="thread">${threadHtml(threadOf(it), it)}</section>` : ""}
     <p class="tech">Источник: ${esc(it.doc || "")}${it.section ? ` · раздел «${esc(it.section)}»` : ""} · ${esc(it.id)} · состояние в хранилище: ${esc(it.state)}</p>
   </article>`;
   document.title = `${it.code || "Вопрос"} · Задачи`;

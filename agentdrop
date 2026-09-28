@@ -1361,8 +1361,10 @@ ASK_PATH_RE = re.compile(r"(?<![\w/])(?:~?\.{0,2}/[\w.-]+|[\w.-]+(?:/[\w.-]+){2,
 ASK_HOW = ("`agentdrop task ask B<n> \"<the question, one line>\" --context \"<what the task is for and where it "
            "stands now>\" --option \"…\" --option \"…\" --pick <n> [--details \"…\"]` (up to 120 characters for the "
            "question and for the context line, 2–4 options of up to 60, your pick; file paths and task codes only in "
-           "--details; a question about how something looks adds --design and a "
-           "--pic per option or --before/--after)")
+           "--details; the question, the context and the options name things by what a person sees on the screen or "
+           "in the result («the summary line at the top of Overview»), not by internal names, file names or other "
+           "tasks' codes; a question about how something looks adds --design and a --pic per option or "
+           "--before/--after; in a project with a design doc every question says --design or --no-design)")
 ASK_MARK_RE = re.compile(r"\n?[ \t]*<!--\s*ask:\s*(\{.*?\})\s*-->", re.S)
 
 
@@ -1381,10 +1383,30 @@ def ask_picture(root: Path, name: str) -> tuple[str, str]:
     return f.relative_to(base).as_posix(), ""
 
 
+ASK_UI_DOCS = ("DESIGN.md", "DESIGN_SYSTEM.md")
+
+
+def project_ui(root: Path) -> str:
+    """The project's design doc when it has screens (DESIGN.md or DESIGN_SYSTEM.md at the top, in docs/, docs/design/
+    or a folder one level down), as a path inside it; empty when it has none."""
+    dirs = [root, root / "docs", root / "docs" / "design"]
+    try:
+        dirs += sorted(d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".") and d.name != "docs")
+    except OSError:
+        pass
+    for d in dirs:
+        for name in ASK_UI_DOCS:
+            if (d / name).is_file():
+                return (d / name).relative_to(root).as_posix()
+    return ""
+
+
 def ask_parts(root: Path, question: str, options: list[str], pick: str, details: str = "", pics: list[str] = (),
               before: str = "", after: str = "", design: bool = False, ru: bool = False,
-              context: str = "") -> tuple[dict, list[str]]:
-    """The question as the store keeps it, and what to fix when it breaks the form (empty when it is fine)."""
+              context: str = "", no_design: bool = False, ui: str = "") -> tuple[dict, list[str]]:
+    """The question as the store keeps it, and what to fix when it breaks the form (empty when it is fine).
+    `ui` is the project's design doc: a project with screens has every question say whether it is about how something
+    looks (--design, with pictures) or not (--no-design)."""
     q, opts, bad = " ".join(question.split()), [" ".join(o.split()) for o in options if o.strip()], []
     ctx = " ".join(context.split())
     if not q:
@@ -1435,6 +1457,12 @@ def ask_parts(root: Path, question: str, options: list[str], pick: str, details:
     elif design:
         bad.append(f"--design: a question about how something looks needs pictures: --pic per option "
                    f"({len(opts) or 'one each'}) or --before and --after, screenshots or mockups inside the project")
+    if design and no_design:
+        bad.append("both --design and --no-design: a question is about how something looks or it is not; pick one")
+    elif ui and not design and not no_design:
+        bad.append(f"this project has screens ({ui}): say whether the question is about how something looks: "
+                   f"--design with pictures (--pic per option, or --before and --after: screenshots of the screen now "
+                   f"and of how it will be), or --no-design when it is not")
     out = []
     for name, label in shots:
         rel, why = ask_picture(root, name)
@@ -4404,13 +4432,18 @@ def cmd_tickets(argv: list[str]) -> int:
                     real = f"{proj['key']}:{f.relative_to(root).as_posix()}"
                     docs["refs"][f"{proj['key']}:{ref}"] = real
                     docs["files"].setdefault(real, f.read_text(encoding="utf-8", errors="replace"))
-            if a.docs and (it.get("ask") or {}).get("pics"):   # a question's pictures, checked again: inside the project
+            def ask_pics(q: dict) -> dict:   # a question's pictures, checked again: inside the project
                 pics = []
-                for x in it["ask"]["pics"]:
+                for x in q.get("pics") or []:
                     rel, why = ask_picture(root, x.get("path", ""))
                     if not why:
                         pics.append({**x, "src": page_image(root / rel, Path(a.docs).parent / "img")})
-                it["ask"] = {**it["ask"], "pics": pics}
+                return {**q, "pics": pics}
+            if a.docs and (it.get("ask") or {}).get("pics"):
+                it["ask"] = ask_pics(it["ask"])
+            for m in it.get("thread", []) if a.docs else []:   # a question answered in the thread keeps its pictures
+                if (m.get("ask") or {}).get("pics"):
+                    m["ask"] = ask_pics(m["ask"])
             if a.docs and it["state"] != "done":   # screenshots it names, a file or a folder of them, shown inline
                 pics = []
                 for ref in re.findall(r"`([^`\s]+)`", text) + re.findall(r"[\w./-]+\.(?:png|jpe?g|webp)\b", text, re.I):
@@ -4422,7 +4455,8 @@ def cmd_tickets(argv: list[str]) -> int:
                         if p.is_file() and p.suffix.lower() in IMG_EXT:
                             pics.append(p)
                             break
-                asked = {(root / x["path"]).resolve() for x in (it.get("ask") or {}).get("pics", [])}
+                asked = {(root / x["path"]).resolve() for q in [it.get("ask") or {}, *(m.get("ask") or {} for m in it.get("thread", []))]
+                         for x in q.get("pics", [])}
                 inside = lambda x: root.resolve() in x.resolve().parents   # never a file outside the project
                 pics = [x for x in dict.fromkeys(pics) if inside(x) and x.resolve() not in asked][:8]
                 if pics:
@@ -4672,6 +4706,13 @@ def markdown_records(root: Path, cfg: dict) -> list[dict]:
     return out
 
 
+def store_thread(r: dict) -> list[dict]:
+    """A task's thread for a page: each message, and the question in parts it asked, answered or not."""
+    asks = r.get("asks") or {}
+    return [{"author": c["author"], "when": c["at"], "text": c["text"], **({"ask": asks[k]} if k in asks else {})}
+            for k, c in enumerate(r["thread"])]
+
+
 def store_records(conn: sqlite3.Connection, project: str, tid: str | None = None) -> list[dict]:
     """A project's tasks in the store (or the one task `tid`), in the shape `markdown_records` gives."""
     out = []
@@ -4684,10 +4725,11 @@ def store_records(conn: sqlite3.Connection, project: str, tid: str | None = None
                             (project, row["id"])).fetchall()
         r["thread"] = [{"author": x["author"], "at": x["at"], "text": x["text"]} for x in rows]
         r["ask"] = None   # the latest question in parts, while nobody has answered under it
+        r["asks"] = {}    # every question in parts in the thread, by message number, answered or not
         for k, x in enumerate(rows):
             if x["ask"]:
                 try:
-                    r["ask"] = {**json.loads(x["ask"]), "n": k, "author": x["author"], "at": x["at"]}
+                    r["ask"] = r["asks"][k] = {**json.loads(x["ask"]), "n": k, "author": x["author"], "at": x["at"]}
                 except ValueError:
                     pass
             elif r["ask"] and x["author"] and x["author"] != r["ask"]["author"]:
@@ -4953,7 +4995,7 @@ class StoreTasks:
             "ask": r.get("ask") if state == "waiting_you" else None,   # the open question in parts
         }
         if full:
-            t.update(body=r["text"], thread=[{"author": c["author"], "when": c["at"], "text": c["text"]} for c in r["thread"]],
+            t.update(body=r["text"], thread=store_thread(r),
                      doc=STORE_DOC, theme=r["theme"])
         return t
 
@@ -5036,7 +5078,7 @@ class StoreTasks:
             if group not in ("turn", "owner"):
                 continue
             said = [c for c in r["thread"] if c["author"]]
-            thread = [{"author": c["author"], "when": c["at"], "text": c["text"]} for c in r["thread"]]
+            thread = store_thread(r)
             page = {"key": q["key"], "id": r["id"], "state": group, "title": title, "pick": "",
                     "images": self._images(r), "body": r["text"], "thread": thread, "doc": STORE_DOC,
                     "ask": r.get("ask") if group == "owner" else None}
@@ -5107,7 +5149,10 @@ class StoreTasks:
                         docs.append(rel)
                     break
         images = [Path(x).relative_to(self.root.resolve()).as_posix() for x in self._images(r)]
-        return {**r, "after": after, "before": before, "docs": docs + images, "events": events}
+        asks = r.get("asks") or {}   # a question in parts stays with the message that asked it
+        thread = [{**c, **({"ask": asks[k]} if k in asks else {})} for k, c in enumerate(r["thread"])]
+        rest = {k: v for k, v in r.items() if k != "asks"}
+        return {**rest, "thread": thread, "after": after, "before": before, "docs": docs + images, "events": events}
 
     # --- writing ---------------------------------------------------------------------------------
 
@@ -5437,6 +5482,9 @@ def cmd_task(argv: list[str]) -> int:
     sp.add_argument("--details", default="", help="Anything else, any length: context, numbers, file paths, task codes")
     sp.add_argument("--design", action="store_true", help="About how something looks (a screen, layout, colours): "
                                                           "needs pictures")
+    sp.add_argument("--no-design", action="store_true", help="Not about how something looks; in a project with a "
+                                                             "design doc (DESIGN.md) one of --design and --no-design "
+                                                             "is required")
     sp.add_argument("--pic", action="append", default=[], help="A picture for each option, in their order "
                                                                "(a file inside the project)")
     sp.add_argument("--before", default="", help="With --after: a before/after pair instead of --pic")
@@ -5478,7 +5526,7 @@ def cmd_task(argv: list[str]) -> int:
         return 0 if store else 1
     if a.action == "ask":   # the form is checked the same way wherever the question goes
         ask, bad = ask_parts(root, a.text, a.option, a.pick, a.details, a.pic, a.before, a.after, a.design,
-                             src.russian(), context=a.context)
+                             src.russian(), context=a.context, no_design=a.no_design, ui=project_ui(root))
         if bad:
             print("agentdrop task ask: the question was not asked; fix and ask again:\n"
                   + "\n".join(f"- {b}" for b in bad), file=sys.stderr)
