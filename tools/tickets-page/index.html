@@ -127,6 +127,7 @@ article.task { gap: 14px; }
 .expect .pick { margin: 0; }
 .expect .q-ask { display: flex; flex-direction: column; gap: 8px; }
 .expect .ask-q { margin: 0; font-size: 17px; font-weight: 600; }
+.expect .ask-ctx { margin: 0; font-size: 13px; color: var(--ink-2); }
 .body-sec { display: flex; flex-direction: column; gap: 8px; }
 .body-sec h4 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
 .lead { margin: 0; max-width: 68ch; }
@@ -310,10 +311,15 @@ function optionsOf(it) {   // "Варианты: (а) …; (б) …" -> [["а", 
 function askHtml(a) {
   const L = "абвг", pics = (a.pics || []).filter(p => p.src);
   const cap = (p, k) => p.label.length === 1 ? `${L[k]} · ${a.options[k] || ""}` : ({ before: "было", after: "станет" }[p.label] || p.label);
-  return `<div class="q-ask"><p class="ask-q">${esc(a.q)}</p>
+  return `<div class="q-ask">${a.context ? `<p class="ask-ctx">${esc(a.context)}</p>` : ""}<p class="ask-q">${esc(a.q)}</p>
     ${pics.length ? `<div class="shots">${pics.map((p, k) => `<figure><a href="${esc(p.src)}" target="_blank" rel="noopener"><img src="${esc(p.src)}" alt="${esc(cap(p, k))}" loading="lazy"></a><figcaption>${esc(cap(p, k))}</figcaption></figure>`).join("")}</div>` : ""}
     <ol class="opts">${a.options.map((x, k) => `<li><b>${L[k]})</b> ${esc(x)}${k === a.pick ? " <em>— предложение агента</em>" : ""}</li>`).join("")}</ol>
     ${a.details ? `<details class="fold"><summary>Подробнее</summary>${md(a.details)}</details>` : ""}</div>`;
+}
+// The thread without the open question's own message: the question is shown once, above, in parts
+function threadOf(it) {
+  const q = it.ask && it.ask.q;
+  return (it.thread || []).filter(m => !q || !String(m.text || "").trim().startsWith(q));
 }
 // A thread: the last two messages in view, the earlier ones folded
 function threadHtml(thread) {
@@ -335,7 +341,8 @@ function renderItem() {
   const tier = tierOf(it), who = whoOf(it), t = splitTitle(it.title), opts = optionsOf(it);
   const mine = ["blocker", "owner", "route"].includes(tier);
   const pick = it.pick ? it.pick.replace(/^(Предложение[^:]*|Мой выбор)\s*[:—-]\s*/i, "") : "";
-  const body = String(it.pick ? String(it.body).replace(it.pick, "") : it.body || "").trim();
+  // a question in parts in QUESTIONS.md: its body is the same parts in words, already shown above
+  const body = it.ask && it.kind === "question" ? "" : String(it.pick ? String(it.body).replace(it.pick, "") : it.body || "").trim();
   const paras = body.split(/\n\s*\n/), long = body.length > 480;
   const lead = long ? paras[0].split(/(?<=[.!?])\s+(?=[A-ZА-ЯЁ«"])/).slice(0, 2).join(" ") : "";
   const last = (it.thread || []).slice(-1)[0];
@@ -359,7 +366,7 @@ function renderItem() {
     ${body || (docs.images || {})[it.id] ? `<section class="body-sec"><h4>Описание</h4>
       ${long ? `<p class="lead">${inline(lead)}</p><details class="fold"><summary>Полное описание</summary><div class="body">${md(body)}${shots(it.id)}</div></details>`
         : `<div class="body">${md(body)}${shots(it.id)}</div>`}</section>` : ""}
-    ${(it.thread || []).length ? `<section class="thread">${threadHtml(it.thread)}</section>` : ""}
+    ${threadOf(it).length ? `<section class="thread">${threadHtml(threadOf(it))}</section>` : ""}
     <p class="tech">Источник: ${esc(it.doc || "")}${it.section ? ` · раздел «${esc(it.section)}»` : ""} · ${esc(it.id)} · состояние в хранилище: ${esc(it.state)}</p>
   </article>`;
   document.title = `${it.code || "Вопрос"} · Задачи`;

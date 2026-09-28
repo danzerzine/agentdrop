@@ -176,7 +176,7 @@ class StoreTasks(StoreProject):
 
         self.ok("task", "comment", "B7", "Safari rejects the cookie", session="s1")
         self.ok("task", "ask", "B7", "Drop the old login page?", "--option", "Yes, drop it", "--option", "Keep it",
-                "--pick", "1", session="s1")
+                "--pick", "1", "--context", "New login: the new page is live", session="s1")
         self.assertEqual(self.state("B7"), "waiting_you")
         self.assertFalse((self.root / "docs" / ".claims" / "B7.json").exists())   # the run let go
         board = self.ok("status")

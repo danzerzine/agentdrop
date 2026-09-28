@@ -28,11 +28,13 @@ class Ask(StoreProject):
         (self.root.parent / "outside.png").write_bytes(PNG)
         (shots / "link.png").symlink_to(self.root.parent / "outside.png")
 
-    def ask(self, *args, code="B7"):
-        return self.run_ad("task", "ask", code, *args, session="s1")
+    CTX = ("--context", "New login: both pages are built, one goes live")
 
-    def refused(self, *args, says):
-        r = self.ask(*args)
+    def ask(self, *args, code="B7", context=CTX):
+        return self.run_ad("task", "ask", code, *args, *context, session="s1")
+
+    def refused(self, *args, says, context=CTX):
+        r = self.ask(*args, context=context)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("was not asked", r.stderr)
         self.assertIn(says, r.stderr)
@@ -45,6 +47,9 @@ class Ask(StoreProject):
         self.refused("Drop the old login page?", says="no options")
         self.refused("Drop the old login page?", "--option", "Yes", "--pick", "1", says="1 option;")
         self.refused("x" * 121 + "?", *opts, says="the question is 122 characters")
+        self.refused("Ship it?", *opts, context=(), says="no context")
+        self.refused("Ship it?", *opts, context=("--context", "y" * 121), says="the context is 121 characters")
+        self.refused("Ship it?", *opts, context=("--context", "Login, after B9"), says="the context names B9")
         self.refused("Ship it?", "--option", "y" * 61, "--option", "No", "--pick", "1", says="option 1 is 61 characters")
         self.refused("Is docs/specs/login.md right?", *opts, says="names docs/specs/login.md")
         self.refused("Close B9 first?", *opts, says="names B9")
@@ -67,12 +72,13 @@ class Ask(StoreProject):
     def test_a_question_in_parts_reaches_the_page_and_an_old_one_still_loads(self):
         self.to_store()
         self.ok("task", "ask", "B7", "Which login page goes live?", "--option", "The new one", "--option", "The old one",
-                "--pick", "a", "--details", "Spec: docs/specs/login.md, after B9.", "--design",
+                "--pick", "a", "--details", "Spec: docs/specs/login.md, after B9.", "--design", *self.CTX,
                 "--pic", "docs/shots/one.png", "--pic", "docs/shots/two.png", session="s1")
         self.assertEqual(self.state("B7"), "waiting_you")
         row = self.rows("SELECT text, ask FROM comments WHERE task = 'B7' ORDER BY n DESC LIMIT 1")[0]
         self.assertIn("(a) The new one", row["text"])   # every other reader still gets words
         self.assertIn("My pick — (a).", row["text"])
+        self.assertIn("Context: New login: both pages are built, one goes live", row["text"])
         ask = json.loads(row["ask"])
         self.assertEqual((ask["q"], ask["options"], ask["pick"], ask["design"]),
                          ("Which login page goes live?", ["The new one", "The old one"], 0, True))
@@ -82,7 +88,7 @@ class Ask(StoreProject):
         page.mkdir()
         items = {i["code"]: i for i in json.loads(self.ok("tickets", ".", "--docs", str(page / "docs.json")))["items"]}
         got = items["B7"]["ask"]
-        self.assertEqual(got["q"], "Which login page goes live?")
+        self.assertEqual((got["q"], got["context"]), ("Which login page goes live?", self.CTX[1]))
         self.assertEqual([p["label"] for p in got["pics"]], ["a", "b"])
         for p in got["pics"]:
             self.assertRegex(p["src"], r"^img/[0-9a-f]{10}\.\w+$")
@@ -111,7 +117,8 @@ class Ask(StoreProject):
         self.refused("Drop the old login page?", says="no options")
         self.assertEqual(self.snapshot(), self.docs)
         self.ok("task", "ask", "B7", "Drop the old login page?", "--option", "Yes, drop it", "--option", "Keep it",
-                "--pick", "2", "--before", "docs/shots/before.png", "--after", "docs/shots/after.png", session="s1")
+                "--pick", "2", "--before", "docs/shots/before.png", "--after", "docs/shots/after.png", *self.CTX,
+                session="s1")
         text = (self.root / "docs" / "QUESTIONS.md").read_text(encoding="utf-8")
         owners = text.split("## For the owner", 1)[1].split("## For others", 1)[0]
         self.assertRegex(owners.lstrip(), r"^- \*\*Drop the old login page\? \(B7, \d\d\.\d\d\)\*\*\n  \(a\) Yes, drop it\n")
@@ -123,6 +130,20 @@ class Ask(StoreProject):
         self.assertNotIn("<!--", q["body"])
         old = next(i for i in items if i["title"].startswith("Which chart library"))
         self.assertIsNone(old["ask"])   # an item in free words loads as before
+
+        # the owner's answer from the panel goes straight under the question, which becomes the agent's move
+        qid = q["id"].split("-", 1)[1]
+        self.ok("task", "comment", qid, "Согласен: (b) Keep it", "--as", "Owner")
+        text = (self.root / "docs" / "QUESTIONS.md").read_text(encoding="utf-8")
+        self.assertIn("> **Owner, ", text)
+        self.assertIn("Согласен: (b) Keep it", text.split("Drop the old login page?", 1)[1].split("\n- ", 1)[0])
+        q = next(i for i in json.loads(self.ok("tickets", "."))["items"] if i["id"] == q["id"])
+        self.assertEqual(q["state"], "turn")
+        # a ticket in TODO.md by its code; an unknown one is refused
+        self.ok("task", "comment", "B7", "Later, after the release", "--as", "Owner")
+        self.assertIn("Later, after the release", (self.root / "docs" / "TODO.md").read_text(encoding="utf-8"))
+        r = self.run_ad("task", "comment", "q000000", "x", "--as", "Owner")
+        self.assertEqual(r.returncode, 2)
 
 
 if __name__ == "__main__":

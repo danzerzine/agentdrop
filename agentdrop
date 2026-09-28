@@ -1352,15 +1352,16 @@ def item_images(root: Path, text: str) -> list[str]:
 # details. A question about how something looks carries pictures: one per option, or a before/after pair.
 ASK_Q_MAX, ASK_OPT_MAX, ASK_OPTS = 120, 60, (2, 4)
 ASK_LETTERS = ("abcd", "абвг")   # [ru]
-ASK_WORDS = {"pick": ("My pick", "Мой выбор"), "pics": ("Pictures", "Картинки"), "details": ("Details", "Подробнее"),
+ASK_WORDS = {"context": ("Context", "Контекст"), "pick": ("My pick", "Мой выбор"), "pics": ("Pictures", "Картинки"), "details": ("Details", "Подробнее"),
              "before": ("before", "было"), "after": ("after", "станет")}
 ASK_CODE_RE = re.compile(r"(?<![\w-])(?:B\d+|q[0-9a-f]{6}(?:-\d+)?)(?![\w-])")
 ASK_PATH_RE = re.compile(r"(?<![\w/])(?:~?\.{0,2}/[\w.-]+|[\w.-]+(?:/[\w.-]+){2,}|[\w.-]*/[\w.-]*\.[A-Za-z]\w{0,4}"
                          r"|[\w-]+\.(?:md|py|js|ts|css|html|json|jsonl|sh|png|jpe?g|webp|gif|txt|sqlite3|ya?ml|toml))\b", re.A)
 # how the prompts teach it, in one line
-ASK_HOW = ("`agentdrop task ask B<n> \"<the question, one line>\" --option \"…\" --option \"…\" --pick <n> "
-           "[--details \"…\"]` (up to 120 characters for the question, 2–4 options of up to 60, your pick; context, "
-           "file paths and task codes only in --details; a question about how something looks adds --design and a "
+ASK_HOW = ("`agentdrop task ask B<n> \"<the question, one line>\" --context \"<what the task is for and where it "
+           "stands now>\" --option \"…\" --option \"…\" --pick <n> [--details \"…\"]` (up to 120 characters for the "
+           "question and for the context line, 2–4 options of up to 60, your pick; file paths and task codes only in "
+           "--details; a question about how something looks adds --design and a "
            "--pic per option or --before/--after)")
 ASK_MARK_RE = re.compile(r"\n?[ \t]*<!--\s*ask:\s*(\{.*?\})\s*-->", re.S)
 
@@ -1381,15 +1382,24 @@ def ask_picture(root: Path, name: str) -> tuple[str, str]:
 
 
 def ask_parts(root: Path, question: str, options: list[str], pick: str, details: str = "", pics: list[str] = (),
-              before: str = "", after: str = "", design: bool = False, ru: bool = False) -> tuple[dict, list[str]]:
+              before: str = "", after: str = "", design: bool = False, ru: bool = False,
+              context: str = "") -> tuple[dict, list[str]]:
     """The question as the store keeps it, and what to fix when it breaks the form (empty when it is fine)."""
     q, opts, bad = " ".join(question.split()), [" ".join(o.split()) for o in options if o.strip()], []
+    ctx = " ".join(context.split())
     if not q:
         bad.append("the question is empty: one line, what exactly you ask")
     elif "\n" in question.strip():
         bad.append("the question has several lines: one line; the rest goes to --details")
     if len(q) > ASK_Q_MAX:
         bad.append(f"the question is {len(q)} characters; at most {ASK_Q_MAX}, one line (the rest goes to --details)")
+    if not ctx:
+        bad.append(f"no context: --context \"…\", one line of at most {ASK_Q_MAX} characters on what the task is for "
+                   f"and where it stands now, so the question reads without opening the task")
+    elif "\n" in context.strip():
+        bad.append("the context has several lines: one line; the rest goes to --details")
+    if len(ctx) > ASK_Q_MAX:
+        bad.append(f"the context is {len(ctx)} characters; at most {ASK_Q_MAX}, one line (the rest goes to --details)")
     if not opts:
         bad.append(f"no options: give {ASK_OPTS[0]} to {ASK_OPTS[1]} with --option \"…\", each at most "
                    f"{ASK_OPT_MAX} characters; a yes/no question is two options too")
@@ -1398,7 +1408,7 @@ def ask_parts(root: Path, question: str, options: list[str], pick: str, details:
     for k, o in enumerate(opts, 1):
         if len(o) > ASK_OPT_MAX:
             bad.append(f"option {k} is {len(o)} characters; at most {ASK_OPT_MAX} (the rest goes to --details)")
-    for what, text in [("the question", q)] + [(f"option {k}", o) for k, o in enumerate(opts, 1)]:
+    for what, text in [("the question", q), ("the context", ctx)] + [(f"option {k}", o) for k, o in enumerate(opts, 1)]:
         found = ASK_CODE_RE.findall(text) + [m.group(0) for m in ASK_PATH_RE.finditer(text)]
         if found:
             bad.append(f"{what} names {', '.join(dict.fromkeys(found))}: file paths and task codes go only in "
@@ -1432,7 +1442,7 @@ def ask_parts(root: Path, question: str, options: list[str], pick: str, details:
             bad.append(why)
         else:
             out.append({"path": rel, "label": label})
-    ask = {"q": q, "options": opts, "pick": n, "details": details.strip(), "pics": out, "design": bool(design)}
+    ask = {"q": q, "context": ctx, "options": opts, "pick": n, "details": details.strip(), "pics": out, "design": bool(design)}
     return ask, bad
 
 
@@ -1441,6 +1451,8 @@ def ask_text(ask: dict, ru: bool) -> str:
     letters = ASK_LETTERS[ru]
     lines = [ask["q"], *(f"({letters[k]}) {o}" for k, o in enumerate(ask["options"]))]
     lines.append(f"{ASK_WORDS['pick'][ru]} — ({letters[ask['pick']]}).")
+    if ask.get("context"):
+        lines.append(f"{ASK_WORDS['context'][ru]}: {ask['context']}")
     if ask.get("pics"):
         lines.append(f"{ASK_WORDS['pics'][ru]}: " + ", ".join(f"`{p['path']}` ({p['label']})" for p in ask["pics"]))
     if ask.get("details"):
@@ -5409,7 +5421,8 @@ def cmd_task(argv: list[str]) -> int:
     sp = sub.add_parser("ask", parents=[common], help="A question for the owner under the task, in parts: it reads in "
                                                        "five seconds and is answered by one tap; the task then waits for "
                                                        "them (works in a markdown project too: a new item in QUESTIONS.md)",
-                        epilog='example: agentdrop task ask B12 "Which layout goes to the home page?" --option "Two '
+                        epilog='example: agentdrop task ask B12 "Which layout goes to the home page?" --context "New home page: '
+                               'both layouts are built, one goes live" --option "Two '
                                'columns" --option "One column" --pick 1 --details "specs/B12.md: …" --design '
                                '--pic docs/shots/two.png --pic docs/shots/one.png')
     sp.add_argument("task")
@@ -5417,6 +5430,9 @@ def cmd_task(argv: list[str]) -> int:
                                                      "no file paths or task codes")
     sp.add_argument("--option", action="append", default=[], help=f"An option, {ASK_OPTS[0]}–{ASK_OPTS[1]} of them, "
                                                                   f"each at most {ASK_OPT_MAX} characters")
+    sp.add_argument("--context", default="", help=f"Required: one line, at most {ASK_Q_MAX} characters, on what the "
+                                                  "task is for and where it stands now («Moving the export to the new "
+                                                  "server: the code is ready, only the time is left»)")
     sp.add_argument("--pick", default="", help="The option you would take: its number (1..) or letter")
     sp.add_argument("--details", default="", help="Anything else, any length: context, numbers, file paths, task codes")
     sp.add_argument("--design", action="store_true", help="About how something looks (a screen, layout, colours): "
@@ -5425,7 +5441,9 @@ def cmd_task(argv: list[str]) -> int:
                                                                "(a file inside the project)")
     sp.add_argument("--before", default="", help="With --after: a before/after pair instead of --pic")
     sp.add_argument("--after", default="", help="With --before: the picture of how it will be")
-    sp = sub.add_parser("comment", parents=[common], help="Add to the task's thread")
+    sp = sub.add_parser("comment", parents=[common], help="Add to the task's thread (in a markdown project: under the "
+                                                           "ticket in TODO.md or the question in QUESTIONS.md, by its "
+                                                           "code or question id)")
     sp.add_argument("task")
     sp.add_argument("text")
     sp = sub.add_parser("handin", parents=[common], help="The work is done and committed: to acceptance "
@@ -5460,7 +5478,7 @@ def cmd_task(argv: list[str]) -> int:
         return 0 if store else 1
     if a.action == "ask":   # the form is checked the same way wherever the question goes
         ask, bad = ask_parts(root, a.text, a.option, a.pick, a.details, a.pic, a.before, a.after, a.design,
-                             src.russian())
+                             src.russian(), context=a.context)
         if bad:
             print("agentdrop task ask: the question was not asked; fix and ask again:\n"
                   + "\n".join(f"- {b}" for b in bad), file=sys.stderr)
@@ -5469,6 +5487,14 @@ def cmd_task(argv: list[str]) -> int:
             placed = src.ask(a.task, ask)
             print(f"✓ QUESTIONS.md: {placed['key'].strip('*')} [{STATE_NAMES['waiting_you'][src.russian()]}]")
             return 0
+    if a.action == "comment" and not isinstance(src, StoreTasks):   # e.g. the owner's answer from the panel
+        ref = markdown_ref(src, a.task)
+        if ref is None:
+            print(f"agentdrop task: no ticket or question {a.task} in {root.name}", file=sys.stderr)
+            return 2
+        placed = src.comment(ref, a.author or agent_name(), dt.datetime.now().strftime("%d.%m %H:%M"), a.text)
+        print(f"✓ {Path(placed['path']).name}: {a.task}")
+        return 0
     if not isinstance(src, StoreTasks):
         print(f"agentdrop task: {root.name} keeps its tasks in docs/TODO.md (no `tasks.{root.name} = store` in the "
               f"config); use `agentdrop claim` and the docs", file=sys.stderr)
@@ -5534,6 +5560,20 @@ def cmd_task(argv: list[str]) -> int:
         if a.action == "handin":
             print(f"next: `agentdrop accept {t['id']}` (checks, then a fresh judge)")
     return 0
+
+
+def markdown_ref(src: "MarkdownTasks", task: str) -> dict | None:
+    """Where a comment on a markdown task goes: a ticket in TODO.md by its code, or a question in QUESTIONS.md by
+    its id on the tickets page (q + 6 hex) or the code in its title."""
+    ru = src.russian()
+    if re.fullmatch(r"B\d+", task) and any(t["id"] == task for t in src.tickets()):
+        return {"doc": "TODO.md", "kind": "ticket", "key": task, "code": task, "title": "", "ru": ru}
+    for x in src.questions(full=True)["items"]:
+        code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)", x["key"])
+        if task in ("q" + sha(x["key"].encode())[:6], code.group(1) if code else None):
+            return {"doc": "QUESTIONS.md", "kind": "question", "key": f"**{x['key']}**", "code": "",
+                    "title": x["title"], "ru": ru}
+    return None
 
 
 COMMANDS = {"status": cmd_status, "claim": cmd_claim, "release": cmd_release, "brief": cmd_brief,
