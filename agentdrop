@@ -1347,6 +1347,124 @@ def item_images(root: Path, text: str) -> list[str]:
     return out[:10]
 
 
+# --- a question for the owner in parts (`agentdrop task ask`): read in five seconds, answered by one tap.
+# The question is one line, the options short, the agent's pick named; file paths and task codes only in the
+# details. A question about how something looks carries pictures: one per option, or a before/after pair.
+ASK_Q_MAX, ASK_OPT_MAX, ASK_OPTS = 120, 60, (2, 4)
+ASK_LETTERS = ("abcd", "абвг")   # [ru]
+ASK_WORDS = {"pick": ("My pick", "Мой выбор"), "pics": ("Pictures", "Картинки"), "details": ("Details", "Подробнее"),
+             "before": ("before", "было"), "after": ("after", "станет")}
+ASK_CODE_RE = re.compile(r"(?<![\w-])(?:B\d+|q[0-9a-f]{6}(?:-\d+)?)(?![\w-])")
+ASK_PATH_RE = re.compile(r"(?<![\w/])(?:~?\.{0,2}/[\w.-]+|[\w.-]+(?:/[\w.-]+){2,}|[\w.-]*/[\w.-]*\.[A-Za-z]\w{0,4}"
+                         r"|[\w-]+\.(?:md|py|js|ts|css|html|json|jsonl|sh|png|jpe?g|webp|gif|txt|sqlite3|ya?ml|toml))\b", re.A)
+# how the prompts teach it, in one line
+ASK_HOW = ("`agentdrop task ask B<n> \"<the question, one line>\" --option \"…\" --option \"…\" --pick <n> "
+           "[--details \"…\"]` (up to 120 characters for the question, 2–4 options of up to 60, your pick; context, "
+           "file paths and task codes only in --details; a question about how something looks adds --design and a "
+           "--pic per option or --before/--after)")
+ASK_MARK_RE = re.compile(r"\n?[ \t]*<!--\s*ask:\s*(\{.*?\})\s*-->", re.S)
+
+
+def ask_picture(root: Path, name: str) -> tuple[str, str]:
+    """(path relative to the project, "") for a picture inside the project, else ("", what is wrong). The path is
+    resolved first, so `..` and symlinks that lead out of the project are refused."""
+    base = root.resolve()
+    try:
+        f = (base / os.path.expanduser(name)).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return "", f"{name}: no such file in the project"
+    if base not in f.parents:
+        return "", f"{name}: outside the project; pictures must be files under {base}"
+    if not f.is_file() or f.suffix.lower() not in IMG_EXT:
+        return "", f"{name}: not a picture (png, jpg or webp)"
+    return f.relative_to(base).as_posix(), ""
+
+
+def ask_parts(root: Path, question: str, options: list[str], pick: str, details: str = "", pics: list[str] = (),
+              before: str = "", after: str = "", design: bool = False, ru: bool = False) -> tuple[dict, list[str]]:
+    """The question as the store keeps it, and what to fix when it breaks the form (empty when it is fine)."""
+    q, opts, bad = " ".join(question.split()), [" ".join(o.split()) for o in options if o.strip()], []
+    if not q:
+        bad.append("the question is empty: one line, what exactly you ask")
+    elif "\n" in question.strip():
+        bad.append("the question has several lines: one line; the rest goes to --details")
+    if len(q) > ASK_Q_MAX:
+        bad.append(f"the question is {len(q)} characters; at most {ASK_Q_MAX}, one line (the rest goes to --details)")
+    if not opts:
+        bad.append(f"no options: give {ASK_OPTS[0]} to {ASK_OPTS[1]} with --option \"…\", each at most "
+                   f"{ASK_OPT_MAX} characters; a yes/no question is two options too")
+    elif not ASK_OPTS[0] <= len(opts) <= ASK_OPTS[1]:
+        bad.append(f"{len(opts)} option{'s' * (len(opts) != 1)}; give {ASK_OPTS[0]} to {ASK_OPTS[1]}")
+    for k, o in enumerate(opts, 1):
+        if len(o) > ASK_OPT_MAX:
+            bad.append(f"option {k} is {len(o)} characters; at most {ASK_OPT_MAX} (the rest goes to --details)")
+    for what, text in [("the question", q)] + [(f"option {k}", o) for k, o in enumerate(opts, 1)]:
+        found = ASK_CODE_RE.findall(text) + [m.group(0) for m in ASK_PATH_RE.finditer(text)]
+        if found:
+            bad.append(f"{what} names {', '.join(dict.fromkeys(found))}: file paths and task codes go only in "
+                       f"--details; say it in words here")
+    letters = ASK_LETTERS[ru]
+    p = pick.strip().lower().strip("()")
+    n = (int(p) - 1 if p.isdigit() else next((L.index(p) for L in ASK_LETTERS if p in L and len(p) == 1), -1)) if p else -1
+    if not p:
+        bad.append("no pick: say which option you would take, --pick 1.." + str(max(len(opts), 2)))
+    elif not 0 <= n < len(opts):
+        bad.append(f"--pick {pick}: no such option; 1..{len(opts)} or a letter {letters[:len(opts)]}")
+    shots = []
+    if pics and (before or after):
+        bad.append("pictures either one per option (--pic) or a before/after pair (--before, --after), not both")
+    elif pics:
+        if len(pics) != len(opts):
+            bad.append(f"--pic given {len(pics)} times for {len(opts)} options: one picture per option, in the "
+                       f"options' order, or a pair with --before and --after")
+        shots = [(x, letters[k] if k < len(letters) else "") for k, x in enumerate(pics)]
+    elif before or after:
+        if not (before and after):
+            bad.append("a before/after pair needs both --before and --after")
+        shots = [(x, ASK_WORDS[w][ru]) for x, w in ((before, "before"), (after, "after")) if x]
+    elif design:
+        bad.append(f"--design: a question about how something looks needs pictures: --pic per option "
+                   f"({len(opts) or 'one each'}) or --before and --after, screenshots or mockups inside the project")
+    out = []
+    for name, label in shots:
+        rel, why = ask_picture(root, name)
+        if why:
+            bad.append(why)
+        else:
+            out.append({"path": rel, "label": label})
+    ask = {"q": q, "options": opts, "pick": n, "details": details.strip(), "pics": out, "design": bool(design)}
+    return ask, bad
+
+
+def ask_text(ask: dict, ru: bool) -> str:
+    """The question as words, for the thread and QUESTIONS.md: every reader that doesn't know the parts still reads it."""
+    letters = ASK_LETTERS[ru]
+    lines = [ask["q"], *(f"({letters[k]}) {o}" for k, o in enumerate(ask["options"]))]
+    lines.append(f"{ASK_WORDS['pick'][ru]} — ({letters[ask['pick']]}).")
+    if ask.get("pics"):
+        lines.append(f"{ASK_WORDS['pics'][ru]}: " + ", ".join(f"`{p['path']}` ({p['label']})" for p in ask["pics"]))
+    if ask.get("details"):
+        lines.append(f"{ASK_WORDS['details'][ru]}: {ask['details']}")
+    return "\n".join(lines)
+
+
+def ask_mark(ask: dict) -> str:
+    """The parts as a hidden line under a QUESTIONS.md item, so the page reads them without guessing."""
+    return "<!-- ask: " + json.dumps(ask, ensure_ascii=False).replace("-->", "--\\u003e") + " -->"
+
+
+def ask_of(text: str) -> tuple[dict | None, str]:
+    """(the parts, the text without their line) of a QUESTIONS.md item; (None, text) for an item in free words."""
+    m = ASK_MARK_RE.search(text or "")
+    if not m:
+        return None, text
+    try:
+        ask = json.loads(m.group(1))
+    except ValueError:
+        return None, text
+    return (ask if isinstance(ask, dict) and ask.get("q") and ask.get("options") else None), (text[:m.start()] + text[m.end():]).rstrip()
+
+
 def split_thread(text: str) -> tuple[str, list[dict]]:
     """An item's text without its title line split into the body and the `> **Name, when:** …` thread."""
     body, thread = [], []
@@ -1435,7 +1553,7 @@ class MarkdownTasks:
                 "waits": clip(waits.group(0), 110) if waits else "",
                 "waits_owner": bool(waits and by_owner(waits.group(0), words)),
                 "detail": clip(body.strip(), 700),
-                "images": item_images(root, text),
+                "images": item_images(root, text), "ask": None,   # a question in parts lives in QUESTIONS.md
                 # the owner wrote last under the ticket: the agent's move, whatever the ticket says it waits for
                 "owner_last": bool(comments and by_owner(comments[-1][0], words)),
                 "deferred": bool(DEFERRED_RE.search(text.split("\n\n", 1)[0])),
@@ -1486,6 +1604,7 @@ class MarkdownTasks:
             path = " / ".join(heads[1:])
             if not path:
                 continue
+            ask, text = ask_of(text)   # a question in parts carries them on a hidden line
             key, body = bold_title(text)
             title = key
             code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)\.\s*", title)
@@ -1505,7 +1624,7 @@ class MarkdownTasks:
             else:
                 group = "owner"
             out.append({"group": group, "path": path, "key": key, "title": title, "text": text,
-                        "body": body, "comments": comments})
+                        "body": body, "comments": comments, "ask": ask})
         return out
 
     def questions(self, full: bool = False) -> dict:
@@ -1533,7 +1652,7 @@ class MarkdownTasks:
                     "doc": "QUESTIONS.md", "key": f"**{key}**" if key else q["text"].split("\n", 1)[0][:80],
                     "detail": clip(re.split(r"\n\s*>", body, maxsplit=1)[0], 700),
                     "last": clip(re.sub(r"^\s*>\s*", "", comments[-1][1]), 400) if comments else "",
-                    "images": item_images(root, q["text"]),
+                    "images": item_images(root, q["text"]), "ask": q["ask"],
                 })
         if full:
             res["items"] = self._question_pages(text_all, res)
@@ -1550,9 +1669,11 @@ class MarkdownTasks:
                 wanted.append((key, "turn", {"title": title, "images": item_images(self.root, text)}))
         items = []
         for key, state, x in wanted:
-            body, thread = split_thread(bold_title(all_q.get(key, ""))[1])
+            ask, text = ask_of(all_q.get(key, ""))
+            body, thread = split_thread(bold_title(text)[1])
             items.append({"key": key, "state": state, "title": x["title"], "pick": x.get("pick", ""),
-                          "images": x.get("images", []), "body": body, "thread": thread, "doc": "QUESTIONS.md"})
+                          "images": x.get("images", []), "body": body, "thread": thread, "doc": "QUESTIONS.md",
+                          "ask": ask})
         return items
 
     def comment(self, ref: dict, author: str, when: str, text: str) -> dict:
@@ -1585,6 +1706,24 @@ class MarkdownTasks:
         return {"how": how, "path": str(qpath), "lines": added,
                 "next": {**ref, "kind": "question", "doc": "QUESTIONS.md", "key": f"**{title}**", "code": "",
                          "title": title}}
+
+    def ask(self, tid: str, ask: dict, when: str | None = None) -> dict:
+        """A question for the owner in parts, as a new item on top of their open questions in QUESTIONS.md: the
+        words every reader knows, then the parts on a hidden line the page reads. Returns the item's key."""
+        ru, when = self.russian(), when or dt.datetime.now().strftime("%d.%m")
+        qpath = self.root / "docs" / "QUESTIONS.md"
+        qlines = read(qpath).split("\n") if qpath.is_file() else ["# QUESTIONS — what waits for a human", ""]
+        if not any(re.match(r"^## ", x) for x in qlines):
+            qlines += ["## For the owner", ""]
+        code = ticket_id(tid) if tid and re.fullmatch(r"(?i)b?\d+", tid.strip()) else ""
+        key = f"**{ask['q'].rstrip('. ')} ({code + ', ' if code else ''}{when})**"
+        end = open_slot(qlines, owner_words(self.cfg))
+        body = [f"  {x}" for x in ask_text(ask, ru).split("\n")[1:] if x.strip()]
+        item = [f"- {key}", *body, f"  {ask_mark(ask)}", ""]
+        if end > 0 and qlines[end - 1].strip():
+            item.insert(0, "")
+        insert_block(qpath, qlines, end, item)
+        return {"key": key, "path": str(qpath)}
 
     def take_back(self, placed: dict) -> bool:
         """Remove what `comment` added, if it is still there untouched."""
@@ -3828,9 +3967,8 @@ def pack_prompt(s: dict, tickets: list[dict], budget: float, name: str,
                 lane: tuple[int, int] = (1, 1), others: list[dict] | None = None, store: bool = False,
                 history: list[str] | None = None) -> str:
     k, n = lane
-    ask = ("goes under its task: `agentdrop task ask B<n> \"…\"` (the question, the options, your pick), or "
-           "`agentdrop task state B<n> waiting_others \"<whom>: …\"`" if store else
-           "goes to docs/QUESTIONS.md as its own item (the question, the options, your pick)")
+    ask = (f"goes under its task: {ASK_HOW}, or `agentdrop task state B<n> waiting_others \"<whom>: …\"`" if store else
+           f"goes to docs/QUESTIONS.md as its own item: {ASK_HOW}")
     lines = [f"Autonomous run in the project in this directory ({s['project']}), started by `agentdrop pack` "
              f"at {name}'s request. Nobody is watching: you can't ask {name} anything. Anything that needs their "
              f"decision or other people {ask}; then carry on with a reversible default.", "",
@@ -3985,7 +4123,8 @@ def reply_lines(tid: str, name: str, words: list[dict]) -> list[str]:
             *(f"> [{c['at']}] " + c["text"].replace("\n", "\n> ") for c in words), "",
             f"Answer {name} in the thread first, before any other work: `agentdrop task comment {tid} \"…\"`, what you "
             "understood and what you will do; then go on with the task with their words in mind, and answer again "
-            f"in the thread with the result (or `agentdrop task ask {tid}` if you need their decision). The thread is "
+            f"in the thread with the result (or `agentdrop task ask {tid} \"<question>\" --option … --pick …` if you "
+            "need their decision). The thread is "
             f"where {name} reads you; the final brief is still the last message."]
 
 
@@ -4192,14 +4331,14 @@ def collect_items(root: Path, cfg: dict) -> tuple[dict, list[dict]]:
                       "title": t["title"], "priority": t["priority"], "section": t["section"],
                       "state": state.get(t["id"], "next"), "why": t["why"], "waits": t["waits"],
                       "body": t["body"], "thread": t["thread"],
-                      "images": t["images"], "doc": t["doc"]})
+                      "images": t["images"], "doc": t["doc"], "ask": t.get("ask")})
     for x in src.questions(full=True)["items"]:
         code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)", x["key"])
         items.append({"id": f"{prefix}-{x.get('id') or 'q' + sha(x['key'].encode())[:6]}", "project": prefix,
                       "code": code.group(1) if code else "", "kind": "question", "title": x["title"],
                       "priority": "", "section": "QUESTIONS", "state": x["state"], "why": "", "waits": "",
                       "pick": x["pick"], "body": x["body"], "thread": x["thread"],
-                      "images": x["images"], "doc": x["doc"]})
+                      "images": x["images"], "doc": x["doc"], "ask": x.get("ask")})
     have = {i["code"] for i in items}
     for d in src.done():   # closed tickets, so a link from another ticket opens something
         if d["id"] not in have:
@@ -4253,6 +4392,13 @@ def cmd_tickets(argv: list[str]) -> int:
                     real = f"{proj['key']}:{f.relative_to(root).as_posix()}"
                     docs["refs"][f"{proj['key']}:{ref}"] = real
                     docs["files"].setdefault(real, f.read_text(encoding="utf-8", errors="replace"))
+            if a.docs and (it.get("ask") or {}).get("pics"):   # a question's pictures, checked again: inside the project
+                pics = []
+                for x in it["ask"]["pics"]:
+                    rel, why = ask_picture(root, x.get("path", ""))
+                    if not why:
+                        pics.append({**x, "src": page_image(root / rel, Path(a.docs).parent / "img")})
+                it["ask"] = {**it["ask"], "pics": pics}
             if a.docs and it["state"] != "done":   # screenshots it names, a file or a folder of them, shown inline
                 pics = []
                 for ref in re.findall(r"`([^`\s]+)`", text) + re.findall(r"[\w./-]+\.(?:png|jpe?g|webp)\b", text, re.I):
@@ -4264,7 +4410,9 @@ def cmd_tickets(argv: list[str]) -> int:
                         if p.is_file() and p.suffix.lower() in IMG_EXT:
                             pics.append(p)
                             break
-                pics = list(dict.fromkeys(pics))[:8]
+                asked = {(root / x["path"]).resolve() for x in (it.get("ask") or {}).get("pics", [])}
+                inside = lambda x: root.resolve() in x.resolve().parents   # never a file outside the project
+                pics = [x for x in dict.fromkeys(pics) if inside(x) and x.resolve() not in asked][:8]
                 if pics:
                     docs.setdefault("images", {})[it["id"]] = [
                         {"src": page_image(x, Path(a.docs).parent / "img"), "name": x.stem} for x in pics]
@@ -4422,6 +4570,7 @@ CREATE TABLE IF NOT EXISTS comments (    -- a task's thread, in order
   author TEXT NOT NULL,
   at TEXT NOT NULL,                      -- as written: "26.09" or "26.09 14:05"
   text TEXT NOT NULL,
+  ask TEXT NOT NULL DEFAULT '',          -- a question in parts (`task ask`), JSON; '' for words alone
   PRIMARY KEY (project, task, n),
   FOREIGN KEY (project, task) REFERENCES tasks(project, id)
 );
@@ -4459,6 +4608,12 @@ def store_open() -> sqlite3.Connection:
                            " ALTER TABLE tasks_new RENAME TO tasks; COMMIT;")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(STORE_SCHEMA)
+    if "ask" not in {c[1] for c in conn.execute("PRAGMA table_info(comments)")}:   # a store from before questions in parts
+        try:
+            conn.execute("ALTER TABLE comments ADD COLUMN ask TEXT NOT NULL DEFAULT ''")
+            conn.commit()
+        except sqlite3.OperationalError:   # another process added it first
+            pass
     return conn
 
 
@@ -4513,8 +4668,18 @@ def store_records(conn: sqlite3.Connection, project: str, tid: str | None = None
         r = {"id": row["id"], **{f: row[f] for f in STORE_FIELDS}, "updated": row["updated"]}
         r["after"] = [x[0] for x in conn.execute(
             "SELECT after FROM links WHERE project = ? AND task = ? ORDER BY after", (project, row["id"]))]
-        r["thread"] = [dict(x) for x in conn.execute(
-            "SELECT author, at, text FROM comments WHERE project = ? AND task = ? ORDER BY n", (project, row["id"]))]
+        rows = conn.execute("SELECT author, at, text, ask FROM comments WHERE project = ? AND task = ? ORDER BY n",
+                            (project, row["id"])).fetchall()
+        r["thread"] = [{"author": x["author"], "at": x["at"], "text": x["text"]} for x in rows]
+        r["ask"] = None   # the latest question in parts, while nobody has answered under it
+        for k, x in enumerate(rows):
+            if x["ask"]:
+                try:
+                    r["ask"] = {**json.loads(x["ask"]), "n": k, "author": x["author"], "at": x["at"]}
+                except ValueError:
+                    pass
+            elif r["ask"] and x["author"] and x["author"] != r["ask"]["author"]:
+                r["ask"] = None
         out.append(r)
     return out
 
@@ -4773,6 +4938,7 @@ class StoreTasks:
             "owner_last": bool(said and by_owner(said[-1]["author"], words)),
             "deferred": state == "deferred", "after": list(r["after"]), "mode": r["mode"],
             "last": thread_head(said[-1]) if said else "",
+            "ask": r.get("ask") if state == "waiting_you" else None,   # the open question in parts
         }
         if full:
             t.update(body=r["text"], thread=[{"author": c["author"], "when": c["at"], "text": c["text"]} for c in r["thread"]],
@@ -4860,7 +5026,8 @@ class StoreTasks:
             said = [c for c in r["thread"] if c["author"]]
             thread = [{"author": c["author"], "when": c["at"], "text": c["text"]} for c in r["thread"]]
             page = {"key": q["key"], "id": r["id"], "state": group, "title": title, "pick": "",
-                    "images": self._images(r), "body": r["text"], "thread": thread, "doc": STORE_DOC}
+                    "images": self._images(r), "body": r["text"], "thread": thread, "doc": STORE_DOC,
+                    "ask": r.get("ask") if group == "owner" else None}
             if group == "turn":
                 res["your_turn"].append(clip(title.rstrip(". "), 90))
                 pages.append(page)
@@ -4870,7 +5037,7 @@ class StoreTasks:
             item = {"title": clip(title.rstrip(". "), 160), "context": clip(para, 220),
                     "pick": clip(reco.group(0), 200) if reco else "", "thread": len(said),
                     "doc": STORE_DOC, "key": f"**{q['key']}**", "detail": clip(r["text"], 700),
-                    "last": thread_head(said[-1]) if said else "", "images": page["images"]}
+                    "last": thread_head(said[-1]) if said else "", "images": page["images"], "ask": page["ask"]}
             res["waiting"].append(item)
             pages.append({**page, "title": item["title"], "pick": item["pick"]})
         if full:   # the waiting ones first, then those the agent has to act on, as the markdown page lists them
@@ -4969,12 +5136,16 @@ class StoreTasks:
         self._event(conn, r["id"], author, "state", detail)
         r["state"], r["waits"] = state, waits
 
-    def _comment(self, conn, tid: str, author: str, text: str, when: str | None = None, event_author: str | None = None) -> int:
+    def _comment(self, conn, tid: str, author: str, text: str, when: str | None = None, event_author: str | None = None,
+                 ask: dict | None = None) -> int:
         n = conn.execute("SELECT COALESCE(MAX(n) + 1, 0) FROM comments WHERE project = ? AND task = ?",
                          (self.project, tid)).fetchone()[0]
         c = {"author": author, "at": when or dt.datetime.now().strftime("%d.%m %H:%M"), "text": text.strip()}
-        conn.execute("INSERT INTO comments (project, task, n, author, at, text) VALUES (?, ?, ?, ?, ?, ?)",
-                     (self.project, tid, n, c["author"], c["at"], c["text"]))
+        conn.execute("INSERT INTO comments (project, task, n, author, at, text, ask) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (self.project, tid, n, c["author"], c["at"], c["text"],
+                      json.dumps(ask, ensure_ascii=False) if ask else ""))
+        if ask:
+            c["ask"] = ask
         conn.execute("UPDATE tasks SET updated = ? WHERE project = ? AND id = ?",
                      (dt.datetime.now().astimezone().isoformat(timespec="seconds"), self.project, tid))
         self._event(conn, tid, event_author or author, "comment", c)
@@ -5050,14 +5221,16 @@ class StoreTasks:
                 self._state(conn, r, "queued", event_author or author, "")
         return self.record(r["id"])
 
-    def ask(self, tid: str, author: str, text: str, event_author: str | None = None) -> dict:
-        """A question for the owner under the task: it goes in the thread and the task waits for them."""
+    def ask(self, tid: str, author: str, ask: dict, event_author: str | None = None) -> dict:
+        """A question for the owner under the task, in parts (`ask_parts`): it goes in the thread as words with
+        the parts beside them, and the task waits for them."""
+        text = ask_text(ask, self.russian())
         with self._write() as conn:
             r = self._one(conn, self._resolve(tid))
             if r is None:
                 raise KeyError(tid)
-            self._comment(conn, r["id"], author, text, event_author=event_author)
-            self._state(conn, r, "waiting_you", event_author or author, clip(text, 110))
+            self._comment(conn, r["id"], author, text, event_author=event_author, ask=ask)
+            self._state(conn, r, "waiting_you", event_author or author, clip(ask["q"], 110))
         return self.record(r["id"])
 
     def handin(self, tid: str, author: str, note: str = "", event_author: str | None = None) -> dict:
@@ -5233,9 +5406,25 @@ def cmd_task(argv: list[str]) -> int:
                                   "deferred (or their names: «Ждёт других людей», …)")
     sp.add_argument("note", nargs="?", default="", help="For a waiting state: whom or what it waits for; else a comment")
     sp.add_argument("--after", action="append", default=[], help="With waiting_task: the task it waits for (repeatable)")
-    sp = sub.add_parser("ask", parents=[common], help="A question for the owner under the task; it then waits for them")
+    sp = sub.add_parser("ask", parents=[common], help="A question for the owner under the task, in parts: it reads in "
+                                                       "five seconds and is answered by one tap; the task then waits for "
+                                                       "them (works in a markdown project too: a new item in QUESTIONS.md)",
+                        epilog='example: agentdrop task ask B12 "Which layout goes to the home page?" --option "Two '
+                               'columns" --option "One column" --pick 1 --details "specs/B12.md: …" --design '
+                               '--pic docs/shots/two.png --pic docs/shots/one.png')
     sp.add_argument("task")
-    sp.add_argument("text")
+    sp.add_argument("text", metavar="question", help=f"The question itself, one line, at most {ASK_Q_MAX} characters; "
+                                                     "no file paths or task codes")
+    sp.add_argument("--option", action="append", default=[], help=f"An option, {ASK_OPTS[0]}–{ASK_OPTS[1]} of them, "
+                                                                  f"each at most {ASK_OPT_MAX} characters")
+    sp.add_argument("--pick", default="", help="The option you would take: its number (1..) or letter")
+    sp.add_argument("--details", default="", help="Anything else, any length: context, numbers, file paths, task codes")
+    sp.add_argument("--design", action="store_true", help="About how something looks (a screen, layout, colours): "
+                                                          "needs pictures")
+    sp.add_argument("--pic", action="append", default=[], help="A picture for each option, in their order "
+                                                               "(a file inside the project)")
+    sp.add_argument("--before", default="", help="With --after: a before/after pair instead of --pic")
+    sp.add_argument("--after", default="", help="With --before: the picture of how it will be")
     sp = sub.add_parser("comment", parents=[common], help="Add to the task's thread")
     sp.add_argument("task")
     sp.add_argument("text")
@@ -5269,6 +5458,17 @@ def cmd_task(argv: list[str]) -> int:
         else:
             print(f"{root.name}: tasks live in docs/TODO.md and docs/QUESTIONS.md")
         return 0 if store else 1
+    if a.action == "ask":   # the form is checked the same way wherever the question goes
+        ask, bad = ask_parts(root, a.text, a.option, a.pick, a.details, a.pic, a.before, a.after, a.design,
+                             src.russian())
+        if bad:
+            print("agentdrop task ask: the question was not asked; fix and ask again:\n"
+                  + "\n".join(f"- {b}" for b in bad), file=sys.stderr)
+            return 2
+        if not isinstance(src, StoreTasks):
+            placed = src.ask(a.task, ask)
+            print(f"✓ QUESTIONS.md: {placed['key'].strip('*')} [{STATE_NAMES['waiting_you'][src.russian()]}]")
+            return 0
     if not isinstance(src, StoreTasks):
         print(f"agentdrop task: {root.name} keeps its tasks in docs/TODO.md (no `tasks.{root.name} = store` in the "
               f"config); use `agentdrop claim` and the docs", file=sys.stderr)
@@ -5317,7 +5517,7 @@ def cmd_task(argv: list[str]) -> int:
                 return 2
             t = src.set_state(a.task, state, author, a.note, a.after, who=who)
         elif a.action == "ask":
-            t = src.ask(a.task, who, a.text, event_author=author)
+            t = src.ask(a.task, who, ask, event_author=author)
         elif a.action == "comment":
             t = src.add_comment(a.task, who, a.text, event_author=author)
         else:

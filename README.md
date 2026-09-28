@@ -117,11 +117,15 @@ A line `tasks.<folder> = store` in `~/.agentdrop/config` moves a project to the 
 agentdrop task where                 # store or markdown
 agentdrop task take [B12]            # claim one task (default: the next one) and print it: text, thread, links, files it names
 agentdrop task comment B12 "…"       # add to its thread
-agentdrop task ask B12 "…"           # a question for you; the task waits for you, the run lets go
+agentdrop task ask B12 "Which layout goes to the home page?" --option "Two columns" --option "One list" --pick 1 \
+    [--details "…"] [--design --pic a.png --pic b.png | --before a.png --after b.png]
+                                     # a question for you in parts; the task waits for you, the run lets go
 agentdrop task state B12 waiting_others "The editors: the layout"   # or any state, by key or glossary name
 agentdrop task handin B12            # to acceptance; then `agentdrop accept B12`, which marks it done on a PASS
 agentdrop task new "Title" --why "«…»" --priority P1 [--after B9] [--question]
 ```
+
+`task ask` takes a question in parts, so it reads in five seconds and is answered by one tap: the question, one line of up to 120 characters; 2 to 4 options of up to 60; the agent's pick; and optional details of any length, the only place for file paths and ticket codes. `--design` marks a question about how something looks, which then needs its pictures, files inside the project: one per option or a before/after pair. A question that breaks the form is not asked, and the agent is told what to fix. In a markdown project the same form goes into `QUESTIONS.md` with a hidden `<!-- ask: … -->` line under the item; questions asked in free words before this still load as they were.
 
 A take is decided under the store's write lock and respects claims made with `agentdrop claim`, so two sessions never get the same task. Every change is journaled with its author: the session, `judge`, or `--as Name`.
 

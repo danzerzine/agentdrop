@@ -175,13 +175,14 @@ class StoreTasks(StoreProject):
         self.assertTrue((self.root / "docs" / ".claims" / "B7.json").is_file())
 
         self.ok("task", "comment", "B7", "Safari rejects the cookie", session="s1")
-        self.ok("task", "ask", "B7", "Drop the old login page? I suggest yes.", session="s1")
+        self.ok("task", "ask", "B7", "Drop the old login page?", "--option", "Yes, drop it", "--option", "Keep it",
+                "--pick", "1", session="s1")
         self.assertEqual(self.state("B7"), "waiting_you")
         self.assertFalse((self.root / "docs" / ".claims" / "B7.json").exists())   # the run let go
         board = self.ok("status")
         waiting = board.split("## Waiting for you", 1)[1].split("##", 1)[0]
         self.assertIn("Fix login on Safari (B7, P1)", waiting)
-        self.assertIn("waits: Drop the old login page? I suggest yes.", waiting)
+        self.assertIn("waits: Drop the old login page?", waiting)
 
         self.ok("task", "comment", "B7", "yes, drop it", "--as", "Owner")
         self.assertEqual(self.state("B7"), "queued")   # answered: the agent's move
