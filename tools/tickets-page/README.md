@@ -1,6 +1,6 @@
 # Tickets page
 
-One page with every ticket and every question for Daniyar across the projects. Each item opens on
+One page with every ticket and every question for you across the projects. Each item opens on
 its own link (`#<project>-<code>`, e.g. `#sd-B110`, `#ss-B101`; questions `#<project>-q<hash>`), and
 the owner answers by commenting on the page; a comment sent to Claude reaches the session that watches it.
 
