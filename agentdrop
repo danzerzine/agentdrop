@@ -1364,7 +1364,8 @@ ASK_HOW = ("`agentdrop task ask B<n> \"<the question, one line>\" --context \"<w
            "--details; the question, the context and the options name things by what a person sees on the screen or "
            "in the result («the summary line at the top of Overview»), not by internal names, file names or other "
            "tasks' codes; a question about how something looks adds --design and a --pic per option or "
-           "--before/--after; in a project with a design doc every question says --design or --no-design)")
+           "--before/--after, each cropped to the part of the screen the question is about and showing what its option "
+           "says; in a project with a design doc every question says --design or --no-design)")
 ASK_MARK_RE = re.compile(r"\n?[ \t]*<!--\s*ask:\s*(\{.*?\})\s*-->", re.S)
 
 
