@@ -34,4 +34,4 @@ This project explores the unknown: the job is to map it wide and deep, find cand
 **Keep the picture honest over time.**
 - A summary across passes has a section "What we learned that we didn't know at the start". An early claim stays only if new evidence stands behind it; otherwise it is marked as the starting hypothesis.
 - When asks start slipping (several "partial" or "lost" in `ASKS.md`), run a fine sieve as its own ticket: reread owner messages, our own reports ("not checked", "later", "next pass") and raw materials; every candidate gets a decision with a reason (new ticket, add to report, covered where, dropped why).
-- Default output of a pass is a markdown report in `docs/research/`. Slides only when the work has an arc from idea to verified findings.
+- Default output of a pass is a markdown report in `docs/research/`. Slides only when the work has an arc from idea to verified findings. Before handing a report over, run the `slovo` skill on it; its top summary gets the deeper pass.
