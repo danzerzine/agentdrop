@@ -3165,6 +3165,8 @@ def cmd_replies(argv: list[str]) -> int:
 RUNS = Path("docs") / ".runs"        # B41.json and B41/ logs; ignored by its own .gitignore
 CHECKS = Path("docs") / "checks"     # one shell command per line, run from the project root
 JUDGE = "claude -p --agent acceptance-judge --allowedTools Read,Grep,Glob,Bash --no-session-persistence"
+JUDGE_MODEL = "sonnet"               # the judge's first look (`judge_model`); the model after a reject or when it
+JUDGE_MODEL_HARD = "opus"            # can't decide (`judge_model_hard`): only for a `claude` judge without its own --model
 ACCEPT_REJECTS = 2                   # one repair, then the second REJECT in a row goes to the owner (one line, two answers)
 SPEC_RE = re.compile(r"(?:docs/)?specs/[\w./-]+\.md")
 VERDICT_SCHEMA = {
@@ -3649,31 +3651,47 @@ def cmd_accept(argv: list[str]) -> int:
         diff.write_text(git(root, "diff", "--no-ext-diff", run["base"]).stdout, encoding="utf-8")
         prompt = judge_prompt(root, tid, run, passed, diff, ru)
         (logs / f"{n}-judge.prompt.md").write_text(prompt, encoding="utf-8")
-        cmd = shlex.split(os.path.expanduser(cfg.get("judge", JUDGE)))
-        if "--agent" in cmd[:-1]:   # no such agent here: the prompt carries the judge's rules anyway
-            k = cmd.index("--agent")
-            if not any((d / ".claude" / "agents" / f"{cmd[k + 1]}.md").is_file() for d in (root, HOME)):
-                del cmd[k:k + 2]
-        if Path(cmd[0]).name == "claude" and "--output-format" not in cmd:
-            cmd += ["--output-format", "stream-json", "--verbose", "--json-schema", json.dumps(VERDICT_SCHEMA)]
-        print(("… судья смотрит (свежая сессия, до {} мин)" if ru else "… the judge is looking (a fresh session, up to {} min)")
-              .format(int(float(cfg.get("judge_timeout_min", 40)))), flush=True)
-        s = run_step(root, runf, run, {"step": "judge", "fp": fp}, cmd, logs / f"{n}-judge.json",
-                     float(cfg.get("judge_timeout_min", 40)) * 60, stdin=prompt,
-                     progress=Progress("судья" if ru else "judge", a.verbose))
-        v = parse_verdict((root / s["log"]).read_text(encoding="utf-8", errors="replace"))
-        if not v:
+        base_cmd = shlex.split(os.path.expanduser(cfg.get("judge", JUDGE)))
+        if "--agent" in base_cmd[:-1]:   # no such agent here: the prompt carries the judge's rules anyway
+            k = base_cmd.index("--agent")
+            if not any((d / ".claude" / "agents" / f"{base_cmd[k + 1]}.md").is_file() for d in (root, HOME)):
+                del base_cmd[k:k + 2]
+        claude_judge = Path(base_cmd[0]).name == "claude"
+        if claude_judge and "--output-format" not in base_cmd:
+            base_cmd += ["--output-format", "stream-json", "--verbose", "--json-schema", json.dumps(VERDICT_SCHEMA)]
+        # the first look on the lighter model; after a reject (this round's reject goes to the owner) the stronger one
+        hard = rejects_in_a_row(run, since) >= 1
+        models = [] if not claude_judge or "--model" in base_cmd else \
+            [cfg.get("judge_model_hard", JUDGE_MODEL_HARD)] if hard else \
+            [cfg.get("judge_model", JUDGE_MODEL), cfg.get("judge_model_hard", JUDGE_MODEL_HARD)]
+        for m_i, model in enumerate(models or [""]):
+            cmd = base_cmd + (["--model", model] if model else [])
+            print(("… судья смотрит (свежая сессия{}, до {} мин)" if ru else "… the judge is looking (a fresh session{}, up to {} min)")
+                  .format(f", {model}" if model else "", int(float(cfg.get("judge_timeout_min", 40)))), flush=True)
+            s = run_step(root, runf, run, {"step": "judge", "fp": fp, **({"model": model} if model else {})}, cmd,
+                         logs / f"{n}-judge.json", float(cfg.get("judge_timeout_min", 40)) * 60, stdin=prompt,
+                         progress=Progress("судья" if ru else "judge", a.verbose))
+            n += 1
+            v = parse_verdict((root / s["log"]).read_text(encoding="utf-8", errors="replace"))
+            if not v:
+                save_run(runf, run)
+                print((f"! Судья не дал вердикта (exit {s.get('exit')}). Лог: {s['log']}, ошибки: "
+                       f"{Path(s['log']).with_suffix('.err')}\n{tail(root / s['log'], 15)}") if ru else
+                      (f"! The judge gave no verdict (exit {s.get('exit')}). Log: {s['log']}, errors: "
+                       f"{Path(s['log']).with_suffix('.err')}\n{tail(root / s['log'], 15)}"), file=sys.stderr)
+                return 1
+            try:
+                s["cost_usd"] = round(float((claude_result((root / s["log"]).read_text(encoding="utf-8")) or {})["total_cost_usd"]), 2)
+            except (ValueError, KeyError, TypeError):
+                pass
+            s.update(verdict=v["verdict"], summary=v["summary"], findings=v["findings"])
+            if v["verdict"] != "BLOCKED" or m_i + 1 >= len(models):
+                break
+            # the lighter judge can't decide: the stronger one looks before it goes to the owner
+            s["light_verdict"] = s.pop("verdict")   # kept for the record; the stronger model's verdict counts
             save_run(runf, run)
-            print((f"! Судья не дал вердикта (exit {s.get('exit')}). Лог: {s['log']}, ошибки: "
-                   f"{Path(s['log']).with_suffix('.err')}\n{tail(root / s['log'], 15)}") if ru else
-                  (f"! The judge gave no verdict (exit {s.get('exit')}). Log: {s['log']}, errors: "
-                   f"{Path(s['log']).with_suffix('.err')}\n{tail(root / s['log'], 15)}"), file=sys.stderr)
-            return 1
-        try:
-            s["cost_usd"] = round(float((claude_result((root / s["log"]).read_text(encoding="utf-8")) or {})["total_cost_usd"]), 2)
-        except (ValueError, KeyError, TypeError):
-            pass
-        s.update(verdict=v["verdict"], summary=v["summary"], findings=v["findings"])
+            print("· судья не решил; смотрит более сильная модель" if ru else
+                  "· the judge could not decide; the stronger model looks", flush=True)
 
     # 3. where the verdict goes
     rejects = rejects_in_a_row(run, since)
@@ -4112,6 +4130,8 @@ def cmd_dispatch(argv: list[str]) -> int:
 
 PACK_WORKER = "claude -p --permission-mode bypassPermissions"
 PACK_EFFORT = "medium"               # low effort came back rejected by the judge; medium is the chosen balance
+PACK_MAX = 3            # tasks one session of a run takes at most (`pack_max`): a break loses less, context stays small
+PACK_COMPACT = 150000   # a run's session compacts its context at this many tokens (`pack_compact_tokens`)
 PACK_DIR = RUNS / "pack"             # <stamp>.prompt.md, .jsonl (the session), .err, .pid
 
 
@@ -4367,7 +4387,8 @@ def cmd_pack(argv: list[str]) -> int:
                                             "or for another open ticket, not marked [with owner]) in priority order "
                                             "as one prompt; --run starts it as headless sessions in the background.")
     p.add_argument("path", nargs="?", default=".", help="Project directory (default: here)")
-    p.add_argument("-n", type=int, default=5, help="How many tickets (default 5)")
+    p.add_argument("-n", type=int, default=PACK_MAX, help=f"How many tickets (default {PACK_MAX}; with --run at "
+                                                             f"most `pack_max`, {PACK_MAX}, a session)")
     p.add_argument("-j", type=int, default=1, help="Sessions working at once, the tickets dealt between them "
                                                     "(default 1); the budget is split evenly")
     p.add_argument("--only", help="These tickets instead of the frontier, in this order: B6,B108")
@@ -4432,6 +4453,11 @@ def cmd_pack(argv: list[str]) -> int:
         print("· nothing on the frontier: every open ticket waits for someone or for another ticket")
         return 1
     j = max(1, min(a.j, len(tickets)))
+    cap = int(cfg.get("pack_max", PACK_MAX)) * j
+    if a.run and len(tickets) > cap:   # a long run loses more when it breaks and reads its whole context every turn
+        print(f"· a run takes at most {cap // j} tasks a session; {', '.join(t['id'] for t in tickets[cap:])} "
+              "stay in the queue")
+        tickets = tickets[:cap]
     lanes = [tickets[k::j] for k in range(j)]   # dealt in priority order: lane 1 gets the 1st, (j+1)th, …
     budget = a.budget / j
     name = owner_name(cfg, s["ru"])
@@ -4480,12 +4506,17 @@ def cmd_pack(argv: list[str]) -> int:
         cmd = shlex.split(os.path.expanduser(cfg.get("pack_worker", PACK_WORKER)))
         if resume:
             cmd += ["--resume", resume]
+        compact = str(cfg.get("pack_compact_tokens", PACK_COMPACT))
+        if Path(cmd[0]).name == "claude" and "--settings" not in cmd:
+            cmd += ["--settings", json.dumps({"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": compact}})]
         if Path(cmd[0]).name == "claude":
             cmd += ["--output-format", "stream-json", "--verbose", "--max-budget-usd", f"{budget:g}",
                     "--effort", effort] + ([] if resume else ["-n", f"pack-{root.name}-{name_k}"])
         with pf.open(encoding="utf-8") as inp, (d / f"{name_k}.jsonl").open("w") as out, \
                 (d / f"{name_k}.err").open("w") as err:
-            proc = subprocess.Popen(cmd, cwd=root, stdin=inp, stdout=out, stderr=err, **detach)
+            # the user's settings.json env wins over a process env var in claude, so claude gets it as --settings
+            env = {**os.environ, "CLAUDE_CODE_AUTO_COMPACT_WINDOW": compact}
+            proc = subprocess.Popen(cmd, cwd=root, stdin=inp, stdout=out, stderr=err, env=env, **detach)
         (d / f"{name_k}.pid").write_text(str(proc.pid))
         if store:
             for t in lane:

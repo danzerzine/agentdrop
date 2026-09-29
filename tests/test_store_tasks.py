@@ -86,6 +86,18 @@ print(json.dumps({{'type': 'result', 'structured_output': {{'verdict': 'REJECT',
     'findings': [{{'severity': 'blocker', 'what': 'the cookie is lost on Safari'}}]}}}}))
 """
 
+# a `claude` judge: logs the model it was given; the light model can't decide, the strong one rejects
+JUDGE_CLAUDE = """#!{py}
+import json, sys
+sys.stdin.read()
+model = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else ''
+with open({log!r}, 'a', encoding='utf-8') as f:
+    f.write(model + '\\n')
+v = 'BLOCKED' if model == 'sonnet' else 'REJECT'
+print(json.dumps({{'type': 'result', 'structured_output': {{'verdict': v, 'summary': 'Safari still drops the cookie',
+    'findings': [{{'severity': 'blocker', 'what': 'the cookie is lost on Safari'}}]}}}}))
+"""
+
 
 class StoreProject(unittest.TestCase):
     def setUp(self):
@@ -215,6 +227,27 @@ class StoreTasks(StoreProject):
         self.assertEqual([c["author"] for c in self.rows("SELECT author FROM comments WHERE task = 'B7' ORDER BY n")],
                          ["shell", "shell", "Owner", "shell", "judge"])
         self.assertEqual(self.snapshot(), self.docs)   # the markdown was never touched
+
+    def test_the_judge_looks_on_sonnet_first_and_on_opus_when_it_matters(self):
+        """The first look is on the lighter model; when it can't decide the stronger one looks; after a reject
+        (the round whose reject goes to the owner) only the stronger one."""
+        self.to_store()
+        claude = self.home / "bin" / "claude"
+        claude.parent.mkdir()
+        claude.write_text(JUDGE_CLAUDE.format(py=sys.executable, log=str(self.home / "models.txt")), encoding="utf-8")
+        claude.chmod(0o755)
+        self.config(f"judge = {claude} -p\n", append=True)
+        self.ok("task", "take", "B7", session="s1")
+        for k, code in ((1, 1), (2, 3)):
+            if k == 2:
+                self.ok("task", "take", "B7", session="s1")
+            (self.root / "login.py").write_text(f"fixed = {k}\n", encoding="utf-8")
+            self.git("add", "-A")
+            self.git("commit", "-qm", f"B7 try {k}")
+            self.ok("task", "handin", "B7", f"try {k}", session="s1")
+            r = self.run_ad("accept", "B7")
+            self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+        self.assertEqual((self.home / "models.txt").read_text(encoding="utf-8").split(), ["sonnet", "opus", "opus"])
 
     def test_second_reject_in_a_row_asks_the_owner_with_two_options(self):
         self.to_store()
@@ -428,6 +461,18 @@ class Runs(StoreProject):
     def run_of(self, tid):
         runs = self.root / "docs" / ".runs" / "pack"
         return max((f for f in runs.glob("*.prompt.md") if f"({tid}, " in f.read_text()), key=lambda f: f.stat().st_mtime)
+
+    def test_a_run_takes_three_tasks_and_compacts_at_150k(self):
+        env_log = self.home / "env.txt"
+        (self.home / "envworker.py").write_text(
+            "import os, re, sys\n"
+            f"open({str(env_log)!r}, 'w').write(os.environ.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW', '') + ' ' + "
+            "' '.join(re.findall(r'^\\d+\\. .*\\((B\\d+), ', sys.stdin.read(), re.M)))\n", encoding="utf-8")
+        self.config(f"pack_worker = {sys.executable} {self.home / 'envworker.py'}\n", append=True)
+        out = self.ok("pack", "--only", "B7,B8,B9,B10", "--run")
+        self.assertIn("B10 stay in the queue", out)
+        self.wait(lambda: env_log.exists() and env_log.read_text(), "the worker")
+        self.assertEqual(env_log.read_text().split(), ["150000", "B7", "B8", "B9"])
 
     def test_start_stop_only_this_run_continue_with_history(self):
         self.ok("pack", "--only", "B7", "--run")
