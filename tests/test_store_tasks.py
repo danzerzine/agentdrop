@@ -311,6 +311,22 @@ class StoreTasks(StoreProject):
         self.ok("task", "focus", "B9", "--off")
         self.assertEqual(self.rows("SELECT id FROM tasks WHERE focus != ''"), [])
 
+    def test_todo_is_printed_from_the_store(self):
+        """`store print` writes docs/TODO.md from the store with a do-not-edit head; `store check` then finds
+        no difference, and a hand edit makes it fail until the next print."""
+        self.to_store()
+        self.ok("task", "comment", "B9", "Started on it")
+        self.assertIn("printed", self.ok("store", "print"))
+        todo = (self.root / "docs" / "TODO.md").read_text(encoding="utf-8")
+        self.assertIn("agentdrop store print", todo.splitlines()[2])
+        self.assertIn("Started on it", todo)
+        self.assertIn("docs/TODO.md is what the store gives", self.ok("store", "check"))
+        self.assertIn("unchanged", self.ok("store", "print"))
+        (self.root / "docs" / "TODO.md").write_text(todo + "\n- a hand edit\n", encoding="utf-8")
+        self.assertEqual(self.run_ad("store", "check").returncode, 1)
+        self.ok("store", "print")
+        self.assertIn("docs/TODO.md is what the store gives", self.ok("store", "check"))
+
     def test_new_task_states_by_name_and_no_reimport(self):
         self.to_store()
         self.assertIn("✓ B16: Share the chart [Waits for another task]",

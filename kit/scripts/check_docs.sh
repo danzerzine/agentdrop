@@ -51,7 +51,7 @@ if [ -z "${GIT_DIR:-}" ] && [ -d .git-docs ]; then
 fi
 
 allowed='^(AGENTS|CLAUDE|GEMINI|README|LOCAL|CHANGELOG|CONTRIBUTING|LICENSE)\.md$'
-allowed+='|^docs/(CONTEXT|DECISIONS|CONVENTIONS|PITFALLS|OPERATIONS|STATE|TODO|QUESTIONS|LOG)\.md$'
+allowed+='|^docs/(CHARTER|CONTEXT|DECISIONS|CONVENTIONS|PITFALLS|OPERATIONS|STATE|TODO|QUESTIONS|LOG)\.md$'
 allowed+='|^docs/(specs|research|reviews/inbox|archive|shots)/'
 allowed+='|(^|/)README\.md$'
 allowed+='|^\.(claude|serena|github|codex|gemini|agents)/'

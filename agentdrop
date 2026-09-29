@@ -98,7 +98,7 @@ START_HOOK_CMD = '"$CLAUDE_PROJECT_DIR"/scripts/check_docs.sh --session-start'
 # agentdrop ever shipped or wrote, "known:" in KIT_LOCK) is kept and the run says how to merge.
 # Project-specific tweaks go to .docs-allow, AGENTS.md and the project's own extra checks,
 # PROJECT_CHECKS, which the guard runs and agentdrop never writes.
-OWNED = {"scripts/check_docs.sh", ".githooks/pre-commit", ".claude/skills/review-intake/SKILL.md",
+OWNED = {"scripts/check_docs.sh", "docs/CHARTER.md", ".githooks/pre-commit", ".claude/skills/review-intake/SKILL.md",
          ".claude/skills/harvest/SKILL.md", ".claude/skills/grill/SKILL.md", "scripts/owner_asks.py", ".claude/agents/skeptic.md",
          ".claude/agents/acceptance-judge.md"}
 PROJECT_CHECKS = "scripts/check_docs.local.sh"
@@ -4996,6 +4996,36 @@ def store_counts(records: list[dict]) -> str:
             f"{n(sum(len(r['after']) for r in records), '«after» link')}")
 
 
+TODO_HEAD = {True: "# TODO — тикеты\n\n> Файл печатает agentdrop из базы задач (`agentdrop store print`), заново каждую ночь. "
+                   "Не править: правка пропадёт при следующей печати. Задачи: `agentdrop task take|show|comment|new`.\n",
+             False: "# TODO — tickets\n\n> agentdrop prints this file from the task store (`agentdrop store print`) "
+                    "every night. Do not edit: the next print drops the edit. Tasks: `agentdrop task take|show|comment|new`.\n"}
+
+
+def store_todo(root: Path, cfg: dict | None = None) -> str:
+    """docs/TODO.md as the store gives it: the open tickets by section, one short item each (its head line,
+    state, summary and last message); the body and the whole thread are in `agentdrop task show`."""
+    src = StoreTasks(root, cfg)
+    recs = src.records()
+    ru = src.russian(recs)
+    tickets = sorted((r for r in recs if r["kind"] == "ticket" and r["state"] != "done"),
+                     key=lambda r: (section_rank(r["section"]), r["position"], r["id"]))
+    out, sec = [TODO_HEAD[ru]], None
+    for r in tickets:
+        if r["section"] != sec:
+            sec = r["section"]
+            out.append(f"## {sec or ('Дальше' if ru else 'Next')}\n")
+        head = src.render({**r, "text": "", "thread": []}).split("\n", 1)[0]
+        lines = [clip(head, 300) + f" _{'Состояние' if ru else 'State'}: {STATE_NAMES[r['state']][ru]}._"]
+        if r["summary"]:
+            lines.append(f"{'Коротко' if ru else 'Summary'}: {r['summary']}")
+        said = [c for c in r["thread"] if c["author"]]
+        if said:
+            lines.append("> " + clip(thread_head(said[-1]), 300))
+        out.append("\n".join(lines) + "\n")
+    return "\n".join(out)
+
+
 def cmd_store(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="agentdrop store",
                                 description=f"The task store ({store_path()}, AGENTDROP_STORE to use another). "
@@ -5003,13 +5033,33 @@ def cmd_store(argv: list[str]) -> int:
     sub = p.add_subparsers(dest="action", required=True)
     for name, text in (("import", "Copy a project's tickets and questions from its markdown into the store "
                                   "(again: only what changed, never twice)"),
-                       ("check", "Compare the store with the project's markdown; exit 1 when they differ")):
+                       ("check", "Compare the store with the project's markdown; exit 1 when they differ "
+                                 "(a project that works from the store: docs/TODO.md with what `print` gives now)"),
+                       ("print", "Print docs/TODO.md from the store (a project that works from the store); "
+                                 "the file is only written when it changes")):
         sp = sub.add_parser(name, help=text, description=text)
         sp.add_argument("path", nargs="?", default=".", help="Project directory (default: the current one)")
         if name == "import":
             sp.add_argument("--force", action="store_true", help="Import even into a project that works from the store")
     a = p.parse_args(argv)
     root, cfg = find_root(Path(a.path)), load_config()
+    if a.action == "print" or (a.action == "check" and in_store(root, cfg)):
+        if not in_store(root, cfg):
+            print(f"agentdrop store: {root.name} keeps its tasks in markdown (tasks.{root.name} = store to move it)",
+                  file=sys.stderr)
+            return 2
+        path, text = root / "docs" / "TODO.md", store_todo(root, cfg)
+        now = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if a.action == "print":
+            if now != text:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            print(f"{path}: {'printed' if now != text else 'unchanged'}, {len(re.findall(r'(?m)^B[0-9]+ ', text))} open tickets")
+            return 0
+        print(f"{root.name}: docs/TODO.md is what the store gives" if now == text else
+              f"{root.name}: docs/TODO.md differs from the store (edited by hand or not printed since); "
+              f"`agentdrop store print {root}` prints it again")
+        return 0 if now == text else 1
     if not MarkdownTasks(root, cfg).present():
         print(f"agentdrop store: no docs/TODO.md in {root} or above", file=sys.stderr)
         return 2
