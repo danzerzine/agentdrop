@@ -4198,6 +4198,13 @@ def pack_history(root: Path, tid: str) -> list[str]:
             how = "finished" + (f", ${lane['cost_usd']:.2f}" if lane.get("cost_usd") is not None else "")
         else:
             how = "broke off without a result"
+        why = f.with_suffix(".why")   # a watcher's note on why it broke off or went silent: step, cause, what it did
+        if why.exists():
+            try:
+                w = json.loads(why.read_text(encoding="utf-8"))
+                how += f" (last step: {w.get('step', '')}; cause: {w.get('why', '')}; done: {w.get('done', '')})"
+            except (OSError, ValueError):
+                pass
         words = lane.get("result") or lane.get("last") or ""
         out.append(f"- {tid}, {start:%d.%m %H:%M}, {mins} min, {how}"
                    + (f". Its last words: {clip(' '.join(words.split()), 700)}" if words else "")
