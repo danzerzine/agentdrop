@@ -132,6 +132,8 @@ agentdrop task summary B12 "One plain line on what it is about"
 
 A take is decided under the store's write lock and respects claims made with `agentdrop claim`, so two sessions never get the same task. Every change is journaled with its author: the session, `judge`, or `--as Name`.
 
+The hourly refresh of the tickets page (a launchd job that republished it and answered its comments) is retired since 29.09, like the Telegram delivery below: the owner's panel reads the same board live.
+
 Telegram delivery (`brief --send`, `replies`, `dispatch`) is frozen since 27.09: a bot with fixed message formats read like an alert feed and needed debugging like a project of its own. Talking to the agent in a Claude Code session works better, so the morning run there is a Claude Code task that writes its summary in prose. The commands below still work.
 
 `agentdrop brief` turns the board into messages for a phone: a short head (how many things wait for you, what runs, what was done, what's next), then each question or blocked ticket as its own message with its context quoted. Without `--send` it only prints them. With `--send` it delivers them to Telegram and remembers what went out: an item comes again only when it changes or after 24 hours without an answer, and at most 5 items go per brief. At night (23:00–09:00) messages arrive without sound. The charter has agents run it after the last commit of a pass, so the pass's LOG entry and any new question reach you on their own.

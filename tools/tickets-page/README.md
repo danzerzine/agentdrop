@@ -4,7 +4,8 @@ One page with every ticket and every question for you across the projects. Each 
 its own link (`#<project>-<code>`, e.g. `#sd-B110`, `#ss-B101`; questions `#<project>-q<hash>`), and
 the owner answers by commenting on the page; a comment sent to Claude reaches the session that watches it.
 
-Artifact: https://claude.ai/artifact/JgBHHXBkfeRNxJ5dQk9BXM (private). Refresh:
+Artifact: https://claude.ai/artifact/JgBHHXBkfeRNxJ5dQk9BXM (private). The hourly scheduled refresh is retired since
+29.09 (a live panel shows the same board); by hand:
 
     agentdrop tickets --docs tools/tickets-page/docs.json > tools/tickets-page/tickets.json
 
