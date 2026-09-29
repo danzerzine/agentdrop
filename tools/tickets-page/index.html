@@ -48,6 +48,9 @@ aside { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); align
 .seg button[aria-pressed="true"] { background: var(--accent-bg); color: var(--ink); font-weight: 500; }
 .seg .n { color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .seg button:focus-visible, #proj:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* the search is never silent: a line over the list names it, with the count and a reset */
+.qline { font-size: 13px; color: var(--ink-2); margin: 0; }
+.qline button { font: inherit; border: 0; background: none; color: var(--accent); padding: 0; cursor: pointer; }
 .chip:focus-visible, .row:focus-visible, input:focus-visible, .back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #q { font: inherit; width: 100%; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 7px 10px; }
 .list { overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding-right: 4px; }
@@ -155,6 +158,7 @@ article.task { gap: 14px; }
     <div class="filters" id="projects"></div>
     <div class="filters" id="tabs" role="group" aria-label="Показать"></div>
     <input id="q" type="search" placeholder="Номер или слово из названия" aria-label="Поиск">
+    <p class="qline ic i-info" id="qline" aria-live="polite" hidden></p>
     <nav class="list" id="list" aria-label="Все задачи"></nav>
   </aside>
   <main>
@@ -178,7 +182,7 @@ const TABS = [["work", "В работе", ["blocker", "owner", "route", "turn", 
 const tabOf = st => (TABS.find(t => t[2].includes(st)) || TABS[0])[0];
 function renderTabs() {
   const el = document.getElementById("tabs");
-  const n = k => data.items.filter(i => (project === "all" || i.project === project) && tabOf(tierOf(i)) === k).length;
+  const q = qOf(), n = k => data.items.filter(i => (project === "all" || i.project === project) && found(i, q) && tabOf(tierOf(i)) === k).length;
   el.innerHTML = `<span class="flabel">Показать</span><span class="seg">` +
     TABS.map(([k, l]) => `<button aria-pressed="${k === tab}" data-k="${k}">${esc(l)} <span class="n">${n(k)}</span></button>`).join("") + `</span>`;
   el.querySelectorAll("button").forEach(b => b.onclick = () => { tab = b.dataset.k; try { localStorage.setItem("tab", tab); } catch (e) {} renderTabs(); renderList(); });
@@ -263,13 +267,28 @@ function themeOf(i) {
   const k = list.findIndex(t => t.ids.includes(i.code));
   return k < 0 ? null : { n: k + 1, ...list[k] };
 }
+// The search works with the tabs and the project: it narrows what they show, and the line over the list says so
+const qOf = () => document.getElementById("q").value.trim().toLowerCase();
+const found = (i, q) => !q || (i.code + " " + i.title).toLowerCase().includes(q);
+function searchLine(q, pick) {
+  const el = document.getElementById("qline"), raw = document.getElementById("q").value.trim();
+  el.hidden = !q;
+  if (!q) return "";
+  const here = pick.filter(i => tabOf(tierOf(i)) === tab).length, elsewhere = pick.length - here;
+  el.innerHTML = `Поиск: «${esc(raw)}» · ${here} · <button type="button" class="hb link" id="qclear">сбросить</button>`;
+  document.getElementById("qclear").onclick = () => { document.getElementById("q").value = ""; renderTabs(); renderList(); };
+  const tabName = (TABS.find(t => t[0] === tab) || TABS[0])[1], where = project === "all" ? "" : ` в ${projLabel(project)}`;
+  const others = project === "all" ? 0 : data.items.filter(i => i.project !== project && found(i, q)).length;
+  return `По «${esc(raw)}»${esc(where)} ничего нет на вкладке «${esc(tabName)}»` +
+    (elsewhere ? `; на других вкладках: ${elsewhere}.` : others ? `; в других проектах: ${others}.` : ".");
+}
 function renderList() {
-  const q = document.getElementById("q").value.trim().toLowerCase();
+  const q = qOf();
   const cur = location.hash.slice(1);
-  const pick = data.items.filter(i => (project === "all" || i.project === project) &&
-    (!q || (i.code + " " + i.title).toLowerCase().includes(q)));
+  const pick = data.items.filter(i => (project === "all" || i.project === project) && found(i, q));
+  const none = searchLine(q, pick);
   const prio = i => ({ P0: 0, P1: 1, P2: 2, P3: 3 }[i.priority] ?? 4);
-  const html = STATES.filter(([st]) => q || tabOf(st) === tab).map(([st, label]) => {
+  const html = STATES.filter(([st]) => tabOf(st) === tab).map(([st, label]) => {
     const rows = pick.filter(i => tierOf(i) === st).sort((x, y) => prio(x) - prio(y));
     if (!rows.length) return "";
     const open = !["later", "done"].includes(st) || q;
@@ -292,7 +311,7 @@ function renderList() {
     } else body = rows.map(i => rowHtml(i, st, cur)).join("");
     return `<details class="group g-${st}"${open ? " open" : ""}><summary><h3>${label} <span>${rows.length}</span></h3></summary>` + body + "</details>";
   }).join("");
-  document.getElementById("list").innerHTML = html || '<p class="empty">Ничего не нашлось.</p>';
+  document.getElementById("list").innerHTML = html || `<p class="empty">${none || "Ничего не нашлось."}</p>`;
 }
 
 // "Название? (B83, 27.09)" -> the title and the date; the code is shown on its own
@@ -464,7 +483,7 @@ async function start() {
   try { tab = localStorage.getItem("tab") || "work"; } catch (e) {}
   renderFilters();
   renderTabs();
-  document.getElementById("q").addEventListener("input", renderList);
+  document.getElementById("q").addEventListener("input", () => { renderTabs(); renderList(); });
   document.getElementById("back").onclick = e => { e.preventDefault(); history.pushState(null, "", location.pathname + location.search); route(); };
   window.addEventListener("hashchange", route);
   route();
