@@ -5041,6 +5041,9 @@ UNANSWERED_LIST = {
                 "Ушли в отложенные сами через семь дней; список в подробностях"),
     "options": (("Keep them deferred", "Bring them all back to answer"),
                 ("Оставить отложенными", "Вернуть все на главную")),
+    "replaced": ("Unanswered for a week: its questions went into the new list {id}.",
+                 "Неделю без ответа: его вопросы перешли в новый список {id}."),
+    "empty": ("Nothing of it is deferred any more.", "В нём больше нечего решать: отложенных не осталось."),
 }
 TODO_HEAD = {True: "# TODO — тикеты\n\n> Файл печатает agentdrop из базы задач (`agentdrop store print`), заново каждую ночь. "
                    "Не править: правка пропадёт при следующей печати. Задачи: `agentdrop task take|show|comment|new`.\n",
@@ -5658,20 +5661,34 @@ class StoreTasks:
                                 (self.project, UNANSWERED_THEME)).fetchone()[0] or ""
             ids = list(dict.fromkeys(x[0] for x in conn.execute(
                 "SELECT task FROM events WHERE project = ? AND what = 'shelved' AND at > ? ORDER BY id", (self.project, last))))
+            open_lists = conn.execute("SELECT id, updated FROM tasks WHERE project = ? AND theme = ? AND state = 'waiting_you'",
+                                      (self.project, UNANSWERED_THEME)).fetchall()
         finally:
             conn.close()
-        recs = [r for r in (self.record(x) for x in ids) if r and r["state"] == "deferred"]
-        if not recs:
+        # an unanswered list of an earlier week gives its tasks to the new one and closes, so no list outlives a week
+        # (a list younger than six days stays while nothing new was shelved: the list is weekly)
+        week_ago = (now - dt.timedelta(days=UNANSWERED_DAYS - 1)).isoformat(timespec="seconds")
+        if not ids and all((u or "") > week_ago for _, u in open_lists):
             return None
+        olds = [self.record(x) for x, _ in open_lists]
+        carried = [x for o in olds if o.get("ask") and o["ask"].get("kind") == "unanswered" for x in o["ask"].get("tasks") or []]
+        recs = [r for r in (self.record(x) for x in dict.fromkeys(carried + ids)) if r and r["state"] == "deferred"]
         ru = self.russian()
         W = lambda k: UNANSWERED_LIST[k][ru]
+        if not recs:
+            for o in olds:
+                self.set_state(o["id"], "done", author, W("empty"))
+            return None
         q = self.new(W("title").format(n=len(recs), day=now.strftime("%d.%m")), author, kind="question",
                      theme=UNANSWERED_THEME, summary=W("summary"))
         ask, _ = ask_parts(self.root, W("q").format(n=len(recs)), list(W("options")), "1", ru=ru, context=W("context"),
                            no_design=True,
                            details="\n".join(f"- {r['title']} ({r['id']})" for r in recs))
         ask.update(kind="unanswered", tasks=[r["id"] for r in recs])
-        return self.ask(q["id"], author, ask)
+        out = self.ask(q["id"], author, ask)
+        for o in olds:
+            self.set_state(o["id"], "done", author, W("replaced").format(id=q["id"]))
+        return out
 
     def handin(self, tid: str, author: str, note: str = "", event_author: str | None = None) -> dict:
         with self._write() as conn:

@@ -350,6 +350,14 @@ class StoreTasks(StoreProject):
         [lst] = self.rows("SELECT id FROM tasks WHERE theme = 'unanswered'")
         self.assertEqual(self.state(lst["id"]), "waiting_you")
         self.assertIn("no list", self.ok("task", "unanswered", "--list"))   # nothing new since the last list
+        conn = sqlite3.connect(self.db)   # a week later the unanswered list gives its questions to a new one and closes
+        conn.execute("UPDATE tasks SET updated = '2026-01-01T10:00:00+03:00' WHERE id = ?", (lst["id"],))
+        conn.commit(); conn.close()
+        self.ok("task", "unanswered", "--list")
+        self.assertEqual(self.state(lst["id"]), "done")
+        self.assertIn("new list", self.rows("SELECT text FROM comments WHERE task = ? ORDER BY n DESC", lst["id"])[0]["text"])
+        [lst] = self.rows("SELECT id FROM tasks WHERE theme = 'unanswered' AND state = 'waiting_you'")
+        self.assertIn(old, self.rows("SELECT text FROM comments WHERE task = ? ORDER BY n DESC", lst["id"])[0]["text"])
         self.ok("task", "comment", lst["id"], "Bring them all back to answer", "--as", "Owner")
         self.assertEqual(self.state(old), "waiting_you")
         self.assertEqual(self.state(lst["id"]), "done")
