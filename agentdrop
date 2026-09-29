@@ -3169,6 +3169,14 @@ JUDGE_MODEL = "sonnet"               # the judge's first look (`judge_model`); t
 JUDGE_MODEL_HARD = "opus"            # can't decide (`judge_model_hard`): only for a `claude` judge without its own --model
 ACCEPT_REJECTS = 2                   # one repair, then the second REJECT in a row goes to the owner (one line, two answers)
 SPEC_RE = re.compile(r"(?:docs/)?specs/[\w./-]+\.md")
+REJECT_REASONS = {   # a blocker's reason, so the reasons of rejects can be counted (B4)
+    "missed": "an item of the task is not done or only in part",
+    "numbers": "a number or a result is wrong, or not checked on real data",
+    "screen": "what is on screen is wrong: a state, a size, a word, it breaks on the phone",
+    "claim": "the hand-in or a commit says more than the change does",
+    "broken": "something that worked no longer does: a test, a page, a command",
+    "other": "none of the above",
+}
 VERDICT_SCHEMA = {
     "type": "object", "required": ["verdict", "summary", "findings"],
     "properties": {
@@ -3177,6 +3185,7 @@ VERDICT_SCHEMA = {
         "findings": {"type": "array", "items": {
             "type": "object", "required": ["severity", "what"],
             "properties": {"severity": {"type": "string", "enum": ["blocker", "remark"]},
+                           "reason": {"type": "string", "enum": list(REJECT_REASONS)},
                            "what": {"type": "string"}, "evidence": {"type": "string"}}}},
     },
 }
@@ -3401,6 +3410,9 @@ def judge_prompt(root: Path, tid: str, run: dict, checks: list[dict], diff: Path
     ]
     if untracked:
         lines += ["New untracked files:", *[f"- {u}" for u in untracked[:40]]]
+    if t.get("handin"):
+        lines += ["", "The worker's hand-in, item by item (claims: check each one yourself):",
+                  *[f"> {l}" for l in t["handin"].splitlines()]]
     last = next((s for s in reversed(run["steps"]) if s.get("verdict")), None)
     if last and last["verdict"] == "REJECT":
         lines += ["", f"Your previous verdict on this ticket ({last.get('ended', '')[:16].replace('T', ' ')}) was REJECT: "
@@ -3419,11 +3431,12 @@ def judge_prompt(root: Path, tid: str, run: dict, checks: list[dict], diff: Path
         "- REJECT: something the worker can fix. Every blocker says what is wrong in plain words and how "
         "you saw it (file:line, the command and its output).",
         "- BLOCKED: you can't decide without the owner or without access you don't have; say exactly what is needed.",
+        "- Every blocker has a reason, one of: " + "; ".join(f"{k} ({v})" for k, v in REJECT_REASONS.items()) + ".",
         "- summary: two or three sentences the owner reads on a phone, meaning first, codes in parentheses.",
         f"- Write summary and findings in {'Russian' if ru else 'English'}.",
         "Answer with the JSON object only: "
         '{"verdict": "PASS|REJECT|BLOCKED", "summary": "...", '
-        '"findings": [{"severity": "blocker|remark", "what": "...", "evidence": "..."}]}',
+        '"findings": [{"severity": "blocker|remark", "reason": "' + "|".join(REJECT_REASONS) + '", "what": "...", "evidence": "..."}]}',
     ]
     return "\n".join(lines)
 
@@ -3569,7 +3582,8 @@ def cmd_accept(argv: list[str]) -> int:
     text = src.ticket_text(tid)
     if text:
         t = next((x for x in src.tickets() if x["id"] == tid), None)
-        run["ticket_info"] = {"title": t["title"] if t else "", "why": t["why"] if t else "", "text": text}
+        run["ticket_info"] = {"title": t["title"] if t else "", "why": t["why"] if t else "", "text": text,
+                              "handin": src.handin_note(tid) if hasattr(src, "handin_note") else ""}
     elif not run.get("ticket_info"):
         print((f"agentdrop accept: {tid} нет в docs/TODO.md — судье не с чем сверять. Приёмка идёт до того, "
                "как тикет убран из TODO." if ru else
@@ -3877,7 +3891,9 @@ def autonomous_prompt(t: dict, store: bool = False) -> str:
             "", HANDS_OFF, "",
             f"1. `agentdrop task take {tid} --session dispatcher`: it prints the task. If it is refused, stop.",
             "2. Do the work and commit it.",
-            f"3. `agentdrop task handin {tid} --session dispatcher`, then `agentdrop accept {tid}`. Exit 1: fix what "
+            f"3. `agentdrop task handin {tid} \"- <item of the task>: <where it is done>\\n- …\" --session dispatcher` "
+            "(every item of the task, one line each, with the file, commit or check that shows it; an item not done "
+            f"says so), then `agentdrop accept {tid}`. Exit 1: fix what "
             "it printed and run accept again. Exit 3: stop, the task went to the owner. Exit 0: accepted, done in the store.",
             "4. Finish as the charter says: LOG entry (say that deploying waits for the owner, if the project deploys), "
             f"STATE if the picture changed, commit. When you stop halfway, `agentdrop release {tid} --session dispatcher`.",
@@ -4160,7 +4176,8 @@ def pack_prompt(s: dict, tickets: list[dict], budget: float, name: str,
                   "changed and hasn't committed yet, don't commit or undo them: wait a few minutes and run it "
                   "again.", ""]
     lines += ["The tickets, in this order; each is its own pass by the charter (" + (
-        "`agentdrop task take B<n>` → work → commit → `agentdrop task handin B<n>` → `agentdrop accept B<n>` → LOG):"
+        "`agentdrop task take B<n>` → work → commit → `agentdrop task handin B<n> \"- <item>: <where it is done>\\n- …\"` "
+        "(before it, go through the task item by item) → `agentdrop accept B<n>` → LOG):"
         if store else "claim → work → commit → `agentdrop accept` → LOG, TODO, release):")]
     for i, t in enumerate(tickets, 1):
         lines.append(f"{i}. {t['title']} ({t['id']}, {t['priority']})" + (f". Why: {t['why']}" if t["why"] else ""))
@@ -4823,6 +4840,10 @@ CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
 """
 
 
+HANDIN_ITEM = re.compile(r"^\s*[-*•]\s+\S.*:\s*\S", re.M)   # «- <an item of the task>: <where it is done>»
+HANDIN_LIST = ("a hand-in goes through the task item by item, each with where it is done (a file, a commit, a check "
+               "and its result), one line each; an item not done says so: agentdrop task handin {t} "
+               "\"- <item>: <where>\\n- <item>: not done, <why>\"")
 STANDING_THEMES = ("Идеи", "Ideas")   # a project's standing list task (ideas from sessions): never closed
 
 
@@ -5690,15 +5711,31 @@ class StoreTasks:
             self.set_state(o["id"], "done", author, W("replaced").format(id=q["id"]))
         return out
 
-    def handin(self, tid: str, author: str, note: str = "", event_author: str | None = None) -> dict:
+    def handin(self, tid: str, author: str, note: str = "", event_author: str | None = None,
+               need_list: bool = False) -> dict:
+        """To acceptance. With `need_list` the note must be the task's items one by one, each with where it is done
+        (HANDIN_LIST); it is kept for the judge (`handin_note`)."""
         with self._write() as conn:
             r = self._one(conn, self._resolve(tid))
             if r is None:
                 raise KeyError(tid)
+            if need_list and r["theme"] not in STANDING_THEMES and not HANDIN_ITEM.search(note):
+                raise ValueError(HANDIN_LIST.format(t=r["id"]))
             if note:
                 self._comment(conn, r["id"], author, note, event_author=event_author)
+                self._event(conn, r["id"], event_author or author, "handin", {"note": note})
             self._state(conn, r, "accepting", event_author or author, "")
         return self.record(r["id"])
+
+    def handin_note(self, tid: str) -> str:
+        """The worker's last hand-in note: the task's items and where each is done."""
+        conn = store_open()
+        try:
+            row = conn.execute("SELECT detail FROM events WHERE project = ? AND task = ? AND what = 'handin' "
+                               "ORDER BY id DESC LIMIT 1", (self.project, self._resolve(tid))).fetchone()
+        finally:
+            conn.close()
+        return json.loads(row[0]).get("note", "") if row else ""
 
     def new(self, title: str, author: str, kind: str = "ticket", text: str = "", why: str = "", priority: str = "",
             theme: str = "", mode: str = "", after: list[str] | None = None, section: str = "",
@@ -6075,7 +6112,7 @@ def cmd_task(argv: list[str]) -> int:
         elif a.action == "comment":
             t = src.add_comment(a.task, who, a.text, event_author=author)
         else:
-            t = src.handin(a.task, who, a.note, event_author=author)
+            t = src.handin(a.task, who, a.note.replace("\\n", "\n"), event_author=author, need_list=True)
     except KeyError:
         print(f"agentdrop task: no task {a.task} in {root.name}", file=sys.stderr)
         return 2

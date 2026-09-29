@@ -211,7 +211,7 @@ class StoreTasks(StoreProject):
         (self.root / "login.py").write_text("fixed = True\n", encoding="utf-8")
         self.git("add", "-A")
         self.git("commit", "-qm", "B7 fix")
-        self.assertIn("next: `agentdrop accept B7`", self.ok("task", "handin", "B7", "cookie fixed", session="s2"))
+        self.assertIn("next: `agentdrop accept B7`", self.ok("task", "handin", "B7", "- cookie: fixed in app.py", session="s2"))
         self.assertEqual(self.state("B7"), "accepting")
         out = self.ok("accept", "B7")
         self.assertIn("PASS", out)
@@ -244,7 +244,7 @@ class StoreTasks(StoreProject):
             (self.root / "login.py").write_text(f"fixed = {k}\n", encoding="utf-8")
             self.git("add", "-A")
             self.git("commit", "-qm", f"B7 try {k}")
-            self.ok("task", "handin", "B7", f"try {k}", session="s1")
+            self.ok("task", "handin", "B7", f"- try {k}: done", session="s1")
             r = self.run_ad("accept", "B7")
             self.assertEqual(r.returncode, code, r.stdout + r.stderr)
         self.assertEqual((self.home / "models.txt").read_text(encoding="utf-8").split(), ["sonnet", "opus", "opus"])
@@ -254,11 +254,16 @@ class StoreTasks(StoreProject):
         (self.home / "judge.py").write_text(JUDGE_REJECT.format(log=str(self.home / "prompts.txt")), encoding="utf-8")
         self.ok("task", "take", "B7", session="s1")
 
+        r = self.run_ad("task", "handin", "B7", "all done", session="s1")   # no items: refused, the form shown (B4)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("item by item", r.stderr)
+        self.assertEqual(self.state("B7"), "running")
+
         def hand_in(k):
             (self.root / "login.py").write_text(f"fixed = {k}\n", encoding="utf-8")
             self.git("add", "-A")
             self.git("commit", "-qm", f"B7 try {k}")
-            self.ok("task", "handin", "B7", f"try {k}", session="s1")
+            self.ok("task", "handin", "B7", f"- try {k}: done", session="s1")
             return self.run_ad("accept", "B7")
 
         r = hand_in(1)
@@ -275,6 +280,9 @@ class StoreTasks(StoreProject):
         self.assertEqual(len(prompts), 3)   # two judges, one trailing split
         self.assertNotIn("previous verdict", prompts[0])
         self.assertIn("previous verdict", prompts[1])
+        self.assertIn("> - try 1: done", prompts[0])   # the judge sees the hand-in's items (B4)
+        self.assertIn("> - try 2: done", prompts[1])
+        self.assertIn("Every blocker has a reason, one of: missed", prompts[0])
 
         r = self.run_ad("accept", "B7")   # no third round
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
