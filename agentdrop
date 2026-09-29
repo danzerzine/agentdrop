@@ -4706,6 +4706,9 @@ CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
 """
 
 
+STANDING_THEMES = ("Идеи", "Ideas")   # a project's standing list task (ideas from sessions): never closed
+
+
 def store_path() -> Path:
     """The store: ~/.agentdrop/tasks.sqlite3, or AGENTDROP_STORE (tests point it elsewhere)."""
     return Path(os.environ.get("AGENTDROP_STORE") or STATE / "tasks.sqlite3")
@@ -5307,6 +5310,8 @@ class StoreTasks:
         return next(iter(store_records(conn, self.project, tid)), None)
 
     def _state(self, conn, r: dict, state: str, author: str, waits: str | None = None) -> None:
+        if r["theme"] in STANDING_THEMES and state in ("done", "accepting"):
+            raise ValueError(f"{r['id']} is a standing list («{r['theme']}»): it stays open")
         waits = r["waits"] if waits is None else waits
         if state == r["state"] and waits == r["waits"]:
             return
@@ -5761,6 +5766,9 @@ def cmd_task(argv: list[str]) -> int:
             t = src.handin(a.task, who, a.note, event_author=author)
     except KeyError:
         print(f"agentdrop task: no task {a.task} in {root.name}", file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print(f"agentdrop task: {e}", file=sys.stderr)
         return 2
     if t["state"] not in HOLDS:   # the run lets go of a task that now waits, or is done
         drop_claim(root, t["id"], sid)

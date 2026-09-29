@@ -270,6 +270,16 @@ class StoreTasks(StoreProject):
         self.assertIn("already works from the store", r.stderr)
 
 
+    def test_a_standing_list_never_closes(self):
+        self.to_store()
+        self.ok("task", "new", "Ideas", "--theme", "Ideas", "--summary", "Ideas from sessions, kept so none is lost")
+        for args in (("task", "state", "B16", "done"), ("task", "handin", "B16")):
+            r = self.run_ad(*args)
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("standing list", r.stderr)
+        self.ok("task", "state", "B16", "deferred")
+        self.assertEqual(self.state("B16"), "deferred")
+
 class MarkdownUntouched(StoreProject):
     def test_a_markdown_project_is_left_alone(self):
         before = {k: self.ok(*k.split()) for k in ("status --json", "tickets .")}
