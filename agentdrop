@@ -1302,6 +1302,31 @@ def by_owner(text: str, words: list[str]) -> bool:
     return any(re.search(r"(?<!\w)" + re.escape(w), low) for w in words)
 
 
+def owner_said(c: dict, words: list[str]) -> bool:
+    """A thread message with the owner's word: written by them, or an agent quoting them as «<Name> 27.09: …»."""
+    if not c["author"]:
+        return False
+    if by_owner(c["author"], words):
+        return True
+    names = words[:-2]   # the owner's names, without the two generic words `owner_words` adds
+    return any(re.match(rf"\s*{re.escape(n)}\w*,?\s+\d{{1,2}}\.\d{{2}}\b[^:\n]{{0,20}}:", c["text"].lower())
+               for n in names)
+
+
+def owner_answer(r: dict, words: list[str]) -> list[dict]:
+    """The owner's words in a task's thread after its latest question in parts (the whole thread when it has
+    none): what they decided, or [] when the task still waits for them."""
+    start = max(r["asks"]) + 1 if r.get("asks") else 0
+    return [c for c in r["thread"][start:] if owner_said(c, words)]
+
+
+def question_parent(title: str) -> str | None:
+    """The ticket a question was asked for, from its title's tail: «… (B133, 28.09)» → B133."""
+    m = re.search(r"\(([^()]*)\)\s*$", title)
+    m = m and re.search(r"\bB\d+\b", m.group(1))
+    return m.group(0) if m else None
+
+
 def find_root(start: Path) -> Path:
     p = start.resolve()
     for cand in (p, *p.parents):
@@ -1928,6 +1953,9 @@ def claim_activity(root: Path, c: dict) -> float:
     t = transcript(root, c.get("session", ""))
     if t:
         last = max(last, dt.datetime.fromtimestamp(t.stat().st_mtime).astimezone())
+        sub = t.with_suffix("")   # a session busy in a subagent writes under <sid>/, not its own transcript
+        for f in sub.rglob("*.jsonl") if sub.is_dir() else ():
+            last = max(last, dt.datetime.fromtimestamp(f.stat().st_mtime).astimezone())
     return (now - last).total_seconds()
 
 
@@ -4906,13 +4934,19 @@ def markdown_records(root: Path, cfg: dict) -> list[dict]:
                     "waits": t["waits"], "section": t["section"], "position": t["order"][1],
                     "summary": t["summary"], "after": sorted(t["after"]), "thread": thread(t["thread"])})
     # a question the owner answered last is the agent's move; one closed is done; one for others waits for them;
-    # the rest wait for the owner
-    q_state = {"turn": "queued", "deferred": "deferred", "closed": "done", "people": "waiting_others"}
+    # the rest wait for the owner, unless the owner's word is in the thread already (quoted by an agent too): then it
+    # is the agent's move; an agent's decision the owner may revert is done, as the board never asked them
+    q_state = {"turn": "queued", "deferred": "deferred", "closed": "done", "people": "waiting_others",
+               "revertible": "done"}
+    words = owner_words(cfg)
     for i, q in enumerate(src.question_items()):
         body, th = split_thread(q["body"])
+        st = q_state.get(q["group"], "waiting_you")
+        if st == "waiting_you" and owner_answer({"thread": thread(th)}, words):
+            st = "queued"
         out.append({"id": "q" + sha((q["key"] or q["text"].split("\n", 1)[0]).encode())[:6], "kind": "question",
                     "title": ("Решить: " if ru else "Decide: ") + (q["title"] or clip(q["text"], 80)).rstrip(". "),
-                    "text": body, "source": "", "state": q_state.get(q["group"], "waiting_you"),
+                    "text": body, "source": "", "state": st,
                     "priority": "", "theme": "", "mode": "", "waits": "", "section": q["path"], "position": i,
                     "summary": "", "after": [], "thread": thread(th)})
     open_ids = {t["id"] for t in tickets}
@@ -5104,15 +5138,40 @@ def cmd_store(argv: list[str]) -> int:
     for name, text in (("import", "Copy a project's tickets and questions from its markdown into the store "
                                   "(again: only what changed, never twice)"),
                        ("check", "Compare the store with the project's markdown; exit 1 when they differ "
-                                 "(a project that works from the store: docs/TODO.md with what `print` gives now)"),
+                                 "(a project that works from the store: docs/TODO.md with what `print` gives now, "
+                                 "and the state rules of `states`)"),
                        ("print", "Print docs/TODO.md from the store (a project that works from the store); "
-                                 "the file is only written when it changes")):
+                                 "the file is only written when it changes"),
+                       ("states", "Check the state rules of a project that works from the store: no question waits "
+                                  "for the owner with their answer in it, no task stays in work with its session quiet "
+                                  f"{IDLE_MINUTES} min, no answered question queued over a day, the store and "
+                                  "`status` count the same waiting for the owner; exit 1 on a breach")):
         sp = sub.add_parser(name, help=text, description=text)
         sp.add_argument("path", nargs="?", default=".", help="Project directory (default: the current one)")
         if name == "import":
             sp.add_argument("--force", action="store_true", help="Import even into a project that works from the store")
+        if name == "states":
+            sp.add_argument("--tidy", action="store_true",
+                            help="First move what breaks them: quiet tasks back to the queue, answers into their tickets")
+            sp.add_argument("--json", action="store_true", help="The breaches as JSON")
     a = p.parse_args(argv)
     root, cfg = find_root(Path(a.path)), load_config()
+    if a.action == "states":
+        if not in_store(root, cfg):
+            print(f"agentdrop store: {root.name} keeps its tasks in markdown", file=sys.stderr)
+            return 2
+        src = StoreTasks(root, cfg)
+        moved = src.tidy_states("agentdrop") if a.tidy else []
+        bad = src.state_breaches()
+        if a.json:
+            print(json.dumps({"project": root.name, "moved": moved, "breaches": bad}, ensure_ascii=False, indent=1))
+        else:
+            for line in moved:
+                print(f"moved {line}")
+            for b in bad:
+                print(f"{b['task'] or root.name}: {b['text']}")
+            print(f"{root.name}: {len(bad)} state rules broken" if bad else f"{root.name}: the state rules hold")
+        return 1 if bad else 0
     if a.action == "print" or (a.action == "check" and in_store(root, cfg)):
         if not in_store(root, cfg):
             print(f"agentdrop store: {root.name} keeps its tasks in markdown (tasks.{root.name} = store to move it)",
@@ -5129,7 +5188,10 @@ def cmd_store(argv: list[str]) -> int:
         print(f"{root.name}: docs/TODO.md is what the store gives" if now == text else
               f"{root.name}: docs/TODO.md differs from the store (edited by hand or not printed since); "
               f"`agentdrop store print {root}` prints it again")
-        return 0 if now == text else 1
+        bad = StoreTasks(root, cfg).state_breaches()
+        for b in bad:
+            print(f"{b['task'] or root.name}: {b['text']} (`agentdrop store states --tidy` moves them)")
+        return 0 if now == text and not bad else 1
     if not MarkdownTasks(root, cfg).present():
         print(f"agentdrop store: no docs/TODO.md in {root} or above", file=sys.stderr)
         return 2
@@ -5216,6 +5278,7 @@ def cmd_plug(argv: list[str]) -> int:
 STORE_DOC = "store"   # where an item lives, for the page and the messages (TODO.md / QUESTIONS.md in markdown)
 Q_PREFIX = re.compile(r"^(?:Решить|Decide):\s*")
 HOLDS = ("running", "accepting")   # the states in which a session keeps its claim on a task
+IDLE_MINUTES = 30   # a task in work whose session wrote nothing this long is queued again (`tidy_states`)
 
 
 def section_rank(section: str) -> int:
@@ -5568,7 +5631,12 @@ class StoreTasks:
             if tid is None:
                 recs = store_records(conn, self.project)
                 b = sort_tickets(self.tickets(records=recs), held)
-                pick = next((t for t in b["turn"] + b["free"] if t["mode"] != "human"), None)
+                # a question the owner answered and no ticket took (it names none) is the agent's move too
+                words = owner_words(self.cfg)
+                answered = [r for r in recs if r["kind"] == "question" and r["state"] == "queued"
+                            and r["id"] not in held and owner_answer(r, words)]
+                focus = [t for t in b["free"] if t.get("focus")]
+                pick = next((t for t in b["turn"] + focus + answered + b["free"] if t["mode"] != "human"), None)
                 if pick is None:
                     return None, "nothing to take: every open task waits for someone, for another task, or is held"
                 tid = pick["id"]
@@ -5632,7 +5700,113 @@ class StoreTasks:
                             self._state(conn, t, "waiting_you", event_author or author, t["waits"])
                     done = True
                 self._state(conn, r, "done" if done else "queued", event_author or author, "")
+                if not done and r["kind"] == "question":
+                    self._into_parent(conn, self._one(conn, r["id"]), event_author or author)
         return self.record(r["id"])
+
+    def _into_parent(self, conn, q: dict, author: str) -> bool:
+        """A question the owner answered, asked for an open ticket («… (B133, 28.09)»): their words go into the
+        ticket's thread, the question is done and the ticket is the agent's move again. False when it has no such
+        parent (the question stays queued, `take` gives it)."""
+        pid = question_parent(q["title"])
+        p = self._one(conn, pid) if pid and pid != q["id"] else None
+        said = owner_answer(q, owner_words(self.cfg))
+        if p is None or p["state"] == "done" or not said:
+            return False
+        ru = self.russian()
+        head = (f"Ответ на вопрос {q['id']} «{Q_PREFIX.sub('', q['title'])}»:" if ru else
+                f"Answer to question {q['id']} «{Q_PREFIX.sub('', q['title'])}»:")
+        text = head + "\n" + "\n".join((f"{c['author']}, {c['at']}: " if not by_owner(c["author"], owner_words(self.cfg))
+                                          else "") + c["text"] for c in said)
+        self._comment(conn, p["id"], said[-1]["author"], text, event_author=author)
+        self._state(conn, q, "done", author, "")
+        self._comment(conn, q["id"], "", (f"Ответ перенесён в {p['id']}." if ru else f"Answer moved to {p['id']}."),
+                      event_author=author)
+        if p["state"] in ("waiting_you", "deferred"):
+            self._state(conn, p, "queued", author, "")
+        return True
+
+    def _quiet(self, r: dict, claims: dict, packs: list) -> float | None:
+        """How long a task in work has had no sign of its session, when that is past the limit (`tidy_states`);
+        None while it is alive: a live run holds it, or its session wrote something lately."""
+        c = claims.get(r["id"])
+        if c and any(c.get("session") == sid or r["id"] in ts for sid, ts in packs):
+            return None
+        if not c:   # set in work by hand, or its claim lost: give it the same half hour from its last change
+            idle = (dt.datetime.now().astimezone() - (parse_time(r.get("updated", "")) or dt.datetime.now().astimezone())
+                    ).total_seconds()
+            return idle if idle >= IDLE_MINUTES * 60 else None
+        idle = claim_activity(self.root, c)
+        limit = IDLE_MINUTES * 60 if transcript(self.root, c.get("session", "")) else \
+            float(self.cfg.get("stale_hours", STALE_HOURS)) * 3600
+        return idle if idle >= limit else None
+
+    def state_breaches(self, now: dt.datetime | None = None) -> list[dict]:
+        """The rules `tidy_states` keeps, checked (B40), each broken one as {rule, task, text}: a question waiting
+        for the owner with their answer in it; a task in work with its session quiet; a question the owner
+        answered, queued and untouched a day; and the count of what waits for the owner in the store unlike
+        the one `agentdrop status` gives."""
+        now = now or dt.datetime.now().astimezone()
+        words, out = owner_words(self.cfg), []
+        claims = {c.get("ticket"): c for c in read_claims(self.root)}
+        packs = [(pack_session(f), pack_tickets_of(f)) for f in live_packs(self.root)]
+        recs = self.records()
+        for r in recs:
+            q = r["kind"] == "question"
+            if r["state"] == "waiting_you" and q and owner_answer(r, words):
+                out.append({"rule": "answered", "task": r["id"], "text": "waits for the owner, who has answered"})
+            elif r["state"] == "running" and (idle := self._quiet(r, claims, packs)) is not None:
+                out.append({"rule": "quiet", "task": r["id"], "idle": int(idle), "held": r["id"] in claims,
+                            "text": f"in work, quiet {age(idle, False)}" + ("" if r["id"] in claims else ", nobody holds it")})
+            elif r["state"] == "queued" and q and owner_answer(r, words) and \
+                    (now - (parse_time(r["updated"]) or now)).total_seconds() > 86400:
+                out.append({"rule": "stuck", "task": r["id"], "text": "answered by the owner, queued over a day"})
+        store_n = sum(r["state"] == "waiting_you" for r in recs)
+        # what `collect_status` counts, without its git and sessions
+        status_n = len(self.questions()["waiting"]) + len(sort_tickets(self.tickets(records=recs), set(claims))["owner"])
+        if store_n != status_n:
+            out.append({"rule": "count", "task": "", "store": store_n, "status": status_n,
+                        "text": f"{store_n} wait for the owner in the store, {status_n} in `agentdrop status`"})
+        return out
+
+    def tidy_states(self, author: str, now: dt.datetime | None = None) -> list[str]:
+        """The state rules the store keeps by itself (B40), one line per task moved: a task in work whose session
+        went quiet (no live run holds it, its transcript unchanged `IDLE_MINUTES`, or `stale_hours` when no
+        transcript is found) is queued again and its claim dropped; an agent's revertible decision that waits for
+        the owner is done; a question the owner answered goes into its ticket, or back to the agent's move."""
+        now = now or dt.datetime.now().astimezone()
+        ru, words, out = self.russian(), owner_words(self.cfg), []
+        claims = {c.get("ticket"): c for c in read_claims(self.root)}
+        packs = [(pack_session(f), pack_tickets_of(f)) for f in live_packs(self.root)]
+        with self._write() as conn:
+            for r in store_records(conn, self.project):
+                tid, st = r["id"], r["state"]
+                if st == "running":
+                    c = claims.get(tid)
+                    idle = self._quiet(r, claims, packs)
+                    if idle is None:
+                        continue
+                    self._state(conn, r, "queued", author, "")
+                    self._comment(conn, tid, "", (f"Сессия молчит {age(idle, True)}: задача снова в очереди." if c else
+                                                  "Никто не держит задачу: снова в очереди.") if ru else
+                                  (f"The session has been quiet {age(idle, False)}: queued again." if c else
+                                   "Nobody holds the task: queued again."), event_author=author)
+                    if c:
+                        drop_claim(self.root, tid, None)
+                    out.append(f"{tid}: running → queued")
+                elif st == "waiting_you" and r["kind"] == "question" and (
+                        REVERT_RE.search(r["section"]) or REVERT_RE.search(r["text"][:300])):
+                    self._state(conn, r, "done", author, "")
+                    self._comment(conn, tid, "", "Решение агента, его можно отменить: закрыто без вопроса." if ru else
+                                  "An agent's decision that can be reverted: closed without asking.", event_author=author)
+                    out.append(f"{tid}: waiting_you → done (revertible)")
+                elif st in ("waiting_you", "queued") and r["kind"] == "question" and owner_answer(r, words):
+                    if self._into_parent(conn, r, author):
+                        out.append(f"{tid}: {st} → done, answer in {question_parent(r['title'])}")
+                    elif st == "waiting_you":
+                        self._state(conn, r, "queued", author, "")
+                        out.append(f"{tid}: waiting_you → queued (answered)")
+        return out
 
     def ask(self, tid: str, author: str, ask: dict, event_author: str | None = None) -> dict:
         """A question for the owner under the task, in parts (`ask_parts`): it goes in the thread as words with

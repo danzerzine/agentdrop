@@ -161,6 +161,10 @@ class StoreProject(unittest.TestCase):
 
 class StoreTasks(StoreProject):
     def test_board_and_page_from_the_store_equal_the_markdown(self):
+        # an agent's revertible decision is done in the store, the markdown board counts it apart (B40): left out here
+        q = (self.root / "docs" / "QUESTIONS.md")
+        q.write_text(q.read_text(encoding="utf-8").replace(
+            "- **R-1. Kept UTC in exports.** R-1, revertible: the rest of the code uses UTC.\n", ""), encoding="utf-8")
         md = {k: self.ok(*k.split()) for k in ("status", "status --json", "tickets .")}
         self.to_store()
         for n in ("TODO.md", "QUESTIONS.md"):   # the store alone: the files are never read
