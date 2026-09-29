@@ -119,6 +119,7 @@ code { font-family: var(--mono); font-size: .86em; background: var(--quote); bor
 /* task page: identity, state, what is expected, then details; technical data last */
 article.task { gap: 14px; }
 .task h1 { font-size: 22px; }
+.task .fulltitle { margin: -8px 0 0; font-size: 13px; color: var(--ink-3); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }   /* the raw title under the one-line summary */
 .state { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; color: var(--ink-2); }
 .state b { color: var(--ink); font-weight: 600; }
 .expect { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-radius: 8px; background: var(--quote); }
@@ -259,7 +260,7 @@ function renderFilters() {
 
 function rowHtml(i, st, cur, start) {
   return `<a class="row${i.id === cur ? " on" : ""}" href="#${i.id}"><span class="code">${esc(i.code || "вопрос")}${i.priority && st !== "done" ? `<br>${esc(i.priority)}` : ""}</span>` +
-    `<span class="t">${start ? '<span class="start">начать с</span> ' : ""}${project === "all" ? `<span style="color:var(--ink-3)">${esc(projLabel(i.project))} · </span>` : ""}${esc(i.title)}</span>` +
+    `<span class="t">${start ? '<span class="start">начать с</span> ' : ""}${project === "all" ? `<span style="color:var(--ink-3)">${esc(projLabel(i.project))} · </span>` : ""}${esc(i.summary || i.title)}</span>` +
     (triage[i.id]?.note && st !== "later" ? `<span></span><span class="note">${esc(triage[i.id].note)}</span>` : "") + `</a>`;
 }
 function themeOf(i) {
@@ -269,7 +270,7 @@ function themeOf(i) {
 }
 // The search works with the tabs and the project: it narrows what they show, and the line over the list says so
 const qOf = () => document.getElementById("q").value.trim().toLowerCase();
-const found = (i, q) => !q || (i.code + " " + i.title).toLowerCase().includes(q);
+const found = (i, q) => !q || (i.code + " " + i.title + " " + (i.summary || "")).toLowerCase().includes(q);
 function searchLine(q, pick) {
   const el = document.getElementById("qline"), raw = document.getElementById("q").value.trim();
   el.hidden = !q;
@@ -381,7 +382,8 @@ function renderItem() {
   const th = themeOf(it);
   view.innerHTML = `<article id="t-${it.id}" class="task" data-item="${esc(tag)}" data-comment-target>
     <div class="meta">${it.code ? `<span class="code">${esc(it.code)}</span>` : ""}<span>${esc(projLabel(it.project))}</span>${it.priority ? `<span>${esc(it.priority)}</span>` : ""}${t.date ? `<span>с ${esc(t.date)}</span>` : ""}${last && last.when ? `<span>последний ответ ${esc(last.when)}</span>` : ""}</div>
-    <h1 id="h-${it.id}">${inline(t.title)}</h1>
+    <h1 id="h-${it.id}">${it.summary ? esc(it.summary) : linkCodes(esc(t.title.replace(/`/g, "")))}</h1>
+    ${it.summary ? `<p class="fulltitle" title="${esc(t.title.replace(/`/g, ""))}">${linkCodes(esc(t.title.replace(/`/g, "")))}</p>` : ""}
     <p class="state"><span class="pill s-${tier}">${LABEL[tier] || it.state}</span> <span><b>Ход:</b> ${esc(who[0])}${["others", "later"].includes(tier) ? " · " + linkCodes(esc(who[1])) : ""}</span></p>
     ${mine || triage[it.id] || pick || it.ask ? `<section class="expect${mine ? " mine" : ""}">
       ${mine ? `<h4>Что нужно от вас</h4>` : ""}
