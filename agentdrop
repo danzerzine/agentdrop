@@ -3696,10 +3696,13 @@ TIDY_MSG = {
     "check_hint": ("↩️ Meant it differently? Reply, it goes under the ticket.",
                    "↩️ Имел в виду иначе — ответь реплаем, запишу под тикет."),
 }
+NO_PATTERN_KILL = ("Stop only a process you started, by its PID (`kill <pid>`, the PID from its .pid file or from when you "
+                   "started it); never pkill, killall or kill by pgrep: on macOS they match other programs' command lines "
+                   "and have closed the user's browser, mail and other agents' runs.")
 HANDS_OFF = ("Nobody is watching this run. Never deploy, never send anything to anyone (mail, chats, Telegram), "
              "never spend money, never touch servers or production data. Commit only the files you changed, "
              "no AI attribution, and don't push unless the project's AGENTS.md says pushing is part of a commit. "
-             "Don't run `agentdrop brief`: the dispatcher sends it after you.")
+             "Don't run `agentdrop brief`: the dispatcher sends it after you. " + NO_PATTERN_KILL)
 
 
 def dispatch_projects(cfg: dict) -> list[Path]:
@@ -4041,7 +4044,7 @@ def pack_prompt(s: dict, tickets: list[dict], budget: float, name: str,
              f"decision or other people {ask}; then carry on with a reversible default.", "",
              ("First read AGENTS.md, docs/STATE.md and docs/PITFALLS.md, and run `agentdrop status`. " + STORE_RULE + " "
               if store else "First read AGENTS.md, docs/STATE.md, docs/TODO.md and docs/PITFALLS.md, and run "
-              "`agentdrop status`. ") + "Skip a ticket another session has claimed.", ""]
+              "`agentdrop status`. ") + "Skip a ticket another session has claimed. " + NO_PATTERN_KILL, ""]
     if n > 1:
         lines += [f"You are one of {n} sessions of this run working in this folder at the same time (lane {k}). "
                   "The others do: " + "; ".join(f"{t['title']} ({t['id']})" for t in others or []) + ". Don't touch "
