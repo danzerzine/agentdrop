@@ -4597,6 +4597,7 @@ def collect_items(root: Path, cfg: dict) -> tuple[dict, list[dict]]:
                       "title": t["title"], "priority": t["priority"], "section": t["section"],
                       "state": state.get(t["id"], "next"), "why": t["why"], "waits": t["waits"],
                       "summary": t.get("summary", ""),
+                      **({"result": t["result"], "report": t.get("report", "")} if t.get("result") else {}),
                       "body": t["body"], "thread": t["thread"],
                       "images": t["images"], "doc": t["doc"], "ask": t.get("ask"),
                       **({"focus": t["focus"]} if t.get("focus") else {})})
@@ -4613,7 +4614,8 @@ def collect_items(root: Path, cfg: dict) -> tuple[dict, list[dict]]:
             items.append({"id": f"{prefix}-{d['id']}", "project": prefix, "code": d["id"], "kind": "ticket",
                           "title": d["title"], "priority": "", "section": "LOG", "state": "done",
                           "why": "", "waits": "", "body": f"Сделано {d['day']}.\n\n{d['text']}",
-                          "thread": [], "images": [], "doc": "LOG.md"})
+                          "thread": [], "images": [], "doc": "LOG.md",
+                          **({"result": d["result"], "report": d.get("report", "")} if d.get("result") else {})})
     return proj, items
 
 
@@ -4655,7 +4657,8 @@ def cmd_tickets(argv: list[str]) -> int:
         out["items"] += items
         for it in items:
             ask = it.get("ask") or {}
-            text = " ".join([it["body"], it.get("why", ""), ask.get("details", ""), *(m["text"] for m in it["thread"])])
+            text = " ".join([it["body"], it.get("why", ""), ask.get("details", ""), *(m["text"] for m in it["thread"]),
+                             it.get("result", ""), f"`{it['report']}`" if it.get("report") else ""])
             # `docs/x.md` in backticks, or a bare path with a folder (an ask's details name files plainly)
             for ref in set(re.findall(r"`([^`\s]+\.md)`", text) + re.findall(r"(?<![\w/.`-])((?:[\w.-]+/)+[\w.-]+\.md)\b", text)):
                 f = next((root / c for c in (ref, f"docs/{ref}") if (root / c).is_file()), None)
@@ -4872,6 +4875,42 @@ HANDIN_ITEM = re.compile(r"^\s*[-*•]\s+\S.*:\s*\S", re.M)   # «- <an item of 
 HANDIN_LIST = ("a hand-in goes through the task item by item, each with where it is done (a file, a commit, a check "
                "and its result), one line each; an item not done says so: agentdrop task handin {t} "
                "\"- <item>: <where>\\n- <item>: not done, <why>\"")
+RESULT_LINES = 5     # a task's result: what the run came to, the first thing its page shows
+RESULT_MAX = 700
+HANDIN_RESULT = ("a research hand-in carries its result, shown first on the task's page: agentdrop task handin {t} "
+                 "\"- <item>: <where>\" --result \"<2–5 lines: what came out, with the key number>\" "
+                 "--report <the report's .md>")
+RESEARCH_REPORT = re.compile(r"(?:^|[\s`(/])research/[^\s`)]+\.md")   # a hand-in that names a research report
+
+
+def result_problems(text: str) -> list[str]:
+    """What is wrong with a task's result: 2–5 lines of plain words with the key number, not a hand-in list."""
+    lines = [x for x in text.strip().splitlines() if x.strip()]
+    out = []
+    if not lines:
+        out.append("the result is empty")
+    if len(lines) > RESULT_LINES or len(text.strip()) > RESULT_MAX:
+        out.append(f"the result is at most {RESULT_LINES} lines and {RESULT_MAX} characters: the meaning, not the "
+                   "whole report")
+    if lines and not re.search(r"\d", text):
+        out.append("the result names the key number")
+    return out
+
+
+def report_file(root: Path, ref: str) -> tuple[str, str]:
+    """The report a result links to: a .md file inside the project, as its path from the project's root."""
+    ref = ref.strip().strip("`")
+    for base in (root, root / "docs"):
+        f = (base / ref).resolve()
+        if f.is_file():
+            if root.resolve() not in f.parents:
+                return "", f"the report {ref} is outside the project"
+            if f.suffix.lower() != ".md":
+                return "", f"the report {ref} is not a .md file"
+            return f.relative_to(root.resolve()).as_posix(), ""
+    return "", f"no report {ref} in the project"
+
+
 STANDING_THEMES = ("Идеи", "Ideas")   # a project's standing list task (ideas from sessions): never closed
 
 
@@ -4904,6 +4943,14 @@ def store_open() -> sqlite3.Connection:
             conn.commit()
         except sqlite3.OperationalError:   # another process added it first
             pass
+    have = {c[1] for c in conn.execute("PRAGMA table_info(tasks)")}
+    for col in ("result", "report"):   # a store from before a run's result: its 2–5 lines, and the report's path
+        if col not in have:
+            try:
+                conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+                conn.commit()
+            except sqlite3.OperationalError:   # another process added it first
+                pass
     if "ask" not in {c[1] for c in conn.execute("PRAGMA table_info(comments)")}:   # a store from before questions in parts
         try:
             conn.execute("ALTER TABLE comments ADD COLUMN ask TEXT NOT NULL DEFAULT ''")
@@ -4975,7 +5022,8 @@ def store_records(conn: sqlite3.Connection, project: str, tid: str | None = None
     for row in conn.execute("SELECT * FROM tasks WHERE project = ? AND (? IS NULL OR id = ?) "
                             "ORDER BY kind DESC, state = 'done', position", (project, tid, tid)):
         r = {"id": row["id"], **{f: row[f] for f in STORE_FIELDS}, "updated": row["updated"],
-             "focus": row["focus"] if "focus" in row.keys() else ""}   # the project's main task this week: since when
+             "focus": row["focus"] if "focus" in row.keys() else "",   # the project's main task this week: since when
+             **{k: row[k] if k in row.keys() else "" for k in ("result", "report")}}   # what the run came to
         r["after"] = [x[0] for x in conn.execute(
             "SELECT after FROM links WHERE project = ? AND task = ? ORDER BY after", (project, row["id"]))]
         rows = conn.execute("SELECT author, at, text, ask FROM comments WHERE project = ? AND task = ? ORDER BY n",
@@ -5399,6 +5447,7 @@ class StoreTasks:
             **({"focus": r["focus"]} if r.get("focus") else {}),   # the week's main task: since when
             "last": thread_head(said[-1]) if said else "",
             "ask": r.get("ask") if state == "waiting_you" else None,   # the open question in parts
+            **({"result": r["result"], "report": r.get("report", "")} if r.get("result") else {}),   # what the run came to
         }
         if full:
             t.update(body=r["text"], thread=store_thread(r),
@@ -5514,7 +5563,7 @@ class StoreTasks:
             when = parse_time(r["updated"]) or dt.datetime.now().astimezone()
             out.append((bool(m), -when.timestamp() if not m else 0, r["position"],
                         {"id": r["id"], "title": r["title"], "day": m.group(1) if m else when.strftime("%d.%m"),
-                         "text": r["text"]}))
+                         "text": r["text"], "result": r.get("result", ""), "report": r.get("report", "")}))
         return [x[-1] for x in sorted(out, key=lambda x: x[:3])]
 
     def record(self, tid: str) -> dict | None:
@@ -5886,15 +5935,20 @@ class StoreTasks:
         return out
 
     def handin(self, tid: str, author: str, note: str = "", event_author: str | None = None,
-               need_list: bool = False) -> dict:
+               need_list: bool = False, result: str = "", report: str = "", need_result: bool = False) -> dict:
         """To acceptance. With `need_list` the note must be the task's items one by one, each with where it is done
-        (HANDIN_LIST); it is kept for the judge (`handin_note`)."""
+        (HANDIN_LIST); it is kept for the judge (`handin_note`). The result (and its report) goes first on the task's
+        page; with `need_result` there is no hand-in without one."""
         with self._write() as conn:
             r = self._one(conn, self._resolve(tid))
             if r is None:
                 raise KeyError(tid)
             if need_list and r["theme"] not in STANDING_THEMES and not HANDIN_ITEM.search(note):
                 raise ValueError(HANDIN_LIST.format(t=r["id"]))
+            if need_result and not result.strip() and r["theme"] not in STANDING_THEMES:
+                raise ValueError(HANDIN_RESULT.format(t=r["id"]))
+            if result.strip() or report:
+                self._result(conn, r, result, report, event_author or author)
             if note:
                 self._comment(conn, r["id"], author, note, event_author=event_author)
                 self._event(conn, r["id"], event_author or author, "handin", {"note": note})
@@ -5946,6 +6000,24 @@ class StoreTasks:
             conn.executemany("INSERT INTO links (project, task, after) VALUES (?, ?, ?)", [(self.project, tid, x) for x in after])
             self._event(conn, tid, author, "created", {**rec, "after": after})
         return self.record(tid)
+
+    def _result(self, conn: sqlite3.Connection, r: dict, result: str, report: str, author: str) -> None:
+        new = {"result": result.strip() or r.get("result", ""), "report": report or r.get("report", "")}
+        old = {k: r.get(k, "") for k in new}
+        if new != old:
+            conn.execute("UPDATE tasks SET result = ?, report = ?, updated = ? WHERE project = ? AND id = ?",
+                         (new["result"], new["report"], dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                          self.project, r["id"]))
+            self._event(conn, r["id"], author, "changed", {k: [old[k], new[k]] for k in new if old[k] != new[k]})
+
+    def set_result(self, tid: str, result: str, report: str, author: str) -> dict:
+        """Give a task its result (what the run came to) and the report it links to, or better ones."""
+        with self._write() as conn:
+            r = self._one(conn, self._resolve(tid))
+            if r is None:
+                raise KeyError(tid)
+            self._result(conn, r, result, report, author)
+        return self.record(r["id"])
 
     def set_summary(self, tid: str, summary: str, author: str) -> dict:
         """Give a task its one-line summary, or a better one."""
@@ -6058,6 +6130,8 @@ def print_task(t: dict, ru: bool) -> None:
     print(f"{t['title']} ({head})")
     if t.get("summary"):
         print(f"summary: {t['summary']}")
+    if t.get("result"):
+        print("result: " + t["result"].replace("\n", "\n  ") + (f"\nreport: {t['report']}" if t.get("report") else ""))
     print(f"state: {name(t['state'])}" + (f"; waits: {t['waits']}" if t["waits"] else "")
           + (f"; mode: {t['mode']}" if t["mode"] else ""))
     if t["source"]:
@@ -6150,6 +6224,15 @@ def cmd_task(argv: list[str]) -> int:
                                                           "(then run `agentdrop accept`)")
     sp.add_argument("task")
     sp.add_argument("note", nargs="?", default="", help="What was done, for the thread")
+    sp.add_argument("--result", default="", help=f"What the run came to, 2–{RESULT_LINES} lines of plain words with the "
+                                                 "key number; the task's page shows it first. Required when the "
+                                                 "project is in research mode or the hand-in names a research report")
+    sp.add_argument("--report", default="", help="The report's .md in the project; the task's page opens it rendered")
+    sp = sub.add_parser("result", parents=[common], help="Give a task its result (what the run came to, shown first "
+                                                          "on its page) and the report it links to, or better ones")
+    sp.add_argument("task")
+    sp.add_argument("text", help=f"2–{RESULT_LINES} lines of plain words with the key number")
+    sp.add_argument("--report", default="", help="The report's .md in the project")
     sp = sub.add_parser("new", parents=[common], help="File a new task (or --question for the owner); prints its id",
                         epilog='example: agentdrop task new "Export the report to the new server" --summary "The weekly '
                                'report moves to the new server so it stops failing at night" --why "«…»" --priority P1')
@@ -6209,6 +6292,17 @@ def cmd_task(argv: list[str]) -> int:
         if bad:
             print(f"agentdrop task {a.action}: {'the task was not filed' if a.action == 'new' else 'nothing changed'}; "
                   "fix and run again:\n" + "\n".join(f"- {b}" for b in bad), file=sys.stderr)
+            return 2
+    report = ""
+    if a.action in ("handin", "result"):
+        text = (a.result if a.action == "handin" else a.text).replace("\\n", "\n")
+        bad = result_problems(text) if text.strip() or a.action == "result" else []
+        if a.report:
+            report, why = report_file(root, a.report)
+            bad += [why] if why else []
+        if bad:
+            print(f"agentdrop task {a.action}: nothing changed; fix and run again:\n" + "\n".join(f"- {b}" for b in bad),
+                  file=sys.stderr)
             return 2
     if a.action == "summary" and not isinstance(src, StoreTasks):
         print(f"agentdrop task summary: {root.name} keeps its tasks in docs/TODO.md; write the line "
@@ -6274,6 +6368,8 @@ def cmd_task(argv: list[str]) -> int:
             t = src.ask(a.task, who, ask, event_author=author)
         elif a.action == "summary":
             t = src.set_summary(a.task, a.text, author)
+        elif a.action == "result":
+            t = src.set_result(a.task, a.text.replace("\\n", "\n"), report, author)
         elif a.action == "focus":
             t = src.set_focus(a.task, not a.off, author)
         elif a.action == "unanswered":
@@ -6286,7 +6382,10 @@ def cmd_task(argv: list[str]) -> int:
         elif a.action == "comment":
             t = src.add_comment(a.task, who, a.text, event_author=author)
         else:
-            t = src.handin(a.task, who, a.note.replace("\\n", "\n"), event_author=author, need_list=True)
+            note = a.note.replace("\\n", "\n")
+            t = src.handin(a.task, who, note, event_author=author, need_list=True,
+                           result=a.result.replace("\\n", "\n"), report=report,
+                           need_result=research_on(root) or bool(RESEARCH_REPORT.search(f"{note} {report}")))
     except KeyError:
         print(f"agentdrop task: no task {a.task} in {root.name}", file=sys.stderr)
         return 2

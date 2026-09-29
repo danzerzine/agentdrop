@@ -126,6 +126,7 @@ agentdrop task ask B12 "Which layout goes to the home page?" --context "New home
                                      # a question for you in parts; the task waits for you, the run lets go
 agentdrop task state B12 waiting_others "The editors: the layout"   # or any state, by key or glossary name
 agentdrop task handin B12            # to acceptance; then `agentdrop accept B12`, which marks it done on a PASS
+agentdrop task handin B12 "- …" --result "…" --report docs/research/x.md   # the result leads the task's page
 agentdrop task new "Title" --summary "One plain line on what it is about" --why "«…»" --priority P1 [--after B9] [--question]
 agentdrop task summary B12 "One plain line on what it is about"
 ```

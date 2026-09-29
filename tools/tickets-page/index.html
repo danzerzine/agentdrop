@@ -133,8 +133,8 @@ article.task { gap: 14px; }
 .q-ask .ask-q { margin: 0; font-size: 17px; font-weight: 600; }
 .q-ask .ask-ctx { margin: 0; font-size: 13px; color: var(--ink-2); }
 .q-ask .opts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
-.body-sec { display: flex; flex-direction: column; gap: 8px; }
-.body-sec h4 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
+.body-sec, .result { display: flex; flex-direction: column; gap: 8px; }
+.body-sec h4, .result h4 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
 .lead { margin: 0; max-width: 68ch; }
 .fold > summary { cursor: pointer; font-size: 13px; color: var(--ink-2); padding: 4px 0; }
 .fold[open] > summary { margin-bottom: 8px; }
@@ -351,6 +351,13 @@ function chosenIn(text) {
 }
 // A question in parts is shown in parts wherever it is, answered or not; the local panel draws it with its own gallery
 const askShown = (a, chosen, it) => window.askView ? window.askView(a, chosen, it) : askHtml(a, chosen);
+// What the run came to, first under the title: its lines and the report, opened rendered on this page
+function resultHtml(it) {
+  if (!it.result) return "";
+  const real = it.report && docs.refs[`${it.project}:${it.report}`];
+  const link = real ? `<p><a class="tref" href="#${docId(real)}">Открыть отчёт</a></p>` : it.report ? `<p class="fulltitle">Отчёт: <code>${esc(it.report)}</code></p>` : "";
+  return `<section class="result"><h4>Итог</h4><div class="body">${md(it.result)}</div>${link}</section>`;
+}
 // A thread: the last two messages in view, the earlier ones folded. A message that asked a question in parts shows the
 // parts, with the option the next answer chose.
 function threadHtml(thread, it) {
@@ -359,6 +366,8 @@ function threadHtml(thread, it) {
   const msg = m => `<div class="msg${me(m) ? " me" : ""}"><div class="who"><b>${esc(m.author || "—")}</b>${m.when ? ", " + esc(m.when) : ""}</div>${m.ask ? askShown(m.ask, answerTo(m), it) : md(m.text)}</div>`;
   const old = all.slice(0, -2), last = all.slice(-2);
   if (!all.length) return "";
+  // a task with its result: the result leads the page, the whole thread is the source, folded
+  if (it && it.result) return `<details class="fold"><summary>Ветка · ${all.length}</summary>${all.map(msg).join("")}</details>`;
   return `<h4>Ветка · ${all.length}</h4>${old.length ? `<details class="fold"><summary>Ранее · ${old.length}</summary>${old.map(msg).join("")}</details>` : ""}${last.map(msg).join("")}`;
 }
 function renderItem() {
@@ -386,6 +395,7 @@ function renderItem() {
     <h1 id="h-${it.id}">${it.summary ? esc(it.summary) : linkCodes(esc(t.title.replace(/`/g, "")))}</h1>
     ${it.summary ? `<p class="fulltitle" title="${esc(t.title.replace(/`/g, ""))}">${linkCodes(esc(t.title.replace(/`/g, "")))}</p>` : ""}
     <p class="state"><span class="pill s-${tier}">${LABEL[tier] || it.state}</span> <span><b>Ход:</b> ${esc(who[0])}${["others", "later"].includes(tier) ? " · " + linkCodes(esc(who[1])) : ""}</span></p>
+    ${resultHtml(it)}
     ${mine || triage[it.id] || pick || it.ask ? `<section class="expect${mine ? " mine" : ""}">
       ${mine ? `<h4>Что нужно от вас</h4>` : ""}
       ${triage[it.id] ? `<p class="triage-note">${esc(triage[it.id].note)}</p>` : ""}

@@ -605,5 +605,52 @@ class OldStore(StoreProject):
         self.assertEqual(self.state("B14"), "waiting_others")
 
 
+
+class TaskResult(StoreProject):
+    """A run's result leads the task's page: handed in with the task or filled after, the report opened rendered (B45)."""
+
+    def setUp(self):
+        super().setUp()
+        self.to_store()
+        (self.root / "docs" / "research").mkdir(parents=True, exist_ok=True)
+        (self.root / "docs" / "research" / "farms.md").write_text("# Farms\n\n79 % advice.\n", encoding="utf-8")
+
+    def test_research_handin_needs_a_result_and_the_page_gets_it_with_its_report(self):
+        self.ok("task", "take", "B7", session="s1")
+        note = "- the report: docs/research/farms.md"
+        r = self.run_ad("task", "handin", "B7", note, session="s1")   # names a research report: no result, refused
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("--result", r.stderr)
+        self.assertEqual(self.state("B7"), "running")
+        r = self.run_ad("task", "handin", "B7", note, "--result", "Farms write advice", session="s1")   # no number
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("key number", r.stderr)
+        r = self.run_ad("task", "handin", "B7", note, "--result", "79 % advice", "--report", "docs/nope.md", session="s1")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertEqual(self.state("B7"), "running")
+        self.ok("task", "handin", "B7", note, "--result", "Farms write advice: 79 % of the feed.\\nEvents: 0.",
+                "--report", "research/farms.md", session="s1")
+        row = self.rows("SELECT state, result, report FROM tasks WHERE id = 'B7'")[0]
+        self.assertEqual((row["state"], row["result"], row["report"]),
+                         ("accepting", "Farms write advice: 79 % of the feed.\nEvents: 0.", "docs/research/farms.md"))
+        self.assertIn("result: Farms write advice", self.ok("task", "show", "B7"))
+        docs = self.root / "docs.json"
+        item = next(i for i in json.loads(self.ok("tickets", ".", "--docs", str(docs)))["items"] if i["code"] == "B7")
+        self.assertEqual((item["result"], item["report"]), (row["result"], "docs/research/farms.md"))
+        self.assertIn("p:docs/research/farms.md", json.loads(docs.read_text(encoding="utf-8"))["files"])
+
+    def test_a_plain_handin_goes_without_a_result_and_one_is_filled_after(self):
+        self.ok("task", "take", "B7", session="s1")
+        self.ok("task", "handin", "B7", "- the fix: login.py", session="s1")
+        self.assertEqual(self.state("B7"), "accepting")
+        r = self.run_ad("task", "result", "B7", "one\ntwo\nthree\nfour\nfive\nsix 6")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)   # a report, not a result
+        self.ok("task", "result", "B7", "Login works again: 3 of 3 checks pass", "--report", "research/farms.md")
+        self.ok("task", "result", "B7", "Login works again: 4 of 4 checks pass")   # a better line keeps the report
+        row = self.rows("SELECT result, report FROM tasks WHERE id = 'B7'")[0]
+        self.assertEqual((row["result"], row["report"]), ("Login works again: 4 of 4 checks pass", "docs/research/farms.md"))
+        self.assertEqual(self.rows("SELECT count(*) n FROM events WHERE task = 'B7' AND what = 'changed'")[0]["n"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
