@@ -299,6 +299,18 @@ class StoreTasks(StoreProject):
         self.assertIn("summary: People can log in from an iPad again", self.ok("task", "show", "B7"))
         self.assertEqual(self.run_ad("task", "summary", "B7", "see B9").returncode, 2)
 
+    def test_the_weeks_main_task_goes_first_and_is_one_per_project(self):
+        """`task focus` makes a task the project's main one this week: the one before stops being main, the
+        next free task taken is the main one even over a higher priority, `--off` unmarks it."""
+        self.to_store()
+        self.ok("task", "focus", "B15")
+        self.ok("task", "focus", "B9")
+        self.assertEqual([r["id"] for r in self.rows("SELECT id FROM tasks WHERE focus != ''")], ["B9"])
+        self.assertIn("B15", self.ok("task", "take", session="s1").splitlines()[0])   # the owner's answer first
+        self.assertIn("B9", self.ok("task", "take", session="s2").splitlines()[0])   # then B9 over B7's P1
+        self.ok("task", "focus", "B9", "--off")
+        self.assertEqual(self.rows("SELECT id FROM tasks WHERE focus != ''"), [])
+
     def test_new_task_states_by_name_and_no_reimport(self):
         self.to_store()
         self.assertIn("✓ B16: Share the chart [Waits for another task]",

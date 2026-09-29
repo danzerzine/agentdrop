@@ -1960,7 +1960,7 @@ def sort_tickets(tickets: list[dict], claimed: set) -> dict:
     # a ticket blocked on someone else (a client's answer) is nobody's next step: counted, not listed
     blocked = [t for t in open_ if t["waits"] and not t["waits_owner"]]
     free = [t for t in open_ if not t["waits"]]
-    free.sort(key=lambda t: (t["priority"], t["order"]))
+    free.sort(key=lambda t: (not t.get("focus"), t["priority"], t["order"]))   # the week's main task goes first
     # the frontier: a ticket whose «После: B…» are still in TODO waits for them, it is not next yet
     in_todo = {t["id"] for t in tickets}
     for t in free:
@@ -4523,7 +4523,8 @@ def collect_items(root: Path, cfg: dict) -> tuple[dict, list[dict]]:
                       "state": state.get(t["id"], "next"), "why": t["why"], "waits": t["waits"],
                       "summary": t.get("summary", ""),
                       "body": t["body"], "thread": t["thread"],
-                      "images": t["images"], "doc": t["doc"], "ask": t.get("ask")})
+                      "images": t["images"], "doc": t["doc"], "ask": t.get("ask"),
+                      **({"focus": t["focus"]} if t.get("focus") else {})})
     for x in src.questions(full=True)["items"]:
         code = re.match(r"([A-ZА-ЯЁ]{1,3}-\d+)", x["key"])
         items.append({"id": f"{prefix}-{x.get('id') or 'q' + sha(x['key'].encode())[:6]}", "project": prefix,
@@ -4818,6 +4819,12 @@ def store_open() -> sqlite3.Connection:
             conn.commit()
         except sqlite3.OperationalError:   # another process added it first
             pass
+    if "focus" not in {c[1] for c in conn.execute("PRAGMA table_info(tasks)")}:   # a store from before the week's main task
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN focus TEXT NOT NULL DEFAULT ''")   # the day it was made main
+            conn.commit()
+        except sqlite3.OperationalError:   # another process added it first
+            pass
     if "ask" not in {c[1] for c in conn.execute("PRAGMA table_info(comments)")}:   # a store from before questions in parts
         try:
             conn.execute("ALTER TABLE comments ADD COLUMN ask TEXT NOT NULL DEFAULT ''")
@@ -4882,7 +4889,8 @@ def store_records(conn: sqlite3.Connection, project: str, tid: str | None = None
     out = []
     for row in conn.execute("SELECT * FROM tasks WHERE project = ? AND (? IS NULL OR id = ?) "
                             "ORDER BY kind DESC, state = 'done', position", (project, tid, tid)):
-        r = {"id": row["id"], **{f: row[f] for f in STORE_FIELDS}, "updated": row["updated"]}
+        r = {"id": row["id"], **{f: row[f] for f in STORE_FIELDS}, "updated": row["updated"],
+             "focus": row["focus"] if "focus" in row.keys() else ""}   # the project's main task this week: since when
         r["after"] = [x[0] for x in conn.execute(
             "SELECT after FROM links WHERE project = ? AND task = ? ORDER BY after", (project, row["id"]))]
         rows = conn.execute("SELECT author, at, text, ask FROM comments WHERE project = ? AND task = ? ORDER BY n",
@@ -5205,6 +5213,7 @@ class StoreTasks:
             "images": self._images(r),
             "owner_last": bool(said and by_owner(said[-1]["author"], words)),
             "deferred": state == "deferred", "after": list(r["after"]), "mode": r["mode"],
+            **({"focus": r["focus"]} if r.get("focus") else {}),   # the week's main task: since when
             "last": thread_head(said[-1]) if said else "",
             "ask": r.get("ask") if state == "waiting_you" else None,   # the open question in parts
         }
@@ -5568,6 +5577,23 @@ class StoreTasks:
                 self._event(conn, r["id"], author, "changed", {"summary": [r["summary"], new]})
         return self.record(r["id"])
 
+    def set_focus(self, tid: str, on: bool, author: str) -> dict:
+        """Make a task the project's main task this week (the one before it stops being main), or unmark it."""
+        with self._write() as conn:
+            r = self._one(conn, self._resolve(tid))
+            if r is None:
+                raise KeyError(tid)
+            now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+            for old in conn.execute("SELECT id FROM tasks WHERE project = ? AND focus != '' AND id != ?",
+                                    (self.project, r["id"])).fetchall() if on else []:
+                conn.execute("UPDATE tasks SET focus = '' WHERE project = ? AND id = ?", (self.project, old[0]))
+                self._event(conn, old[0], author, "changed", {"focus": [True, False]})
+            if bool(r.get("focus")) != on:
+                conn.execute("UPDATE tasks SET focus = ?, updated = ? WHERE project = ? AND id = ?",
+                             (now[:10] if on else "", now, self.project, r["id"]))
+                self._event(conn, r["id"], author, "changed", {"focus": [not on, on]})
+        return self.record(r["id"])
+
     def journal(self, tid: str, author: str, what: str, detail: dict) -> None:
         """An event in the task's history that changes nothing else: a run started or stopped."""
         with self._write() as conn:
@@ -5733,6 +5759,10 @@ def cmd_task(argv: list[str]) -> int:
                                                            "line under the ticket's title in docs/TODO.md)")
     sp.add_argument("task")
     sp.add_argument("text", help=f"One line, at most {SUMMARY_MAX} characters, plain words; no codes or paths")
+    sp = sub.add_parser("focus", parents=[common], help="Make a task the project's main task this week: it runs "
+                                                         "first and leads the project's line on the panel's home")
+    sp.add_argument("task")
+    sp.add_argument("--off", action="store_true", help="The task is no longer the main one")
     sp = sub.add_parser("handin", parents=[common], help="The work is done and committed: to acceptance "
                                                           "(then run `agentdrop accept`)")
     sp.add_argument("task")
@@ -5849,6 +5879,8 @@ def cmd_task(argv: list[str]) -> int:
             t = src.ask(a.task, who, ask, event_author=author)
         elif a.action == "summary":
             t = src.set_summary(a.task, a.text, author)
+        elif a.action == "focus":
+            t = src.set_focus(a.task, not a.off, author)
         elif a.action == "comment":
             t = src.add_comment(a.task, who, a.text, event_author=author)
         else:
