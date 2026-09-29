@@ -4130,7 +4130,7 @@ def cmd_dispatch(argv: list[str]) -> int:
 
 PACK_WORKER = "claude -p --permission-mode bypassPermissions"
 PACK_EFFORT = "medium"               # low effort came back rejected by the judge; medium is the chosen balance
-PACK_MAX = 3            # tasks one session of a run takes at most (`pack_max`): a break loses less, context stays small
+PACK_MAX = 3            # tasks one run takes at most, all its sessions together (`pack_max`): a break loses less
 PACK_COMPACT = 150000   # a run's session compacts its context at this many tokens (`pack_compact_tokens`)
 PACK_DIR = RUNS / "pack"             # <stamp>.prompt.md, .jsonl (the session), .err, .pid
 
@@ -4388,7 +4388,7 @@ def cmd_pack(argv: list[str]) -> int:
                                             "as one prompt; --run starts it as headless sessions in the background.")
     p.add_argument("path", nargs="?", default=".", help="Project directory (default: here)")
     p.add_argument("-n", type=int, default=PACK_MAX, help=f"How many tickets (default {PACK_MAX}; with --run at "
-                                                             f"most `pack_max`, {PACK_MAX}, a session)")
+                                                             f"most `pack_max`, {PACK_MAX})")
     p.add_argument("-j", type=int, default=1, help="Sessions working at once, the tickets dealt between them "
                                                     "(default 1); the budget is split evenly")
     p.add_argument("--only", help="These tickets instead of the frontier, in this order: B6,B108")
@@ -4452,12 +4452,11 @@ def cmd_pack(argv: list[str]) -> int:
     if not tickets:
         print("· nothing on the frontier: every open ticket waits for someone or for another ticket")
         return 1
-    j = max(1, min(a.j, len(tickets)))
-    cap = int(cfg.get("pack_max", PACK_MAX)) * j
+    cap = int(cfg.get("pack_max", PACK_MAX))
     if a.run and len(tickets) > cap:   # a long run loses more when it breaks and reads its whole context every turn
-        print(f"· a run takes at most {cap // j} tasks a session; {', '.join(t['id'] for t in tickets[cap:])} "
-              "stay in the queue")
+        print(f"· a run takes at most {cap} tasks; {', '.join(t['id'] for t in tickets[cap:])} stay in the queue")
         tickets = tickets[:cap]
+    j = max(1, min(a.j, len(tickets)))
     lanes = [tickets[k::j] for k in range(j)]   # dealt in priority order: lane 1 gets the 1st, (j+1)th, …
     budget = a.budget / j
     name = owner_name(cfg, s["ru"])

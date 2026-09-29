@@ -494,7 +494,7 @@ class Runs(StoreProject):
             f"open({str(env_log)!r}, 'w').write(os.environ.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW', '') + ' ' + "
             "' '.join(re.findall(r'^\\d+\\. .*\\((B\\d+), ', sys.stdin.read(), re.M)))\n", encoding="utf-8")
         self.config(f"pack_worker = {sys.executable} {self.home / 'envworker.py'}\n", append=True)
-        out = self.ok("pack", "--only", "B7,B8,B9,B10", "--run")
+        out = self.ok("pack", "--only", "B7,B8,B9,B10", "--run", "-j", "1")
         self.assertIn("B10 stay in the queue", out)
         self.wait(lambda: env_log.exists() and env_log.read_text(), "the worker")
         self.assertEqual(env_log.read_text().split(), ["150000", "B7", "B8", "B9"])
