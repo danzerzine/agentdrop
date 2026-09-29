@@ -79,6 +79,13 @@ sys.stdin.read()
 print(json.dumps({'type': 'result', 'structured_output': {'verdict': 'PASS', 'summary': 'Safari logs in', 'findings': []}}))
 """
 
+JUDGE_REJECT = """import json, sys
+with open({log!r}, 'a', encoding='utf-8') as f:
+    f.write(sys.stdin.read() + '\\n=====\\n')
+print(json.dumps({{'type': 'result', 'structured_output': {{'verdict': 'REJECT', 'summary': 'Safari still drops the cookie',
+    'findings': [{{'severity': 'blocker', 'what': 'the cookie is lost on Safari'}}]}}}}))
+"""
+
 
 class StoreProject(unittest.TestCase):
     def setUp(self):
@@ -208,6 +215,47 @@ class StoreTasks(StoreProject):
         self.assertEqual([c["author"] for c in self.rows("SELECT author FROM comments WHERE task = 'B7' ORDER BY n")],
                          ["shell", "shell", "Owner", "shell", "judge"])
         self.assertEqual(self.snapshot(), self.docs)   # the markdown was never touched
+
+    def test_second_reject_in_a_row_asks_the_owner_with_two_options(self):
+        self.to_store()
+        (self.home / "judge.py").write_text(JUDGE_REJECT.format(log=str(self.home / "prompts.txt")), encoding="utf-8")
+        self.ok("task", "take", "B7", session="s1")
+
+        def hand_in(k):
+            (self.root / "login.py").write_text(f"fixed = {k}\n", encoding="utf-8")
+            self.git("add", "-A")
+            self.git("commit", "-qm", f"B7 try {k}")
+            self.ok("task", "handin", "B7", f"try {k}", session="s1")
+            return self.run_ad("accept", "B7")
+
+        r = hand_in(1)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.ok("task", "take", "B7", session="s1")
+        r = hand_in(2)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertEqual(self.state("B7"), "waiting_you")
+        [ask] = [json.loads(a["ask"]) for a in self.rows("SELECT ask FROM comments WHERE task = 'B7' AND ask != ''")]
+        self.assertEqual(ask["kind"], "accept")
+        self.assertEqual(ask["options"], ["Accept it as it is", "Rewrite the task"])
+        self.assertIn("cookie", ask["q"])
+        prompts = (self.home / "prompts.txt").read_text(encoding="utf-8").split("\n=====\n")
+        self.assertEqual(len(prompts), 3)   # two judges, one trailing split
+        self.assertNotIn("previous verdict", prompts[0])
+        self.assertIn("previous verdict", prompts[1])
+
+        r = self.run_ad("accept", "B7")   # no third round
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertEqual(len((self.home / "prompts.txt").read_text(encoding="utf-8").split("\n=====\n")), 3)
+
+        self.ok("task", "comment", "B7", "Rewrite the task", "--as", "Owner")
+        self.assertEqual(self.state("B7"), "queued")
+        self.ok("task", "take", "B7", session="s2")
+        r = hand_in(3)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)   # the count starts again after the owner's word
+        self.ok("task", "take", "B7", session="s2")
+        self.assertEqual(hand_in(4).returncode, 3)
+        self.ok("task", "comment", "B7", "a", "--as", "Owner")   # the letter of «Accept it as it is»
+        self.assertEqual(self.state("B7"), "done")
 
     def test_two_sessions_never_get_the_same_task(self):
         self.to_store()

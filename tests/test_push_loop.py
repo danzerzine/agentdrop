@@ -647,20 +647,19 @@ class Accept(WithTelegram):
         [prompt] = self.prompts()
         self.assertIn("the project has no docs/checks", prompt.read_text(encoding="utf-8"))
 
-    def test_third_reject_goes_to_the_owner(self):
+    def test_second_reject_in_a_row_goes_to_the_owner(self):
         self.verdicts("REJECT")
         (self.root / "ok.flag").write_text("", encoding="utf-8")
-        for k in (1, 2):
-            r = self.run_ad("accept", "B7")
-            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-            self.assertIn("Safari still fails", r.stdout)
-            self.assertEqual(self.tg.sent, [])
-            (self.root / "login.py").write_text(f"fixed = {k}\n", encoding="utf-8")   # a repair
+        r = self.run_ad("accept", "B7")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("Safari still fails", r.stdout)
+        self.assertEqual(self.tg.sent, [])
+        (self.root / "login.py").write_text("fixed = 1\n", encoding="utf-8")   # a repair
         r = self.run_ad("accept", "B7")
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         [msg] = self.tg.sent
         self.assertIn("NEEDS YOU", msg["text"])
-        self.assertIn("rejected it 3 times", msg["text"])
+        self.assertIn("rejected it 2 times", msg["text"])
         self.assertIn("Safari still fails", msg["text"])
 
     def test_a_dead_judges_answer_is_kept(self):

@@ -1501,7 +1501,8 @@ def ask_text(ask: dict, ru: bool) -> str:
     """The question as words, for the thread and QUESTIONS.md: every reader that doesn't know the parts still reads it."""
     letters = ASK_LETTERS[ru]
     lines = [ask["q"], *(f"({letters[k]}) {o}" for k, o in enumerate(ask["options"]))]
-    lines.append(f"{ASK_WORDS['pick'][ru]} — ({letters[ask['pick']]}).")
+    if ask.get("pick") is not None:
+        lines.append(f"{ASK_WORDS['pick'][ru]} — ({letters[ask['pick']]}).")
     if ask.get("context"):
         lines.append(f"{ASK_WORDS['context'][ru]}: {ask['context']}")
     if ask.get("pics"):
@@ -3156,13 +3157,15 @@ def cmd_replies(argv: list[str]) -> int:
 # The project's checks (docs/checks) run first; a failure goes back to the worker, no judge.
 # When they pass, a fresh headless judge reads the ticket, its spec, the diff since the claim
 # and the check output, never the worker's report, and returns PASS, REJECT or BLOCKED.
-# REJECT goes back to the worker; the ACCEPT_REJECTS-th REJECT and any BLOCKED go to the owner.
+# REJECT goes back to the worker; the ACCEPT_REJECTS-th REJECT in a row and any BLOCKED go to the owner. In the store
+# the owner gets the missing thing in one line and two answers: accept it as it is, or have the agent rewrite the task.
+# Rejects count from the owner's last word under the task; a further accept run after them does not start.
 # Each step is recorded in docs/.runs/B41.json before it starts, so a crashed run resumes.
 
 RUNS = Path("docs") / ".runs"        # B41.json and B41/ logs; ignored by its own .gitignore
 CHECKS = Path("docs") / "checks"     # one shell command per line, run from the project root
 JUDGE = "claude -p --agent acceptance-judge --allowedTools Read,Grep,Glob,Bash --no-session-persistence"
-ACCEPT_REJECTS = 3                   # two repairs, then the third REJECT goes to the owner
+ACCEPT_REJECTS = 2                   # one repair, then the second REJECT in a row goes to the owner (one line, two answers)
 SPEC_RE = re.compile(r"(?:docs/)?specs/[\w./-]+\.md")
 VERDICT_SCHEMA = {
     "type": "object", "required": ["verdict", "summary", "findings"],
@@ -3396,6 +3399,11 @@ def judge_prompt(root: Path, tid: str, run: dict, checks: list[dict], diff: Path
     ]
     if untracked:
         lines += ["New untracked files:", *[f"- {u}" for u in untracked[:40]]]
+    last = next((s for s in reversed(run["steps"]) if s.get("verdict")), None)
+    if last and last["verdict"] == "REJECT":
+        lines += ["", f"Your previous verdict on this ticket ({last.get('ended', '')[:16].replace('T', ' ')}) was REJECT: "
+                  f"{last.get('summary', '')}", "Its blockers; check these first and say for each whether it is fixed now:",
+                  *[f"- {f['what']}" for f in last.get("findings") or [] if f.get("severity", "blocker") == "blocker"]]
     lines += ["", "The project's checks, all passed on this exact tree (logs to read if you need them):"]
     lines += [f"- `{c['cmd']}` → exit 0, {c['log']}" for c in checks] or ["- none: the project has no docs/checks"]
     lines += [
@@ -3463,6 +3471,52 @@ def print_findings(v: dict, ru: bool) -> None:
         print(f"{mark} {f['what']}")
         if f.get("evidence"):
             print("   " + f["evidence"].replace("\n", "\n   "))
+
+
+JUDGE_ASK = {   # [ru]: the owner's two answers after the second reject in a row
+    "q": ("Missing: {what}", "Не хватает: {what}"),
+    "context": ("The judge rejected «{title}» twice in a row", "Судья дважды подряд отклонил «{title}»"),
+    "options": (("Accept it as it is", "Rewrite the task"), ("Принять как есть", "Переписать задачу")),
+    "details": ("Accept: the task is done as it is. Rewrite: the agent reshapes the task so it can be accepted (drops "
+                "what is missing or files it as a new task) and hands it in again. The judge's words: {summary}",
+                "Принять: задача готова как есть. Переписать: агент переделывает постановку так, чтобы по ней можно "
+                "было принять (убирает то, чего не хватает, или выносит в новую задачу), и сдаёт снова. Слова судьи: {summary}"),
+}
+
+
+def judge_ask(v: dict, title: str, ru: bool) -> dict:
+    """The owner's question after the second reject in a row: the first blocker as one line, two answers."""
+    blockers = [f["what"] for f in v.get("findings") or [] if f.get("severity", "blocker") == "blocker"]
+    what = " ".join((blockers[0] if blockers else v.get("summary") or "").split()).rstrip(".")
+    q = JUDGE_ASK["q"][ru].format(what=what)
+    return {"q": clip(q, ASK_Q_MAX), "context": clip(JUDGE_ASK["context"][ru].format(title=clip(title, 60)), ASK_Q_MAX),
+            "options": list(JUDGE_ASK["options"][ru]), "pick": None, "kind": "accept",
+            "details": JUDGE_ASK["details"][ru].format(summary=v.get("summary", "")), "pics": [], "design": False}
+
+
+def ask_choice(ask: dict, text: str) -> int | None:
+    """Which option the owner's words pick: the option's own words, or its letter («б», «(b)», «2»)."""
+    t = " ".join(text.lower().split())
+    for k, o in enumerate(ask.get("options") or []):
+        if o.lower() in t:
+            return k
+    m = re.search(r"^\W*(?:выбираю|согласен|i pick|agreed)?\W*\(?([a-dа-г1-4])\)?(?:\W|$)", t)
+    if m:
+        c = m.group(1)
+        for letters in (*ASK_LETTERS, "1234"):
+            if c in letters and letters.index(c) < len(ask.get("options") or []):
+                return letters.index(c)
+    return None
+
+
+def rejects_in_a_row(run: dict, since: str = "") -> int:
+    """REJECT verdicts since the owner's last word (`since`, an ISO time) and since the last PASS or BLOCKED."""
+    n = 0
+    for s in run.get("steps") or []:
+        if s.get("started", "") < since or not s.get("verdict"):
+            continue
+        n = n + 1 if s["verdict"] == "REJECT" else 0
+    return n
 
 
 def cmd_accept(argv: list[str]) -> int:
@@ -3533,6 +3587,16 @@ def cmd_accept(argv: list[str]) -> int:
     run["base"] = git(root, "rev-parse", f"{base}^{{commit}}").stdout.strip()
     fp = fingerprint(root)
     n = len(run["steps"]) + 1
+    store = isinstance(src, StoreTasks)
+    since = owner_said_at(src, tid, cfg) if store else ""
+    limit = int(cfg.get("accept_rejects", ACCEPT_REJECTS))
+    if store and rejects_in_a_row(run, since) >= limit and not a.fresh:
+        last = next(s for s in reversed(run["steps"]) if s.get("verdict") == "REJECT")
+        print(f"· судья уже {limit} раза подряд отклонил {tid}; новый круг не запускаю, решение за владельцем" if ru else
+              f"· the judge rejected {tid} {limit} times in a row; no further round, the owner decides")
+        return accept_to_owner(root, cfg, src, run, runf, fp,
+                               {"verdict": "REJECT", "summary": last.get("summary", ""), "findings": last.get("findings", [])},
+                               fresh_verdict=False, ru=ru)
 
     # 1. checks, each reused only when it already passed on this exact tree
     checks = read(root / CHECKS) if (root / CHECKS).is_file() else ""   # no file: no project checks
@@ -3612,11 +3676,9 @@ def cmd_accept(argv: list[str]) -> int:
         s.update(verdict=v["verdict"], summary=v["summary"], findings=v["findings"])
 
     # 3. where the verdict goes
-    rejects = sum(s.get("verdict") == "REJECT" for s in run["steps"])
-    limit = int(cfg.get("accept_rejects", ACCEPT_REJECTS))
+    rejects = rejects_in_a_row(run, since)
     print(f"\n{v['verdict']}")
     print_findings(v, ru)
-    store = isinstance(src, StoreTasks)
     if v["verdict"] == "REJECT" and rejects < limit:
         run["state"] = "rejected"
         save_run(runf, run)
@@ -3627,11 +3689,35 @@ def cmd_accept(argv: list[str]) -> int:
               (f"\nRejected ({rejects} of {limit}; the {limit}th time the ticket goes to the owner). Fix the "
                f"blockers and run `agentdrop accept {tid}` again."))
         return 1
-    fresh_verdict = not (done and not a.fresh)
+    return accept_to_owner(root, cfg, src, run, runf, fp, v, fresh_verdict=not (done and not a.fresh), ru=ru)
+
+
+def owner_said_at(src: "StoreTasks", tid: str, cfg: dict) -> str:
+    """When the owner last wrote under the task (ISO time from the event log), or ''."""
+    r, words = src.record(tid) or {}, owner_words(cfg)
+    if not r:
+        return ""
+    conn = store_open()
+    try:
+        rows = conn.execute("SELECT at, author FROM events WHERE project = ? AND task = ? AND what = 'comment'",
+                            (src.project, r["id"])).fetchall()
+    finally:
+        conn.close()
+    return max((at for at, author in rows if by_owner(author, words)), default="")
+
+
+def accept_to_owner(root: Path, cfg: dict, src, run: dict, runf: Path, fp: str, v: dict, fresh_verdict: bool,
+                    ru: bool) -> int:
+    """A final verdict: PASS is done; the last REJECT in a row and BLOCKED go to the owner (a REJECT in the store as
+    one line of what is missing and two answers, `judge_ask`)."""
+    tid, store = run["ticket"], isinstance(src, StoreTasks)
     run["state"] = "accepted" if v["verdict"] == "PASS" else "owner"
     save_run(runf, run)
     if store:
         src.judged(tid, v["verdict"], v["summary"], final=True)
+        if v["verdict"] == "REJECT" and (src.record(tid) or {}).get("state") == "waiting_you" \
+                and ((src.record(tid) or {}).get("ask") or {}).get("kind") != "accept":
+            src.ask(tid, "judge", judge_ask(v, run["ticket_info"]["title"] or tid, ru))
         drop_claim(root, tid, None)   # PASS is done; a last REJECT waits for the owner, not for the agent
     # a PASS shows up on the board and in the pass-end brief; the owner is messaged only when the ticket needs them
     # (accept_tell_pass = yes brings the PASS messages back)
@@ -5405,7 +5491,10 @@ class StoreTasks:
                 raise KeyError(tid)
             self._comment(conn, r["id"], author, text, when, event_author=event_author)
             if by_owner(author, owner_words(self.cfg)) and r["state"] == "waiting_you":   # answered: the agent's move
-                self._state(conn, r, "queued", event_author or author, "")
+                judge = r["ask"] if r["ask"] and r["ask"].get("kind") == "accept" else None
+                # the answer to the judge's two rejects: «accept as it is» is done, «rewrite» is the agent's move
+                done = judge is not None and ask_choice(judge, text) == 0
+                self._state(conn, r, "done" if done else "queued", event_author or author, "")
         return self.record(r["id"])
 
     def ask(self, tid: str, author: str, ask: dict, event_author: str | None = None) -> dict:
