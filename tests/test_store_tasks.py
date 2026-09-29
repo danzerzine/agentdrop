@@ -327,10 +327,32 @@ class StoreTasks(StoreProject):
             self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
             self.assertIn("the task was not filed", r.stderr)
         self.assertEqual(self.rows("SELECT id FROM tasks WHERE title = 'Chart colours'"), [])
-        self.ok("task", "new", "Which font", "--question")   # a question for the owner needs none
+        self.ok("task", "new", "Which font", "--question", "--open")   # a question for the owner needs none
         self.ok("task", "summary", "B7", "People can log in from an iPad again")
         self.assertIn("summary: People can log in from an iPad again", self.ok("task", "show", "B7"))
         self.assertEqual(self.run_ad("task", "summary", "B7", "see B9").returncode, 2)
+
+    def test_a_week_without_an_answer_defers_and_comes_back_as_one_list(self):
+        """B31: what waits for the owner seven days with no answer goes to «deferred» with a note; the list of them
+        is one question; «bring them all back» puts each back to waiting and closes the list."""
+        self.to_store()
+        waiting = [r["id"] for r in self.rows("SELECT id FROM tasks WHERE state = 'waiting_you' ORDER BY id")]
+        self.assertTrue(waiting)
+        old = waiting[0]
+        conn = sqlite3.connect(self.db)
+        conn.execute("UPDATE tasks SET updated = '2026-01-01T10:00:00+03:00' WHERE id = ?", (old,))
+        conn.commit(); conn.close()
+        out = self.ok("task", "unanswered", "--list")
+        self.assertIn(f"no answer in 7 days: {old}", out)
+        self.assertEqual(self.state(old), "deferred")
+        self.assertTrue(all(self.state(x) == "waiting_you" for x in waiting[1:]))
+        self.assertIn("No answer in 7 days", self.rows("SELECT text FROM comments WHERE task = ? ORDER BY n DESC", old)[0]["text"])
+        [lst] = self.rows("SELECT id FROM tasks WHERE theme = 'unanswered'")
+        self.assertEqual(self.state(lst["id"]), "waiting_you")
+        self.assertIn("no list", self.ok("task", "unanswered", "--list"))   # nothing new since the last list
+        self.ok("task", "comment", lst["id"], "Bring them all back to answer", "--as", "Owner")
+        self.assertEqual(self.state(old), "waiting_you")
+        self.assertEqual(self.state(lst["id"]), "done")
 
     def test_the_weeks_main_task_goes_first_and_is_one_per_project(self):
         """`task focus` makes a task the project's main one this week: the one before stops being main, the
@@ -371,7 +393,10 @@ class StoreTasks(StoreProject):
         self.ok("task", "state", "B8", "waiting_others", "Hosting provider: the new server")
         self.assertIn("waiting for other people: Deploy script (B8)", self.ok("status"))
         self.assertEqual(self.run_ad("task", "state", "B8", "blocked").returncode, 2)
-        q = self.ok("task", "new", "Which font", "--question")
+        r = self.run_ad("task", "new", "Which font", "--question")   # no options: not filed
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("task ask", r.stderr)
+        q = self.ok("task", "new", "Which font", "--question", "--open")
         self.assertIn("Decide: Which font [Waits for you]", q)
         self.assertIn("Which font", self.ok("status"))
         r = self.run_ad("store", "import")

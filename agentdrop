@@ -5027,6 +5027,22 @@ def store_counts(records: list[dict]) -> str:
             f"{n(sum(len(r['after']) for r in records), '«after» link')}")
 
 
+UNANSWERED_DAYS = 7          # a task waiting for the owner this long with no answer goes to «deferred»
+UNANSWERED_THEME = "unanswered"   # the theme of the weekly list of them (one question for the owner)
+UNANSWERED_NOTE = ("No answer in {d} days: deferred. It comes back in the week's list; an answer or «queued» brings it "
+                   "back now.", "Не отвечен {d} дней: отложен. Придёт в недельном списке; ответ или «В очередь» "
+                   "вернёт его сейчас.")
+UNANSWERED_LIST = {
+    "title": ("Questions left unanswered this week ({n}, {day})", "Вопросы без ответа за неделю ({n}, {day})"),
+    "summary": ("Questions nobody answered in a week, deferred on their own: keep them there or bring them back",
+                "Вопросы без ответа неделю сами ушли в отложенные: оставить там или вернуть"),
+    "q": ("{n} questions went a week without an answer: what to do with them?",
+          "{n} вопросов неделю без ответа: что с ними?"),
+    "context": ("They were deferred on their own after seven days; the list is in the details",
+                "Ушли в отложенные сами через семь дней; список в подробностях"),
+    "options": (("Keep them deferred", "Bring them all back to answer"),
+                ("Оставить отложенными", "Вернуть все на главную")),
+}
 TODO_HEAD = {True: "# TODO — тикеты\n\n> Файл печатает agentdrop из базы задач (`agentdrop store print`), заново каждую ночь. "
                    "Не править: правка пропадёт при следующей печати. Задачи: `agentdrop task take|show|comment|new`.\n",
              False: "# TODO — tickets\n\n> agentdrop prints this file from the task store (`agentdrop store print`) "
@@ -5584,6 +5600,14 @@ class StoreTasks:
                 judge = r["ask"] if r["ask"] and r["ask"].get("kind") == "accept" else None
                 # the answer to the judge's two rejects: «accept as it is» is done, «rewrite» is the agent's move
                 done = judge is not None and ask_choice(judge, text) == 0
+                week = r["ask"] if r["ask"] and r["ask"].get("kind") == "unanswered" else None
+                pick = ask_choice(week, text) if week else None
+                if pick in (0, 1):   # the week's unanswered list: keep them deferred, or all back to waiting
+                    for x in week.get("tasks") or [] if pick == 1 else []:
+                        t = self._one(conn, x)
+                        if t is not None and t["state"] == "deferred":
+                            self._state(conn, t, "waiting_you", event_author or author, t["waits"])
+                    done = True
                 self._state(conn, r, "done" if done else "queued", event_author or author, "")
         return self.record(r["id"])
 
@@ -5598,6 +5622,57 @@ class StoreTasks:
             self._comment(conn, r["id"], author, text, event_author=event_author, ask=ask)
             self._state(conn, r, "waiting_you", event_author or author, clip(ask["q"], 110))
         return self.record(r["id"])
+
+    def shelve_unanswered(self, author: str, days: int = UNANSWERED_DAYS, now: dt.datetime | None = None) -> list[str]:
+        """Tasks that have waited for the owner `days` days or more with no answer go to «deferred» with a note in
+        the thread (and a «shelved» event); the ids moved."""
+        now = now or dt.datetime.now().astimezone()
+        conn = store_open()
+        try:
+            since = {}   # when each task last began to wait for the owner
+            for task, at, detail in conn.execute("SELECT task, at, detail FROM events WHERE project = ? AND what = 'state' "
+                                                 "ORDER BY id", (self.project,)):
+                st = (json.loads(detail or "{}").get("state") or [None])[-1]
+                if st == "waiting_you":
+                    since[task] = at
+            rows = conn.execute("SELECT id, updated FROM tasks WHERE project = ? AND state = 'waiting_you' "
+                                "AND theme != ?", (self.project, UNANSWERED_THEME)).fetchall()
+        finally:
+            conn.close()
+        ru, out = self.russian(), []
+        for tid, updated in rows:
+            at = dt.datetime.fromisoformat(since.get(tid) or updated)
+            if (now - at).days >= days:
+                self.set_state(tid, "deferred", author, UNANSWERED_NOTE[ru].format(d=days))
+                self.journal(tid, author, "shelved", {"days": days})
+                out.append(tid)
+        return out
+
+    def unanswered_list(self, author: str, now: dt.datetime | None = None) -> dict | None:
+        """The tasks shelved since the last such list, as one question for the owner: keep them deferred, or all
+        back to waiting (their answer acts at once, `add_comment`); None when none was shelved."""
+        now = now or dt.datetime.now().astimezone()
+        conn = store_open()
+        try:
+            last = conn.execute("SELECT max(e.at) FROM events e JOIN tasks t ON t.project = e.project AND t.id = e.task "
+                                "WHERE e.project = ? AND e.what = 'created' AND t.theme = ?",
+                                (self.project, UNANSWERED_THEME)).fetchone()[0] or ""
+            ids = list(dict.fromkeys(x[0] for x in conn.execute(
+                "SELECT task FROM events WHERE project = ? AND what = 'shelved' AND at > ? ORDER BY id", (self.project, last))))
+        finally:
+            conn.close()
+        recs = [r for r in (self.record(x) for x in ids) if r and r["state"] == "deferred"]
+        if not recs:
+            return None
+        ru = self.russian()
+        W = lambda k: UNANSWERED_LIST[k][ru]
+        q = self.new(W("title").format(n=len(recs), day=now.strftime("%d.%m")), author, kind="question",
+                     theme=UNANSWERED_THEME, summary=W("summary"))
+        ask, _ = ask_parts(self.root, W("q").format(n=len(recs)), list(W("options")), "1", ru=ru, context=W("context"),
+                           no_design=True,
+                           details="\n".join(f"- {r['title']} ({r['id']})" for r in recs))
+        ask.update(kind="unanswered", tasks=[r["id"] for r in recs])
+        return self.ask(q["id"], author, ask)
 
     def handin(self, tid: str, author: str, note: str = "", event_author: str | None = None) -> dict:
         with self._write() as conn:
@@ -5862,7 +5937,14 @@ def cmd_task(argv: list[str]) -> int:
     sp.add_argument("--mode", default="", choices=["", "auto", "human"], help="auto: an unattended run may do it; "
                                                                              "human: only with the owner")
     sp.add_argument("--after", action="append", default=[], help="A task it waits for (repeatable)")
-    sp.add_argument("--question", action="store_true", help="A question for the owner, not a ticket")
+    sp.add_argument("--question", action="store_true", help="A question for the owner, not a ticket; it needs --open "
+                                                             "(better: file a task and `task ask` under it, with options)")
+    sp.add_argument("--open", action="store_true", help="With --question: a question without options, on purpose")
+    sp = sub.add_parser("unanswered", parents=[common], help="Tasks waiting for the owner N days with no answer go to "
+                                                             "«deferred»; --list files the ones deferred since the last "
+                                                             "list as one question (the panel runs both)")
+    sp.add_argument("--days", type=int, default=UNANSWERED_DAYS)
+    sp.add_argument("--list", action="store_true", help="Also file the list of the ones deferred since the last list")
     a = p.parse_args(argv)
     root, cfg = find_root(Path(a.root)), load_config()
     src = tasks_of(root, cfg)
@@ -5890,6 +5972,11 @@ def cmd_task(argv: list[str]) -> int:
             placed = src.ask(a.task, ask)
             print(f"✓ QUESTIONS.md: {placed['key'].strip('*')} [{STATE_NAMES['waiting_you'][src.russian()]}]")
             return 0
+    if a.action == "new" and a.question and not a.open:
+        print("agentdrop task new --question: a question without options is not filed. File the task and ask under it "
+              "with options: `agentdrop task new \"<title>\" --summary \"…\"`, then `agentdrop task ask <id> \"<question>\" "
+              "--context \"…\" --option \"…\" --option \"…\" --pick 1`; --open if it truly has no options", file=sys.stderr)
+        return 2
     if a.action in ("new", "summary") and (a.action == "summary" or not a.question):   # the same check everywhere
         bad = summary_problems(a.summary if a.action == "new" else a.text)
         if bad:
@@ -5962,6 +6049,13 @@ def cmd_task(argv: list[str]) -> int:
             t = src.set_summary(a.task, a.text, author)
         elif a.action == "focus":
             t = src.set_focus(a.task, not a.off, author)
+        elif a.action == "unanswered":
+            moved = src.shelve_unanswered(author, a.days)
+            print(f"deferred, no answer in {a.days} days: {', '.join(moved) or 'none'}")
+            if a.list:
+                q = src.unanswered_list(author)
+                print(f"✓ {q['id']}: {q['title']}" if q else "no list: nothing deferred since the last one")
+            return 0
         elif a.action == "comment":
             t = src.add_comment(a.task, who, a.text, event_author=author)
         else:
