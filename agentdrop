@@ -166,6 +166,7 @@ DEFAULT_COMMON = """# Working rules
 - Inspect the existing system first; reuse its tools, conventions and dependencies, or a mature open-source solution, before building custom.
 - Smallest complete solution: no speculative refactors, premature abstractions or hypothetical requirements.
 - Find the cause before fixing; preserve working behavior unless the task requires changing it.
+- Before deploying, check that the live build is an ancestor of what you deploy: a deploy from a stale branch silently rolls back someone else's work.
 
 <!-- AGENTDROP:TOOL-EFFICIENCY:START -->
 ## Tool efficiency
